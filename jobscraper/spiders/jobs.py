@@ -13,6 +13,7 @@ from jobscraper.agent_reach import (
     dice_description_from_html,
     dice_detail_url,
     dice_search_urls,
+    linkedin_board_from_html,
     linkedin_description_from_html,
     smartrecruiters_description,
     yc_description_from_html,
@@ -927,8 +928,9 @@ class JobsSpider(scrapy.Spider):
         )
 
     def parse_linkedin_detail(self, response, job):
-        description = "" if is_antibot(response.text) else linkedin_description_from_html(response.text)
-        source = dict(job)
+        blocked = is_antibot(response.text)
+        description = "" if blocked else linkedin_description_from_html(response.text)
+        source = {} if blocked else linkedin_board_from_html(response.text)
         if description:
             source["jobDescription"] = description
         yield from self._emit(

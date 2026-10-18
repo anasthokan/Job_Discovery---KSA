@@ -377,6 +377,64 @@ def _inner_html(page: str, start_tag_at: int) -> str:
     return ""
 
 
+_LINKEDIN_CRITERIA_RE = re.compile(
+    r'description__job-criteria-subheader">\s*([^<]+?)\s*</h3>\s*'
+    r'<span[^>]*>\s*([^<]+?)\s*</span>',
+    re.S | re.I,
+)
+
+
+def _plain_piece(value: str) -> str:
+    return re.sub(r"\s+", " ", html.unescape(value or "")).strip()
+
+
+def _camel_label(label: str) -> str:
+    words = re.sub(r"[^a-z0-9]+", " ", (label or "").lower()).split()
+    if not words:
+        return ""
+    return words[0] + "".join(part.capitalize() for part in words[1:])
+
+
+def linkedin_board_from_html(page: str) -> dict:
+    """Structured fields on the LinkedIn guest page, not our job columns."""
+    text = page or ""
+    board: dict = {}
+    logo = re.search(
+        r'data-delayed-url="(https://media\.licdn\.com/[^"]*company-logo[^"]*)"',
+        text,
+        re.I,
+    )
+    if logo:
+        board["companyLogo"] = html.unescape(logo.group(1))
+    company = re.search(
+        r'class="topcard__org-name-link[^"]*"[^>]*href="([^"]+)"[^>]*>\s*([^<]+?)\s*</a>',
+        text,
+        re.S | re.I,
+    )
+    if company:
+        link = html.unescape(company.group(1)).split("?")[0].strip()
+        name = _plain_piece(company.group(2))
+        if link:
+            board["companyUrl"] = link
+        if name:
+            board["companyName"] = name
+    applicants = re.search(
+        r'class="num-applicants__caption">\s*([^<]+?)\s*</figcaption>',
+        text,
+        re.S | re.I,
+    )
+    if applicants:
+        caption = _plain_piece(applicants.group(1))
+        if caption:
+            board["applicants"] = caption
+    for label, value in _LINKEDIN_CRITERIA_RE.findall(text):
+        key = _camel_label(label)
+        piece = _plain_piece(value)
+        if key and piece:
+            board[key] = piece
+    return board
+
+
 def linkedin_description_from_html(page: str) -> str:
     match = re.search(
         r'<div[^>]*class="[^"]*show-more-less-html__markup[^"]*"[^>]*>',
