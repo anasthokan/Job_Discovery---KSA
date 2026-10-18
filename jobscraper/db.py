@@ -779,45 +779,6 @@ def source_extras(value) -> dict:
     return extra
 
 
-def source_payload(value) -> dict:
-    """Scrape response saved in raw_description, including fields we also store as columns."""
-    if isinstance(value, str):
-        text = value.strip()
-        if not text or text in {"{}", "[]", "null"}:
-            return {}
-        if text[:1] in "{[":
-            try:
-                parsed = json.loads(text)
-            except json.JSONDecodeError:
-                return {"text": text[:500000]}
-            return source_payload(parsed)
-        return {"text": text[:500000]}
-    if isinstance(value, list):
-        items = [item for item in (_json_ready(item) for item in value) if not _is_empty_source_value(item)]
-        return {"items": items} if items else {}
-    if not isinstance(value, dict):
-        if _is_empty_source_value(value):
-            return {}
-        ready = _json_ready(value)
-        return {} if _is_empty_source_value(ready) else {"value": ready}
-    if _is_copied_api_job(value):
-        return {}
-    payload = {}
-    for key, item in _json_ready(value).items():
-        if _is_empty_source_value(item):
-            continue
-        payload[str(key)] = item
-    return payload
-
-
-def source_payload_json(value) -> str:
-    """JSON text of the scrape response. Empty object when there is nothing to store."""
-    try:
-        return json.dumps(source_payload(value), ensure_ascii=False)[:500000]
-    except (TypeError, ValueError):
-        return "{}"
-
-
 def source_extras_json(value) -> str:
     """JSON object of scraped fields outside our columns. Empty object when there are none."""
     try:
@@ -827,11 +788,11 @@ def source_extras_json(value) -> str:
 
 
 def _raw_description_json(job: dict) -> str:
-    """JSON text saved in jobs.raw_description. This is the scrape response."""
+    """Scrape fields that are not already our job columns."""
     raw = job.get("raw")
     if raw is None or raw == "":
         raw = job.get("raw_description")
-    return source_payload_json(raw)
+    return source_extras_json(raw)
 
 
 def _years_value(value) -> int | None:
@@ -1011,10 +972,10 @@ def _as_e_verified(value) -> str:
 
 
 def _parse_raw_description(value):
-    """Scrape response object. A copy of our own jobs API row is {}."""
+    """Always an object of scrape fields that are not our columns."""
     if isinstance(value, (bytes, bytearray)):
         value = value.decode("utf-8", "ignore")
-    return source_payload(value)
+    return source_extras(value)
 
 
 def _job_payload(row: dict, *, include_raw: bool) -> dict:

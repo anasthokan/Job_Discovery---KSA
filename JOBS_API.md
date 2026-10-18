@@ -307,7 +307,7 @@ HTTP `200`:
 
 `job_id` is the numeric `jobs.id` primary key. Use that in the app. `id` stays the board source id (`remotive-1680495`). `/api/cv/from-job` accepts that source id or this numeric id.
 
-`raw_description` is always an object. It is the JSON captured while scraping that job, including fields such as `title`, `company`, `url`, and `jobDescription` when the board sent them. `{}` means no source payload was stored. `/api/jobs` loads it for the current page only, up to 200 jobs.
+`raw_description` is always an object. It holds the scraped fields that are not already saved in our columns (`title`, `company`, `description`, `url`, and the other listing fields). Board fields such as `summary`, `companyName`, `salary`, and `categories` stay here. `{}` means the board sent nothing beyond those columns. `/api/jobs` loads it for the current page only, up to 200 jobs.
 
 Missing fields may be `null` or `[]`. `url` is the apply / posting link. `daysAgo` is a label such as `just now`, `2 min ago`, `1 hour ago`, `7 days ago`, or `1 month ago`. Show that string as-is. The `days` query still filters by whole days.
 

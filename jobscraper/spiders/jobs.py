@@ -55,10 +55,10 @@ SYNONYMS = {
 
 
 def _source_json(value) -> str:
-    """Scrape response saved in jobs.raw_description."""
-    from jobscraper.db import source_payload_json
+    """Scrape fields that are not already our job columns, saved in jobs.raw_description."""
+    from jobscraper.db import source_extras_json
 
-    return source_payload_json(value)
+    return source_extras_json(value)
 
 
 def _feed_item_raw(item) -> dict:
