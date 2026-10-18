@@ -162,12 +162,15 @@ ON DUPLICATE KEY UPDATE
     {JOBS_TABLE}.description
   ),
   raw_description = IF(
-    CHAR_LENGTH(new.raw_description) > 2,
-    new.raw_description,
+    JSON_VALID(new.raw_description)
+      AND JSON_VALID({JOBS_TABLE}.raw_description)
+      AND CHAR_LENGTH({JOBS_TABLE}.raw_description) > 2
+      AND CHAR_LENGTH(new.raw_description) > 2,
+    JSON_MERGE_PATCH({JOBS_TABLE}.raw_description, new.raw_description),
     IF(
-      CHAR_LENGTH({JOBS_TABLE}.raw_description) > 2,
-      {JOBS_TABLE}.raw_description,
-      IF(CHAR_LENGTH(new.raw_description) > 0, new.raw_description, '{{}}')
+      CHAR_LENGTH(new.raw_description) > 2,
+      new.raw_description,
+      IF(CHAR_LENGTH({JOBS_TABLE}.raw_description) > 2, {JOBS_TABLE}.raw_description, '{{}}')
     )
   ),
   posted_at = new.posted_at,
@@ -581,10 +584,13 @@ def _fill_short_dice_descriptions() -> None:
                 cur.execute(
                     f"UPDATE {JOBS_TABLE} SET description = %s, "
                     f"raw_description = IF("
-                    f"CHAR_LENGTH(raw_description) = 0 OR CAST(raw_description AS CHAR) LIKE %s, "
-                    f"%s, raw_description) "
+                    f"JSON_VALID(raw_description) AND CHAR_LENGTH(raw_description) > 2 "
+                    f"AND CAST(raw_description AS CHAR) NOT LIKE %s, "
+                    f"JSON_MERGE_PATCH(raw_description, %s), "
+                    f"IF(CHAR_LENGTH(raw_description) > 2 AND CAST(raw_description AS CHAR) NOT LIKE %s, "
+                    f"raw_description, %s)) "
                     f"WHERE id = %s AND CHAR_LENGTH(description) < CHAR_LENGTH(%s)",
-                    (text, '%"api_id"%', payload, row["id"], text),
+                    (text, '%"api_id"%', payload, '%"api_id"%', payload, row["id"], text),
                 )
             filled += 1
         except Exception:
@@ -773,6 +779,45 @@ def source_extras(value) -> dict:
     return extra
 
 
+def source_payload(value) -> dict:
+    """Scrape response saved in raw_description, including fields we also store as columns."""
+    if isinstance(value, str):
+        text = value.strip()
+        if not text or text in {"{}", "[]", "null"}:
+            return {}
+        if text[:1] in "{[":
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                return {"text": text[:500000]}
+            return source_payload(parsed)
+        return {"text": text[:500000]}
+    if isinstance(value, list):
+        items = [item for item in (_json_ready(item) for item in value) if not _is_empty_source_value(item)]
+        return {"items": items} if items else {}
+    if not isinstance(value, dict):
+        if _is_empty_source_value(value):
+            return {}
+        ready = _json_ready(value)
+        return {} if _is_empty_source_value(ready) else {"value": ready}
+    if _is_copied_api_job(value):
+        return {}
+    payload = {}
+    for key, item in _json_ready(value).items():
+        if _is_empty_source_value(item):
+            continue
+        payload[str(key)] = item
+    return payload
+
+
+def source_payload_json(value) -> str:
+    """JSON text of the scrape response. Empty object when there is nothing to store."""
+    try:
+        return json.dumps(source_payload(value), ensure_ascii=False)[:500000]
+    except (TypeError, ValueError):
+        return "{}"
+
+
 def source_extras_json(value) -> str:
     """JSON object of scraped fields outside our columns. Empty object when there are none."""
     try:
@@ -782,11 +827,11 @@ def source_extras_json(value) -> str:
 
 
 def _raw_description_json(job: dict) -> str:
-    """JSON text saved in jobs.raw_description. Our own columns are left out."""
+    """JSON text saved in jobs.raw_description. This is the scrape response."""
     raw = job.get("raw")
     if raw is None or raw == "":
         raw = job.get("raw_description")
-    return source_extras_json(raw)
+    return source_payload_json(raw)
 
 
 def _years_value(value) -> int | None:
@@ -966,10 +1011,10 @@ def _as_e_verified(value) -> str:
 
 
 def _parse_raw_description(value):
-    """Always an object. Our columns are removed; missing source data is {}."""
+    """Scrape response object. A copy of our own jobs API row is {}."""
     if isinstance(value, (bytes, bytearray)):
         value = value.decode("utf-8", "ignore")
-    return source_extras(value)
+    return source_payload(value)
 
 
 def _job_payload(row: dict, *, include_raw: bool) -> dict:
