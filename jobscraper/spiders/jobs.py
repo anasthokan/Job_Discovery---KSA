@@ -11,6 +11,7 @@ from jobscraper.agent_reach import (
     DICE_HEADERS,
     JINA_HEADERS,
     dice_description_from_html,
+    dice_detail_url,
     dice_search_urls,
     linkedin_description_from_html,
     smartrecruiters_description,
@@ -486,7 +487,7 @@ class JobsSpider(scrapy.Spider):
             item[key] = value
         description = strip_html(extra)
         if description:
-            item["description"] = description[:60000]
+            item["description"] = description
         item["raw_description"] = _source_json(raw)
         inferred = infer_listing_fields(
             title=fields.get("title") or "",
@@ -874,7 +875,7 @@ class JobsSpider(scrapy.Spider):
             return
         for job in parse_dice_search_html(response.text):
             yield scrapy.Request(
-                job["url"],
+                dice_detail_url(job["url"]),
                 callback=self.parse_dice_detail,
                 errback=self.errback_dice,
                 headers=DICE_HEADERS,

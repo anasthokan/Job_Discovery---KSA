@@ -243,7 +243,7 @@ def posting_paragraph(text: str, title: str = "") -> str:
         return ""
     if heading and body.lower() == heading.lower():
         return ""
-    return body[:60000]
+    return body
 
 
 def parse_dice_search_html(page: str) -> list[dict]:
@@ -303,6 +303,18 @@ def parse_dice_search_html(page: str) -> list[dict]:
     return jobs
 
 
+def dice_detail_url(url: str) -> str:
+    """Dice job-detail page. direct-apply links are a shell and only carry a short summary."""
+    match = re.search(
+        r"dice\.com/(?:job-detail|direct-apply)/([0-9a-f-]{16,})",
+        url or "",
+        re.I,
+    )
+    if not match:
+        return (url or "").strip()
+    return f"https://www.dice.com/job-detail/{match.group(1)}"
+
+
 def dice_description_from_html(page: str) -> str:
     """Full posting body from a Dice job detail page."""
     marker = "jobDescription\">"
@@ -330,15 +342,50 @@ def dice_description_from_html(page: str) -> str:
     return ""
 
 
+def _inner_html(page: str, start_tag_at: int) -> str:
+    """Inner HTML of the element that starts at start_tag_at, including nested tags."""
+    text = page or ""
+    tag_match = re.match(r"<\s*([A-Za-z0-9]+)", text[start_tag_at:])
+    if not tag_match:
+        return ""
+    tag = tag_match.group(1).lower()
+    open_end = text.find(">", start_tag_at)
+    if open_end < 0:
+        return ""
+    opener = text[start_tag_at : open_end + 1]
+    if opener.rstrip().endswith("/>"):
+        return ""
+    depth = 1
+    index = open_end + 1
+    open_tag = re.compile(rf"<{tag}\b", re.I)
+    close = f"</{tag}"
+    while index < len(text) and depth:
+        next_open = open_tag.search(text, index)
+        next_close = text.lower().find(close, index)
+        if next_close < 0:
+            return text[open_end + 1 :]
+        if next_open and next_open.start() < next_close:
+            depth += 1
+            index = text.find(">", next_open.end())
+            index = len(text) if index < 0 else index + 1
+            continue
+        depth -= 1
+        if depth == 0:
+            return text[open_end + 1 : next_close]
+        index = text.find(">", next_close)
+        index = len(text) if index < 0 else index + 1
+    return ""
+
+
 def linkedin_description_from_html(page: str) -> str:
     match = re.search(
-        r'class="show-more-less-html__markup[^"]*"[^>]*>(.*?)</div>',
+        r'<div[^>]*class="[^"]*show-more-less-html__markup[^"]*"[^>]*>',
         page or "",
-        re.S,
+        re.I,
     )
     if not match:
         return ""
-    plain = re.sub(r"<[^>]+>", " ", match.group(1))
+    plain = re.sub(r"<[^>]+>", " ", _inner_html(page, match.start()))
     return posting_paragraph(plain)
 
 
@@ -379,6 +426,8 @@ def fetch_posting_paragraph(platform: str, url: str) -> str:
         return ""
     name = platform or ""
     headers = dict(DICE_HEADERS)
+    if name == "Dice":
+        target = dice_detail_url(target)
     if name == "LinkedIn":
         match = re.search(r"(\d{6,})", target)
         if not match:

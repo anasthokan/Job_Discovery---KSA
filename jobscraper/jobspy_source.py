@@ -87,7 +87,7 @@ def rows_to_jobs(records: list[dict]) -> list[dict]:
                 "url": str(url).strip(),
                 "posted_at": _posted(row.get("date_posted")),
                 "job_type": _blank(row.get("job_type")),
-                "search_text": str(description)[:60000],
+                "search_text": str(description),
                 "raw": row,
             }
         )

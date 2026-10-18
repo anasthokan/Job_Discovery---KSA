@@ -325,6 +325,23 @@ def _ensure_job_columns(cur) -> None:
         cur.execute(f"SHOW COLUMNS FROM {JOBS_TABLE} LIKE '{name}'")
         if not cur.fetchone():
             cur.execute(f"ALTER TABLE {JOBS_TABLE} ADD COLUMN {name} {ddl}")
+    cur.execute(f"SHOW COLUMNS FROM {JOBS_TABLE} LIKE 'description'")
+    description_column = cur.fetchone()
+    description_type = ""
+    if description_column:
+        for key, value in description_column.items():
+            if str(key).lower() == "type":
+                description_type = str(value or "").lower()
+                break
+    if not description_column:
+        cur.execute(
+            f"ALTER TABLE {JOBS_TABLE} "
+            "ADD COLUMN description LONGTEXT NOT NULL DEFAULT ('')"
+        )
+    elif not description_type.startswith("longtext"):
+        cur.execute(
+            f"ALTER TABLE {JOBS_TABLE} MODIFY COLUMN description LONGTEXT NOT NULL"
+        )
     cur.execute(f"SHOW COLUMNS FROM {JOBS_TABLE} LIKE 'raw_description'")
     raw_column = cur.fetchone()
     if not raw_column:
@@ -788,7 +805,7 @@ def _row_from_item(job: dict) -> dict | None:
     if not source_id or not title or not company:
         return None
     skills = _as_skills_json(job.get("skills"))
-    description = str(job.get("description") or job.get("search_text") or "").strip()[:60000]
+    description = str(job.get("description") or job.get("search_text") or "").strip()
     try:
         days_ago = int(job.get("daysAgo") or 0)
     except (TypeError, ValueError):
@@ -993,6 +1010,53 @@ def _job_from_row(row: dict) -> dict:
     return _job_payload(row, include_raw=True)
 
 
+def attach_descriptions(jobs: list[dict]) -> None:
+    """Replace any shortened description with the full text stored in MySQL."""
+    ids = []
+    seen = set()
+    for job in jobs:
+        try:
+            job_id = int(job["job_id"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if job_id not in seen:
+            seen.add(job_id)
+            ids.append(job_id)
+    found = _descriptions_by_id(ids)
+    for job in jobs:
+        try:
+            job_id = int(job["job_id"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if job_id in found:
+            job["description"] = found[job_id]
+
+
+def _descriptions_by_id(ids: list[int]) -> dict[int, str]:
+    if not ids or not mysql_configured():
+        return {}
+    found: dict[int, str] = {}
+    conn = get_conn()
+    if conn is None:
+        return {}
+    try:
+        with conn.cursor() as cur:
+            for start in range(0, len(ids), 50):
+                chunk = ids[start : start + 50]
+                slots = ", ".join(["%s"] * len(chunk))
+                cur.execute(
+                    f"SELECT id, description FROM {JOBS_TABLE} WHERE id IN ({slots})",
+                    chunk,
+                )
+                for row in cur.fetchall() or []:
+                    found[int(row["id"])] = str(row.get("description") or "")
+        return found
+    except Exception:
+        close_conn()
+        log.exception("description lookup failed")
+        return found
+
+
 def attach_raw_descriptions(jobs: list[dict]) -> None:
     """Fill raw_description from MySQL for these rows only."""
     ids: list[int] = []
@@ -1052,7 +1116,8 @@ def load_jobs() -> list[dict]:
             return []
         with conn.cursor() as cur:
             # raw_description stays off this query. It is a LONGTEXT, and loading it
-            # for every row stalls MySQL. The jobs API fills it for the current page.
+            # for every row stalls MySQL. Description here is only a short preview;
+            # the jobs API replaces it with the full column for the rows it returns.
             cur.execute(
                 f"SELECT id AS api_id, "
                 f"COALESCE(NULLIF(source_id, ''), public_id, CAST(id AS CHAR)) AS id, "

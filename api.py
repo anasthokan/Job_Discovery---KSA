@@ -74,6 +74,7 @@ from jobscraper.db import (
     last_scrape_meta,
     load_app_user,
     load_candidate as load_candidate_mysql,
+    attach_descriptions,
     attach_raw_descriptions,
     load_jobs as load_jobs_mysql,
     mysql_configured,
@@ -603,6 +604,7 @@ def _with_time_ago(jobs: list[dict]) -> list[dict]:
             fallback = 0
         row["daysAgo"] = format_time_ago(job.get("posted_at"), fallback)
         presented.append(row)
+    attach_descriptions(presented)
     if len(presented) <= 200:
         attach_raw_descriptions(presented)
     return presented
