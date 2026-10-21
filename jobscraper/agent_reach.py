@@ -187,7 +187,7 @@ def parse_linkedin_markdown(text: str) -> list[dict]:
             continue
         seen.add(ident)
         company = "Unknown"
-        location = "United States"
+        location = "Saudi Arabia"
         posted = ""
         window = lines[index + 1 : index + 14]
         for offset, nxt in enumerate(window):
@@ -214,10 +214,10 @@ def parse_linkedin_markdown(text: str) -> list[dict]:
                         loc_part,
                         flags=re.I,
                     ).strip(" -•|")
-                    if loc_part and location == "United States":
+                    if loc_part and location == "Saudi Arabia":
                         location = loc_part
                     continue
-                if location == "United States":
+                if location == "Saudi Arabia":
                     location = extra
             break
         jobs.append(
@@ -292,7 +292,7 @@ def parse_dice_search_html(page: str) -> list[dict]:
                 "id": f"dice-{guid or url}",
                 "title": title,
                 "company": str(row.get("companyName") or "Unknown").strip() or "Unknown",
-                "location": location or "United States",
+                "location": location or "Saudi Arabia",
                 "url": url,
                 "posted_at": str(row.get("postedDate") or ""),
                 "summary": str(row.get("summary") or ""),
@@ -532,7 +532,7 @@ def parse_dice_markdown(text: str) -> list[dict]:
             continue
         seen.add(url)
         company = "Unknown"
-        location = "United States"
+        location = "Saudi Arabia"
         posted = ""
         for nxt in lines[index + 1 : index + 8]:
             company_match = DICE_COMPANY_RE.search(nxt)
@@ -603,7 +603,7 @@ def parse_yc_markdown(text: str) -> list[dict]:
             pending_role = ""
             continue
         seen.add(job_id)
-        location = pending_role or "United States"
+        location = pending_role or "Saudi Arabia"
         location = re.sub(r"\$[\d.,KMkm\s\-–]+.*$", "", location).strip()
         for role_name in YC_ROLE_TYPES:
             idx = location.lower().find(role_name)
@@ -615,7 +615,7 @@ def parse_yc_markdown(text: str) -> list[dict]:
                 "id": f"yc-{job_id}",
                 "title": _yc_title(pending_role),
                 "company": pending_company,
-                "location": location or "United States",
+                "location": location or "Saudi Arabia",
                 "url": f"https://www.workatastartup.com/jobs/{job_id}",
                 "posted_at": "",
                 "daysAgo": 0,

@@ -8,7 +8,7 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
-from jobscraper.locations import ABBREV_TO_STATE, STATE_ABBREV, matches_city_filter, matches_state_filter
+from jobscraper.locations import matches_city_filter, matches_state_filter, region_name
 from jobscraper.recommend import normalize_skills
 from jobscraper.resume_parser import SKILL_CANONICAL, SKILL_PATTERN
 
@@ -45,12 +45,7 @@ def yn(value) -> str:
 
 
 def canonical_state(value: str) -> str:
-    text = str(value or "").strip()
-    if not text or text.lower() == "all":
-        return ""
-    if text in STATE_ABBREV:
-        return text
-    return ABBREV_TO_STATE.get(text.upper(), "")
+    return region_name(value)
 
 
 def _clip(value, limit: int) -> str:
@@ -194,9 +189,9 @@ def filter_jobs_for_candidate(jobs: list[dict], profile: dict, *, state: str = "
     kept = []
     for job in jobs:
         if needs_sponsor:
-            if (job.get("h1b_sponsorship") or "unknown") == "no":
+            if (job.get("visa_sponsorship") or "unknown") == "no":
                 continue
-            if (job.get("us_citizen_required") or "no") == "yes":
+            if (job.get("saudi_national_required") or "no") == "yes":
                 continue
         if years is not None:
             required = job.get("years_experience")

@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Job Discovery Dashboard</title>
+  <title>KSA Job Discovery</title>
   <style>
     :root {
       --primary: #2563eb;
@@ -412,8 +412,8 @@
 
   <div class="container">
     <header>
-      <h1>Job Discovery Dashboard</h1>
-      <p>USA jobs from public APIs, company boards, LinkedIn, Dice, and JobSpy (Indeed, Glassdoor, ZipRecruiter, Google Jobs).</p>
+      <h1>KSA Job Discovery</h1>
+      <p>Saudi Arabia jobs from Indeed, LinkedIn, Bayt, and Google Jobs. Listings are saved in the ksajob database.</p>
     </header>
 
     <section class="filter-card">
@@ -426,25 +426,23 @@
 
       <div class="filter-grid">
         <div class="filter-group">
-          <label for="stateFilter">Location (State)</label>
+          <label for="stateFilter">Region</label>
           <select id="stateFilter">
-            <option value="All">All States</option>
+            <option value="All">All regions</option>
             <option value="Remote">Remote</option>
-            <option value="California">California</option>
-            <option value="Washington">Washington</option>
-            <option value="Oregon">Oregon</option>
-            <option value="New York">New York</option>
-            <option value="Texas">Texas</option>
-            <option value="Massachusetts">Massachusetts</option>
-            <option value="Colorado">Colorado</option>
-            <option value="Illinois">Illinois</option>
-            <option value="Georgia">Georgia</option>
-            <option value="Florida">Florida</option>
-            <option value="Arizona">Arizona</option>
-            <option value="North Carolina">North Carolina</option>
-            <option value="Virginia">Virginia</option>
-            <option value="Utah">Utah</option>
-            <option value="District of Columbia">District of Columbia</option>
+            <option value="Riyadh">Riyadh</option>
+            <option value="Makkah">Makkah</option>
+            <option value="Madinah">Madinah</option>
+            <option value="Eastern Province">Eastern Province</option>
+            <option value="Qassim">Qassim</option>
+            <option value="Asir">Asir</option>
+            <option value="Tabuk">Tabuk</option>
+            <option value="Hail">Hail</option>
+            <option value="Northern Borders">Northern Borders</option>
+            <option value="Jazan">Jazan</option>
+            <option value="Najran">Najran</option>
+            <option value="Al Bahah">Al Bahah</option>
+            <option value="Al Jawf">Al Jawf</option>
           </select>
         </div>
 
@@ -452,27 +450,10 @@
           <label for="platformFilter">Job Board</label>
           <select id="platformFilter">
             <option value="All">All Platforms</option>
-            <option value="RemoteOK">RemoteOK</option>
-            <option value="Remotive">Remotive</option>
-            <option value="Jobicy">Jobicy</option>
-            <option value="The Muse">The Muse</option>
-            <option value="Arbeitnow">Arbeitnow</option>
-            <option value="Himalayas">Himalayas</option>
-            <option value="We Work Remotely">We Work Remotely</option>
-            <option value="Remote.co">Remote.co</option>
-            <option value="Greenhouse">Greenhouse</option>
-            <option value="Lever">Lever</option>
-            <option value="Ashby">Ashby</option>
-            <option value="SmartRecruiters">SmartRecruiters</option>
-            <option value="Workable">Workable</option>
-            <option value="LinkedIn">LinkedIn</option>
             <option value="Indeed">Indeed</option>
-            <option value="Glassdoor">Glassdoor</option>
-            <option value="ZipRecruiter">ZipRecruiter</option>
+            <option value="LinkedIn">LinkedIn</option>
+            <option value="Bayt">Bayt</option>
             <option value="Google Jobs">Google Jobs</option>
-            <option value="Dice">Dice</option>
-            <option value="Y Combinator">Y Combinator</option>
-            <option value="Hacker News">Hacker News</option>
           </select>
         </div>
 
@@ -488,7 +469,7 @@
       </div>
 
       <div class="search-row">
-        <span class="status-text" id="statusText">Add a keyword and click Search Jobs — only USA states / Remote will show.</span>
+        <span class="status-text" id="statusText">Add a keyword and click Search Jobs. Results are Saudi Arabia listings.</span>
         <button class="search-btn" id="searchBtn" type="button">Search Jobs</button>
       </div>
     </section>
@@ -626,9 +607,21 @@
         await new Promise((resolve) => setTimeout(resolve, 5000));
         const res = await fetch("/api/scrape/status");
         const data = await res.json();
-        if (!data.running) return data.last_scrape || { ok: false, error: "Scrape finished with no status" };
+        if (!data.running) return data;
       }
-      return { ok: false, error: "Scrape is still running. Check /api/scrape/status." };
+      return { running: true, last_scrape: { ok: false, error: "Scrape is still running. Check /api/scrape/status." } };
+    }
+
+    async function loadSaved() {
+      const res = await fetch(`/api/jobs?${queryParams()}`);
+      const payload = await res.json();
+      if (!res.ok) throw new Error(payload.detail || "Jobs list failed");
+      jobs = payload.jobs || [];
+      currentPage = 1;
+      applyFilters(false);
+      const where = payload.source === "mysql" ? "ksajob database" : "the last scrape file. MySQL is not connected, so nothing is in the database yet";
+      setStatus(`${payload.total ?? jobs.length} jobs from ${where}.`);
+      return payload;
     }
 
     async function searchJobs() {
@@ -645,20 +638,17 @@
         if (data.started) {
           setStatus("Scrape is running. This can take several minutes.");
           const done = await waitForScrape();
-          if (!done.ok) throw new Error(done.error || "Scrape failed");
-          const listed = await fetch(`/api/jobs?${queryParams()}`);
-          const payload = await listed.json();
-          if (!listed.ok) throw new Error(payload.detail || "Jobs list failed");
-          jobs = payload.jobs || [];
-          currentPage = 1;
-          applyFilters(false);
-          setStatus(`Saved ${done.db_total ?? payload.total} jobs. Showing this filter.`);
+          const last = done.last_scrape || {};
+          if (!last.ok) throw new Error(last.error || "Scrape failed");
+          const payload = await loadSaved();
+          const where = payload.source === "mysql" ? "Saved in ksajob." : "Not in the database: MySQL is not connected.";
+          setStatus(`Found ${last.count ?? payload.total} jobs. ${where}`);
           return;
         }
         jobs = data.jobs || [];
         currentPage = 1;
         applyFilters(false);
-        setStatus(`Scraped ${data.count} US jobs. Results are listed below.`);
+        setStatus(`Scraped ${data.count} Saudi jobs. Results are listed below.`);
       } catch (err) {
         setStatus(err.message || "Could not scrape jobs. Start the API with python api.py", true);
       } finally {
@@ -666,81 +656,29 @@
       }
     }
 
-    const US_STATES = [
-      "Alabama", "Alaska", "Arizona", "Arkansas", "California", "Colorado", "Connecticut",
-      "Delaware", "District of Columbia", "Florida", "Georgia", "Hawaii", "Idaho", "Illinois",
-      "Indiana", "Iowa", "Kansas", "Kentucky", "Louisiana", "Maine", "Maryland", "Massachusetts",
-      "Michigan", "Minnesota", "Mississippi", "Missouri", "Montana", "Nebraska", "Nevada",
-      "New Hampshire", "New Jersey", "New Mexico", "New York", "North Carolina", "North Dakota",
-      "Ohio", "Oklahoma", "Oregon", "Pennsylvania", "Rhode Island", "South Carolina",
-      "South Dakota", "Tennessee", "Texas", "Utah", "Vermont", "Virginia", "Washington",
-      "West Virginia", "Wisconsin", "Wyoming",
+    const KSA_REGIONS = [
+      "Riyadh", "Makkah", "Madinah", "Eastern Province", "Qassim", "Asir", "Tabuk",
+      "Hail", "Northern Borders", "Jazan", "Najran", "Al Bahah", "Al Jawf",
     ];
-
-    const STATE_ABBREV = {
-      Alabama: "AL", Alaska: "AK", Arizona: "AZ", Arkansas: "AR", California: "CA",
-      Colorado: "CO", Connecticut: "CT", Delaware: "DE", "District of Columbia": "DC",
-      Florida: "FL", Georgia: "GA", Hawaii: "HI", Idaho: "ID", Illinois: "IL", Indiana: "IN",
-      Iowa: "IA", Kansas: "KS", Kentucky: "KY", Louisiana: "LA", Maine: "ME", Maryland: "MD",
-      Massachusetts: "MA", Michigan: "MI", Minnesota: "MN", Mississippi: "MS", Missouri: "MO",
-      Montana: "MT", Nebraska: "NE", Nevada: "NV", "New Hampshire": "NH", "New Jersey": "NJ",
-      "New Mexico": "NM", "New York": "NY", "North Carolina": "NC", "North Dakota": "ND",
-      Ohio: "OH", Oklahoma: "OK", Oregon: "OR", Pennsylvania: "PA", "Rhode Island": "RI",
-      "South Carolina": "SC", "South Dakota": "SD", Tennessee: "TN", Texas: "TX", Utah: "UT",
-      Vermont: "VT", Virginia: "VA", Washington: "WA", "West Virginia": "WV", Wisconsin: "WI",
-      Wyoming: "WY",
-    };
-
-    const US_STATE_SET = new Set(["Remote", "United States", "Multiple US", ...US_STATES]);
-    const FOREIGN_RE = /\b(?:india|indian|bengaluru|bangalore|hyderabad|mumbai|pune|chennai|gurgaon|gurugram|noida|kolkata|united kingdom|\buk\b|england|scotland|wales|london|germany|berlin|france|paris|canada|toronto|vancouver|australia|sydney|netherlands|amsterdam|spain|portugal|italy|poland|brazil|mexico|singapore|japan|tokyo|china|philippines|pakistan|uae|dubai|ireland|sweden|norway|denmark|finland|switzerland|austria|croatia|hungary|romania|ukraine|israel|europe|emea|latam|apac|\basia\b|argentina|colombia|chile|turkey|istanbul)\b/i;
-    const US_TOKEN_RE = /\b(?:united states(?: of america)?|usa|u\.s\.a\.?|u\.s\.|us-only|us only|north america|\bus\b)\b/i;
 
     function fillStateDropdown() {
       const selected = stateFilter.value || "All";
       stateFilter.innerHTML = [
-        `<option value="All">All States</option>`,
+        `<option value="All">All regions</option>`,
         `<option value="Remote">Remote</option>`,
-        ...US_STATES.map((state) => `<option value="${state}">${state}</option>`),
+        ...KSA_REGIONS.map((region) => `<option value="${region}">${region}</option>`),
       ].join("");
       stateFilter.value = [...stateFilter.options].some((opt) => opt.value === selected) ? selected : "All";
     }
 
-    function isKnownUsState(state) {
-      const value = String(state || "").trim();
-      if (US_STATE_SET.has(value)) return true;
-      if (value.includes(" / ")) {
-        const parts = value.split("/").map((part) => part.trim());
-        return parts.length > 0 && parts.every((part) => US_STATES.includes(part));
-      }
-      return false;
-    }
-
-    function isUsaJob(job) {
-      const state = String(job.state || "").trim();
-      const hay = `${state} ${job.location || ""}`;
-      const foreign = FOREIGN_RE.test(hay);
-      const usToken = US_TOKEN_RE.test(hay);
-      const known = isKnownUsState(state);
-      if (foreign) {
-        if (state === "Remote") return usToken;
-        if (known && state !== "Remote" && state !== "United States") return true;
-        return usToken;
-      }
-      return known || usToken;
-    }
-
     function jobMatchesState(job) {
-      if (!isUsaJob(job)) return false;
       const selected = stateFilter.value;
-      if (selected === "All") return true;
       const hay = `${job.state || ""} ${job.location || ""}`.toLowerCase();
+      if (selected === "All") return true;
       if (selected === "Remote") {
-        return ["remote", "united states"].includes(String(job.state || "").toLowerCase()) || hay.includes("remote");
+        return String(job.state || "").toLowerCase() === "remote" || hay.includes("remote");
       }
-      if (job.state === selected || String(job.state || "").includes(selected)) return true;
-      if (hay.includes(selected.toLowerCase())) return true;
-      const abbr = STATE_ABBREV[selected];
-      return Boolean(abbr && hay.includes(`, ${abbr.toLowerCase()}`));
+      return job.state === selected || hay.includes(selected.toLowerCase());
     }
 
     function ageInDays(value) {
@@ -874,7 +812,7 @@
     dateFilter.addEventListener("change", () => applyFilters());
 
     fillStateDropdown();
-    applyFilters();
+    loadSaved().catch((err) => setStatus(err.message || "Could not load saved jobs", true));
   </script>
 </body>
 </html>

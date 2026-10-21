@@ -44,10 +44,6 @@ class MysqlPipeline:
             from jobscraper.db import upsert_jobs
 
             saved = upsert_jobs(self.jobs)
-            from jobscraper.db import enrich_jobs_everify, enrich_jobs_h1b
-
-            enrich_jobs_everify(only_unknown=True)
-            enrich_jobs_h1b()
             spider.logger.info("Saved %s jobs to MySQL", saved)
         except Exception:
             spider.logger.exception("MySQL upsert failed")

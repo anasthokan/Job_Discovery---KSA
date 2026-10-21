@@ -4,10 +4,11 @@
 #   powershell -ExecutionPolicy Bypass -File .\deploy\setup-iis.ps1
 
 param(
-  [string]$SiteName = "job_discovery",
-  [string]$AppRoot = "C:\Projects\Job_Discovery",
-  [string]$ServerIP = "74.208.184.175",
-  [int]$Port = 529,
+  [string]$SiteName = "agentsksa",
+  [string]$AppRoot = "C:\Projects\Job_Discovery - KSA",
+  [string]$ServerIP = "74.208.184.75",
+  [string]$HostName = "agentsksa.atozeesolutions.com",
+  [int]$Port = 80,
   [int]$AppPort = 9001
 )
 
@@ -45,6 +46,14 @@ Write-Host "==> Firewall TCP $Port..." -ForegroundColor Cyan
 $fwName = "Job Discovery IIS $Port"
 if (-not (Get-NetFirewallRule -DisplayName $fwName -ErrorAction SilentlyContinue)) {
   New-NetFirewallRule -DisplayName $fwName -Direction Inbound -Protocol TCP -LocalPort $Port -Action Allow | Out-Null
+}
+$fwHttps = "Job Discovery IIS 443"
+if (-not (Get-NetFirewallRule -DisplayName $fwHttps -ErrorAction SilentlyContinue)) {
+  New-NetFirewallRule -DisplayName $fwHttps -Direction Inbound -Protocol TCP -LocalPort 443 -Action Allow | Out-Null
+}
+$fwHttps = "Job Discovery IIS 443"
+if (-not (Get-NetFirewallRule -DisplayName $fwHttps -ErrorAction SilentlyContinue)) {
+  New-NetFirewallRule -DisplayName $fwHttps -Direction Inbound -Protocol TCP -LocalPort 443 -Action Allow | Out-Null
 }
 
 Write-Host "==> IIS site..." -ForegroundColor Cyan
@@ -89,7 +98,27 @@ if (-not $existing) {
   foreach ($b in @($site.bindings.Collection)) {
     Remove-WebBinding -Name $SiteName -BindingInformation $b.bindingInformation -Protocol $b.protocol -ErrorAction SilentlyContinue
   }
+  New-WebBinding -Name $SiteName -Protocol http -Port $Port -HostHeader $HostName
   New-WebBinding -Name $SiteName -Protocol http -IPAddress $ServerIP -Port $Port
+}
+if (-not (Get-WebBinding -Name $SiteName -Protocol http -ErrorAction SilentlyContinue | Where-Object { $_.bindingInformation -like "*:${Port}:$HostName" })) {
+  New-WebBinding -Name $SiteName -Protocol http -Port $Port -HostHeader $HostName
+}
+
+$cert = Get-ChildItem Cert:\LocalMachine\My | Where-Object {
+  $_.DnsNameList -match [regex]::Escape($HostName) -or $_.Subject -match [regex]::Escape($HostName)
+} | Select-Object -First 1
+if ($cert) {
+  if (-not (Get-WebBinding -Name $SiteName -Protocol https -ErrorAction SilentlyContinue | Where-Object { $_.bindingInformation -like "*:443:$HostName" })) {
+    New-WebBinding -Name $SiteName -Protocol https -Port 443 -HostHeader $HostName -SslFlags 1
+  }
+  $httpsBinding = Get-WebBinding -Name $SiteName -Protocol https | Where-Object { $_.bindingInformation -like "*:443:$HostName" }
+  if ($httpsBinding) {
+    $httpsBinding.AddSslCertificate($cert.Thumbprint, "My")
+  }
+  Write-Host "HTTPS bound with certificate $($cert.Thumbprint)" -ForegroundColor Green
+} else {
+  Write-Host "No certificate for $HostName in LocalMachine\My. HTTP is bound; install the cert, then re-run this script for https://$HostName" -ForegroundColor Yellow
 }
 
 Start-Website -Name $SiteName -ErrorAction SilentlyContinue
@@ -159,6 +188,7 @@ try {
 
 Write-Host ""
 Write-Host "IIS site ready:" -ForegroundColor Green
-Write-Host "  http://${ServerIP}:${Port}"
+Write-Host "  http://${HostName}/"
+Write-Host "  https://${HostName}/"
 Write-Host "  http://${ServerIP}:${Port}/api/health"
 Write-Host "Uvicorn stays on localhost:$AppPort. IIS needs URL Rewrite + ARR with proxy enabled."

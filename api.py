@@ -9,9 +9,7 @@ import threading
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.error import HTTPError, URLError
 from urllib.parse import quote
-from urllib.request import Request as UrlRequest, urlopen
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -49,8 +47,8 @@ from jobscraper.job_fields import (
 )
 from jobscraper.locations import (
     DROPDOWN_STATES,
-    US_SCOPED_PLATFORMS,
-    is_usa_job,
+    KSA_SCOPED_PLATFORMS,
+    is_ksa_job,
     matches_city_filter,
     matches_state_filter,
 )
@@ -64,8 +62,6 @@ from jobscraper.recommend import (
 from jobscraper.resume_parser import ResumeParseError, parse_resume_bytes, parse_resume_text
 from jobscraper.db import (
     close_conn as close_mysql,
-    enrich_jobs_everify,
-    everify_count,
     finish_scrape_run,
     health as mysql_health,
     import_json_if_empty,
@@ -79,8 +75,6 @@ from jobscraper.db import (
     load_jobs as load_jobs_mysql,
     mysql_configured,
     save_candidate as save_candidate_mysql,
-    replace_everify_employers,
-    start_h1b_sponsor_load,
     start_scrape_run,
     upsert_jobs,
 )
@@ -94,22 +88,6 @@ SCRAPE_LOCK = threading.Lock()
 SCRAPE_TIMEOUT = 720
 _LAST_SCRAPE: dict = {"ok": None, "error": None, "count": None, "db_total": None}
 log = logging.getLogger("job-discovery")
-USAJOBS_CACHE_TTL = 3600
-USAJOBS_CODELISTS = {
-    "agencies": {
-        "url": "https://data.usajobs.gov/api/codelist/agencysubelements",
-        "kind": "agency",
-        "search_param": "a",
-    },
-    "series": {
-        "url": "https://data.usajobs.gov/api/codelist/occupationalseries",
-        "kind": "series",
-        "search_param": "j",
-    },
-}
-USAJOBS_AGENCIES_URL = USAJOBS_CODELISTS["agencies"]["url"]
-_USAJOBS_LOCK = threading.Lock()
-_USAJOBS_CACHE: dict[str, dict] = {}
 _SCHEDULER: BackgroundScheduler | None = None
 _BOOT_STOP = threading.Event()
 
@@ -159,7 +137,7 @@ def _start_scheduler() -> BackgroundScheduler | None:
     if not _truthy("SCRAPE_SCHEDULE_ENABLED", "true"):
         log.info("Scrape schedule disabled")
         return None
-    tz_name = _env("SCRAPE_TZ", "Asia/Kolkata") or "Asia/Kolkata"
+    tz_name = _env("SCRAPE_TZ", "Asia/Riyadh") or "Asia/Riyadh"
     try:
         tz = ZoneInfo(tz_name)
     except Exception:
@@ -191,7 +169,6 @@ def _boot() -> None:
     try:
         init_mysql()
         import_json_if_empty(DATA_FILE)
-        start_h1b_sponsor_load()
     except Exception:
         log.exception("API boot failed")
     if _BOOT_STOP.is_set():
@@ -377,7 +354,7 @@ class CandidateAnswer(BaseModel):
 
 
 class CandidateProfile(BaseModel):
-    """Fields collected on the ezyjob registration screens. Password and EEO are ignored."""
+    """Fields collected on the registration screens. Password and EEO answers are ignored."""
 
     first_name: str = ""
     last_name: str = ""
@@ -610,140 +587,6 @@ def _with_time_ago(jobs: list[dict]) -> list[dict]:
     return presented
 
 
-def _days_ago_from_iso(value: str | None) -> int:
-    if not value:
-        return 0
-    cleaned = str(value).strip().replace("Z", "+00:00")
-    try:
-        posted = datetime.fromisoformat(cleaned)
-    except ValueError:
-        return 0
-    if posted.tzinfo is None:
-        posted = posted.replace(tzinfo=timezone.utc)
-    return max(0, int((datetime.now(timezone.utc) - posted).total_seconds() // 86400))
-
-
-def _codelist_to_job(row: dict, *, kind: str, search_param: str) -> dict:
-    code = str(row.get("Code") or "").strip()
-    name = str(row.get("Value") or "").strip() or f"Unknown {kind}"
-    parent = str(row.get("ParentCode") or "").strip()
-    acronym = str(row.get("Acronym") or "").strip()
-    family = str(row.get("JobFamily") or "").strip()
-    modified = str(row.get("LastModified") or "").strip()
-    company = acronym or parent or (f"Series {code}" if kind == "series" and code else "USAJobs")
-    skills = [item for item in [code, parent, acronym, family] if item]
-    query = f"{search_param}={quote(code)}" if code else ""
-    return {
-        "id": f"usajobs-{kind}-{code}",
-        "title": name,
-        "company": company,
-        "skills": skills,
-        "state": "United States",
-        "location": "United States",
-        "platform": "USAJobs",
-        "list_type": kind,
-        "daysAgo": _days_ago_from_iso(modified),
-        "url": f"https://www.usajobs.gov/Search/Results?{query}" if query else "https://www.usajobs.gov/",
-        "posted_at": modified or None,
-        "agency_code": code if kind == "agency" else None,
-        "parent_code": parent or None,
-        "series_code": code if kind == "series" else None,
-        "job_family": family or None,
-    }
-
-
-def _fetch_usajobs_json(url: str) -> dict:
-    req = UrlRequest(
-        url,
-        headers={
-            "User-Agent": "JobDiscovery/1.5 (dashboard test bind)",
-            "Accept": "application/json",
-        },
-        method="GET",
-    )
-    try:
-        with urlopen(req, timeout=30) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"USAJobs returned HTTP {exc.code}.") from exc
-    except URLError as exc:
-        raise HTTPException(status_code=502, detail=f"USAJobs request failed: {exc.reason}.") from exc
-    except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=502, detail="USAJobs returned invalid JSON.") from exc
-
-
-def fetch_usajobs_codelist(name: str, *, refresh: bool = False) -> list[dict]:
-    spec = USAJOBS_CODELISTS.get(name)
-    if not spec:
-        raise HTTPException(status_code=404, detail=f"Unknown USAJobs list '{name}'.")
-    now = datetime.now(timezone.utc).timestamp()
-    with _USAJOBS_LOCK:
-        cached = _USAJOBS_CACHE.get(name) or {"fetched_at": 0.0, "jobs": []}
-        age = now - float(cached.get("fetched_at") or 0)
-        if cached.get("jobs") and not refresh and age < USAJOBS_CACHE_TTL:
-            return cached["jobs"]
-    payload = _fetch_usajobs_json(spec["url"])
-    values = []
-    for block in payload.get("CodeList") or []:
-        if isinstance(block, dict):
-            values.extend(block.get("ValidValue") or [])
-    jobs = [
-        _codelist_to_job(row, kind=spec["kind"], search_param=spec["search_param"])
-        for row in values
-        if isinstance(row, dict) and str(row.get("IsDisabled") or "No").lower() != "yes"
-    ]
-    with _USAJOBS_LOCK:
-        _USAJOBS_CACHE[name] = {"fetched_at": now, "jobs": jobs}
-    return jobs
-
-
-def fetch_usajobs_agencies(*, refresh: bool = False) -> list[dict]:
-    return fetch_usajobs_codelist("agencies", refresh=refresh)
-
-
-def _filter_usajobs_jobs(jobs: list[dict], keywords: str) -> list[dict]:
-    tokens = parse_keywords(keywords)
-    if not tokens:
-        return jobs
-    return [
-        job
-        for job in jobs
-        if all(
-            token
-            in " ".join(
-                [
-                    str(job.get("title") or ""),
-                    str(job.get("company") or ""),
-                    " ".join(job.get("skills") or []),
-                ]
-            ).lower()
-            for token in tokens
-        )
-    ]
-
-
-def _usajobs_list_payload(
-    name: str,
-    *,
-    keywords: str = "",
-    refresh: bool = False,
-    limit: int | None = None,
-    offset: int = 0,
-) -> dict:
-    jobs = _filter_usajobs_jobs(fetch_usajobs_codelist(name, refresh=refresh), keywords)
-    page = jobs[offset:] if limit is None else jobs[offset : offset + limit]
-    return {
-        "ok": True,
-        "source": USAJOBS_CODELISTS[name]["url"],
-        "list": name,
-        "jobs": page,
-        "count": len(page),
-        "total": len(jobs),
-        "limit": limit,
-        "offset": offset,
-    }
-
-
 def filter_jobs(
     jobs: list[dict],
     keywords: list[str],
@@ -751,14 +594,14 @@ def filter_jobs(
     platform: str,
     days: int,
     city: str = "",
-    usa_only: bool = True,
+    ksa_only: bool = True,
 ) -> list[dict]:
     filtered = []
     for job in jobs:
-        if usa_only and not is_usa_job(
+        if ksa_only and not is_ksa_job(
             job.get("state") or "",
             job.get("location") or "",
-            allow_bare_remote=(job.get("platform") or "") in US_SCOPED_PLATFORMS,
+            allow_bare_remote=(job.get("platform") or "") in KSA_SCOPED_PLATFORMS,
         ):
             continue
         if platform != "All" and job.get("platform") != platform:
@@ -774,6 +617,7 @@ def filter_jobs(
                 str(job.get("title") or ""),
                 str(job.get("company") or ""),
                 str(job.get("location") or ""),
+                str(job.get("description") or ""),
                 " ".join(job.get("skills") or []),
             ]
         ).lower()
@@ -984,7 +828,6 @@ def run_spider(keywords: str, location: str, platform: str, city: str = "") -> N
     this_run = load_jobs_json()
     try:
         saved = upsert_jobs(this_run)
-        enrich_jobs_everify()
     except Exception as exc:
         detail = f"MySQL save failed: {exc}"
         finish_scrape_run(run_id, job_count_value=0, error=detail[:2000])
@@ -1132,8 +975,7 @@ def health():
         "service": "job-discovery",
         "jobs_list": True,
         "jobs_recommend": True,
-        "usajobs_agencies": True,
-        "usajobs_series": True,
+        "country": "Saudi Arabia",
         "resume_parse": True,
         "ats_score": True,
         "cv_from_job": True,
@@ -1142,7 +984,7 @@ def health():
         "mysql": mysql,
         "scrape_schedule": {
             "enabled": _truthy("SCRAPE_SCHEDULE_ENABLED", "true"),
-            "tz": _env("SCRAPE_TZ", "Asia/Kolkata") or "Asia/Kolkata",
+            "tz": _env("SCRAPE_TZ", "Asia/Riyadh") or "Asia/Riyadh",
             "hours": _schedule_hours(),
         },
     }
@@ -1163,30 +1005,13 @@ def dashboard_page():
 def filters():
     return {
         "states": ["All", "Remote", *DROPDOWN_STATES],
+        "regions": ["All", "Remote", *DROPDOWN_STATES],
         "platforms": [
             "All",
-            "RemoteOK",
-            "Remotive",
-            "Jobicy",
-            "The Muse",
-            "Arbeitnow",
-            "Himalayas",
-            "We Work Remotely",
-            "Remote.co",
-            "Greenhouse",
-            "Lever",
-            "Ashby",
-            "SmartRecruiters",
-            "Workable",
-            "LinkedIn",
             "Indeed",
-            "Glassdoor",
-            "ZipRecruiter",
+            "LinkedIn",
             "Google Jobs",
-            "Dice",
-            "Y Combinator",
-            "Hacker News",
-            "USAJobs",
+            "Bayt",
         ],
         "days": [1, 3, 7, 30],
         "work_models": list(WORK_MODELS),
@@ -1197,9 +1022,9 @@ def filters():
             {"value": "internship", "label": "Internship"},
         ],
         "experience_levels": list(EXPERIENCE_LEVELS),
-        "h1b_sponsorship": ["yes", "no"],
+        "visa_sponsorship": ["yes", "no"],
         "clearance_required": ["yes", "no"],
-        "us_citizen_required": ["yes", "no"],
+        "saudi_national_required": ["yes", "no"],
     }
 
 
@@ -1210,16 +1035,15 @@ def get_jobs(
     platform: str = Query("All"),
     days: int = Query(30),
     city: str = Query(""),
-    e_verified: str = Query("", description="true, false, unknown, or empty for all"),
     work_model: str = Query("", description="Comma-separated: remote, hybrid, onsite"),
     job_type: str = Query("", description="Comma-separated: fulltime, contract, parttime, internship"),
     experience_level: str = Query(
         "",
         description="Comma-separated: Intern/New Grad, Entry Level, Mid Level, Senior Level, Lead/Staff, Director/Executive",
     ),
-    h1b_sponsorship: str = Query("", description="yes or no"),
+    visa_sponsorship: str = Query("", description="yes or no. Iqama or work-visa sponsorship."),
     clearance_required: str = Query("", description="yes or no"),
-    us_citizen_required: str = Query("", description="yes or no"),
+    saudi_national_required: str = Query("", description="yes or no"),
     years: int | None = Query(
         None,
         ge=0,
@@ -1240,18 +1064,14 @@ def get_jobs(
     ),
 ):
     jobs = filter_jobs(load_jobs(), parse_keywords(keywords), state, platform, days, city)
-    wanted = e_verified.strip().lower()
-    wanted = {"yes": "true", "no": "false", "1": "true", "0": "false"}.get(wanted, wanted)
-    if wanted in {"true", "false", "unknown"}:
-        jobs = [job for job in jobs if (job.get("e_verified") or "unknown") == wanted]
     jobs = apply_listing_filters(
         jobs,
         work_model=work_model,
         job_type=job_type,
         experience_level=experience_level,
-        h1b_sponsorship=h1b_sponsorship,
+        visa_sponsorship=visa_sponsorship,
         clearance_required=clearance_required,
-        us_citizen_required=us_citizen_required,
+        saudi_national_required=saudi_national_required,
         years=years,
     )
     limit, offset = _resolve_jobs_window(limit, offset, page)
@@ -1274,28 +1094,6 @@ def get_jobs(
     elif total == 0 and mysql_configured():
         payload["stored"] = mysql_job_count()
     return payload
-
-
-@app.get("/api/usajobs/agencies")
-def usajobs_agencies(
-    keywords: str = Query("", description="Comma-separated agency name / code / acronym filter"),
-    refresh: bool = Query(False, description="Bypass the 1-hour in-memory cache"),
-    limit: int | None = Query(None, ge=1, le=2000),
-    offset: int = Query(0, ge=0),
-):
-    """Test bind: USAJobs agency subelements mapped into the dashboard job-card shape."""
-    return _usajobs_list_payload("agencies", keywords=keywords, refresh=refresh, limit=limit, offset=offset)
-
-
-@app.get("/api/usajobs/series")
-def usajobs_series(
-    keywords: str = Query("", description="Comma-separated series name / code / job-family filter"),
-    refresh: bool = Query(False, description="Bypass the 1-hour in-memory cache"),
-    limit: int | None = Query(None, ge=1, le=2000),
-    offset: int = Query(0, ge=0),
-):
-    """Test bind: USAJobs occupational series mapped into the dashboard job-card shape."""
-    return _usajobs_list_payload("series", keywords=keywords, refresh=refresh, limit=limit, offset=offset)
 
 
 @app.post("/api/scrape")
@@ -1322,7 +1120,7 @@ def scrape_jobs(
             "ok": True,
             "started": True,
             "running": True,
-            "message": "Scrape started. Poll GET /api/scrape/status until running is false, then check mysql.jobs.",
+            "message": "Scrape started. Poll GET /api/scrape/status until running is false, then check the ksajob.jobs table.",
         },
     )
 
@@ -1334,10 +1132,10 @@ def _scrape_background(keywords: str, state: str, platform: str, city: str) -> N
         jobs = [
             job
             for job in load_jobs_json()
-            if is_usa_job(
+            if is_ksa_job(
                 job.get("state") or "",
                 job.get("location") or "",
-                allow_bare_remote=(job.get("platform") or "") in US_SCOPED_PLATFORMS,
+                allow_bare_remote=(job.get("platform") or "") in KSA_SCOPED_PLATFORMS,
             )
         ]
         _LAST_SCRAPE = {
@@ -1364,7 +1162,7 @@ def scrape_status():
         "mysql": mysql_health(),
         "schedule": {
             "enabled": _truthy("SCRAPE_SCHEDULE_ENABLED", "true"),
-            "tz": _env("SCRAPE_TZ", "Asia/Kolkata") or "Asia/Kolkata",
+            "tz": _env("SCRAPE_TZ", "Asia/Riyadh") or "Asia/Riyadh",
             "hours": _schedule_hours(),
             "keywords": _env("SCRAPE_KEYWORDS", ""),
             "state": _env("SCRAPE_STATE", "All") or "All",
@@ -1372,80 +1170,6 @@ def scrape_status():
         },
         **cache_meta(),
     }
-
-
-@app.get("/api/everify/status")
-def everify_status():
-    from jobscraper.everify import csv_path
-
-    path = csv_path()
-    return {
-        "ok": True,
-        "source": "https://www.e-verify.gov/e-verify-employer-search",
-        "csv": str(path),
-        "csv_exists": path.exists(),
-        "employers": everify_count() if mysql_configured() else 0,
-        "note": (
-            "Export the employer table from the E-Verify search tool "
-            "(Download → Crosstab/Data) and save as data/everify_employers.csv, "
-            "then POST /api/everify/refresh. Jobs stay unknown until that table is loaded. "
-            "A name in the table is e_verified true; a name that is not is false."
-        ),
-    }
-
-
-@app.get("/api/everify/filters")
-def everify_filters():
-    """Dropdown values for the E-Verify Checker form."""
-    from jobscraper.everify import filter_options
-
-    return {"ok": True, **filter_options()}
-
-
-@app.get("/api/everify/search")
-def everify_search(
-    company: str = Query(..., min_length=2, description="Employer legal name or company keyword"),
-    state: str = Query("All", description="All, California, Washington, New York, Texas, or Massachusetts"),
-    industry: str = Query(
-        "All",
-        description="All, software, fintech, healthtech, or defense. Accepted and echoed; does not filter.",
-    ),
-    limit: int = Query(25, ge=1, le=100),
-    offset: int = Query(0, ge=0),
-):
-    """Search button on the Federal E-Verify Employer Search & STEM OPT Checker."""
-    from jobscraper.everify import search
-
-    try:
-        return search(company, state, industry, limit, offset)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.get("/api/everify/lookup")
-def everify_lookup(company: str = Query(..., min_length=2)):
-    from jobscraper.everify import lookup
-
-    return {"ok": True, "company": company, **lookup(company)}
-
-
-@app.post("/api/everify/refresh")
-def everify_refresh():
-    from jobscraper.everify import csv_path, load_rows_from_csv
-
-    path = csv_path()
-    rows = load_rows_from_csv(path)
-    if not rows:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"No E-Verify CSV at {path}. Download the employer list from "
-                "https://www.e-verify.gov/e-verify-employer-search and save it there."
-            ),
-        )
-    loaded = replace_everify_employers(rows)
-    stats = enrich_jobs_everify()
-    return {"ok": True, "loaded": loaded, **stats}
 
 
 @app.get("/api/recommend")
@@ -1560,13 +1284,12 @@ def recommend_roles(
     platform: str = Query("All"),
     days: int = Query(30),
     city: str = Query(""),
-    e_verified: str = Query("", description="true, false, unknown, or empty for all"),
     work_model: str = Query("", description="Comma-separated: remote, hybrid, onsite"),
     job_type: str = Query("", description="Comma-separated: fulltime, contract, parttime, internship"),
     experience_level: str = Query(""),
-    h1b_sponsorship: str = Query("", description="yes or no"),
+    visa_sponsorship: str = Query("", description="yes or no"),
     clearance_required: str = Query("", description="yes or no"),
-    us_citizen_required: str = Query("", description="yes or no"),
+    saudi_national_required: str = Query("", description="yes or no"),
     years: int | None = Query(None, ge=0, le=40),
     limit: int = Query(DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
     page: int = Query(1, ge=1),
@@ -1579,18 +1302,14 @@ def recommend_roles(
         )
     pool = load_jobs()
     filtered = filter_jobs(pool, [], state, platform, days, city)
-    wanted = e_verified.strip().lower()
-    wanted = {"yes": "true", "no": "false", "1": "true", "0": "false"}.get(wanted, wanted)
-    if wanted in {"true", "false", "unknown"}:
-        filtered = [job for job in filtered if (job.get("e_verified") or "unknown") == wanted]
     filtered = apply_listing_filters(
         filtered,
         work_model=work_model,
         job_type=job_type,
         experience_level=experience_level,
-        h1b_sponsorship=h1b_sponsorship,
+        visa_sponsorship=visa_sponsorship,
         clearance_required=clearance_required,
-        us_citizen_required=us_citizen_required,
+        saudi_national_required=saudi_national_required,
         years=years,
     )
     ranked_all = recommend_jobs(filtered, found, limit=MAX_LIMIT)

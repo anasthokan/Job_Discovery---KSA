@@ -28,17 +28,11 @@ _LOCK = threading.Lock()
 # IIS then returns 502.
 _local = threading.local()
 _DB_NAME_RE = re.compile(r"^[A-Za-z0-9_]+$")
-_EVERIFY_INDEX: dict | None = None
-_H1B_INDEX: dict | None = None
-_H1B_LOAD_LOCK = threading.Lock()
-_H1B_LOAD_STARTED = False
-
-# Scraped listings go into the shared ezyjob database, table `jobs`.
+# Scraped listings go into the ksajob database, table `jobs`.
 JOBS_TABLE = "jobs"
 RUNS_TABLE = "job_discovery_scrape_runs"
-EVERIFY_TABLE = "job_discovery_everify_employers"
-H1B_TABLE = "job_discovery_h1b_sponsors"
 CANDIDATES_TABLE = "job_discovery_candidates"
+COMPANIES_TABLE = "companies"
 
 CREATE_JOBS_SQL = f"""
 CREATE TABLE IF NOT EXISTS {JOBS_TABLE} (
@@ -55,8 +49,6 @@ CREATE TABLE IF NOT EXISTS {JOBS_TABLE} (
   platform VARCHAR(120) NOT NULL,
   days_ago INT UNSIGNED NULL,
   company VARCHAR(255) NULL,
-  e_verified VARCHAR(64) NOT NULL,
-  e_verify_name VARCHAR(255) NOT NULL,
   first_seen_at DATETIME(6) NULL,
   last_seen_at DATETIME(6) NULL,
   skills JSON NOT NULL,
@@ -68,9 +60,9 @@ CREATE TABLE IF NOT EXISTS {JOBS_TABLE} (
   work_model VARCHAR(16) NOT NULL DEFAULT 'unknown',
   experience_level VARCHAR(32) NOT NULL DEFAULT 'unknown',
   years_experience SMALLINT NULL,
-  h1b_sponsorship VARCHAR(16) NOT NULL DEFAULT 'unknown',
+  visa_sponsorship VARCHAR(16) NOT NULL DEFAULT 'unknown',
   clearance_required VARCHAR(16) NOT NULL DEFAULT 'unknown',
-  us_citizen_required VARCHAR(16) NOT NULL DEFAULT 'no',
+  saudi_national_required VARCHAR(16) NOT NULL DEFAULT 'no',
   listing_inferred TINYINT(1) NOT NULL DEFAULT 0,
   PRIMARY KEY (id),
   UNIQUE KEY uk_jobs_public_id (public_id),
@@ -78,30 +70,20 @@ CREATE TABLE IF NOT EXISTS {JOBS_TABLE} (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 """
 
-CREATE_EVERIFY_SQL = f"""
-CREATE TABLE IF NOT EXISTS {EVERIFY_TABLE} (
-  name_key VARCHAR(255) NOT NULL,
-  employer VARCHAR(512) NOT NULL,
-  dba VARCHAR(512) NULL,
-  account_status VARCHAR(64) NULL,
-  everify_plus VARCHAR(32) NULL,
-  date_enrolled VARCHAR(64) NULL,
-  hiring_sites VARCHAR(512) NULL,
-  PRIMARY KEY (name_key),
-  KEY idx_jd_everify_status (account_status)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-"""
-
-CREATE_H1B_SQL = f"""
-CREATE TABLE IF NOT EXISTS {H1B_TABLE} (
-  name_key VARCHAR(255) NOT NULL,
-  employer VARCHAR(512) NOT NULL,
-  approvals INT UNSIGNED NOT NULL,
-  denials INT UNSIGNED NOT NULL,
-  first_fiscal_year SMALLINT NOT NULL,
-  last_fiscal_year SMALLINT NOT NULL,
-  PRIMARY KEY (name_key),
-  KEY idx_jd_h1b_last_year (last_fiscal_year)
+CREATE_COMPANIES_SQL = f"""
+CREATE TABLE IF NOT EXISTS {COMPANIES_TABLE} (
+  id BIGINT NOT NULL AUTO_INCREMENT,
+  public_id CHAR(32) NOT NULL,
+  name VARCHAR(255) NOT NULL,
+  normalized_name VARCHAR(255) NOT NULL,
+  website VARCHAR(512) NOT NULL DEFAULT '',
+  sponsorship_notes VARCHAR(512) NOT NULL DEFAULT '',
+  logo_url VARCHAR(512) NOT NULL DEFAULT '',
+  created_at DATETIME(6) NOT NULL,
+  updated_at DATETIME(6) NOT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_companies_public_id (public_id),
+  UNIQUE KEY uk_companies_normalized (normalized_name)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 """
 
@@ -131,23 +113,21 @@ CREATE TABLE IF NOT EXISTS {RUNS_TABLE} (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 """
 
-# ezyjob.jobs.id is a bigint autoincrement. The scraper id is stored in source_id.
+# jobs.id is a bigint autoincrement. The scraper id is stored in source_id.
 UPSERT_SQL = f"""
 INSERT INTO {JOBS_TABLE} (
   public_id, source_id, title, company, company_ref_id, skills, state, location,
-  platform, days_ago, url, description, raw_description, posted_at, is_active, e_verified, e_verify_name,
-  job_type, work_model, experience_level, years_experience, h1b_sponsorship, clearance_required,
-  us_citizen_required, listing_inferred, first_seen_at, last_seen_at, created_at, updated_at
+  platform, days_ago, url, description, raw_description, posted_at, is_active,
+  job_type, work_model, experience_level, years_experience, visa_sponsorship, clearance_required,
+  saudi_national_required, listing_inferred, first_seen_at, last_seen_at, created_at, updated_at
 ) VALUES (
   %s, %s, %s, %s, %s, %s, %s, %s,
-  %s, %s, %s, %s, %s, %s, 1, 'unknown', '',
+  %s, %s, %s, %s, %s, %s, 1,
   %s, %s, %s, %s, %s, %s,
   %s, 1, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), UTC_TIMESTAMP(6)
 ) AS new
 ON DUPLICATE KEY UPDATE
   title = new.title,
-  e_verified = IF({JOBS_TABLE}.company <=> new.company, {JOBS_TABLE}.e_verified, 'unknown'),
-  e_verify_name = IF({JOBS_TABLE}.company <=> new.company, {JOBS_TABLE}.e_verify_name, ''),
   company = new.company,
   company_ref_id = COALESCE(new.company_ref_id, {JOBS_TABLE}.company_ref_id),
   skills = new.skills,
@@ -178,17 +158,17 @@ ON DUPLICATE KEY UPDATE
   work_model = new.work_model,
   experience_level = new.experience_level,
   years_experience = new.years_experience,
-  h1b_sponsorship = IF(
-    new.h1b_sponsorship = 'no',
+  visa_sponsorship = IF(
+    new.visa_sponsorship = 'no',
     'no',
     IF(
-      new.h1b_sponsorship = 'yes' OR {JOBS_TABLE}.h1b_sponsorship = 'yes',
+      new.visa_sponsorship = 'yes' OR {JOBS_TABLE}.visa_sponsorship = 'yes',
       'yes',
-      new.h1b_sponsorship
+      new.visa_sponsorship
     )
   ),
   clearance_required = new.clearance_required,
-  us_citizen_required = new.us_citizen_required,
+  saudi_national_required = new.saudi_national_required,
   listing_inferred = 1,
   is_active = 1,
   last_seen_at = UTC_TIMESTAMP(6),
@@ -302,15 +282,6 @@ def close_conn() -> None:
 
 
 def _ensure_job_columns(cur) -> None:
-    cur.execute(f"SHOW COLUMNS FROM {JOBS_TABLE} LIKE 'e_verified'")
-    if not cur.fetchone():
-        cur.execute(
-            f"ALTER TABLE {JOBS_TABLE} "
-            "ADD COLUMN e_verified VARCHAR(16) NOT NULL DEFAULT 'unknown'"
-        )
-    cur.execute(f"SHOW COLUMNS FROM {JOBS_TABLE} LIKE 'e_verify_name'")
-    if not cur.fetchone():
-        cur.execute(f"ALTER TABLE {JOBS_TABLE} ADD COLUMN e_verify_name VARCHAR(512) NULL")
     cur.execute(f"SHOW COLUMNS FROM {JOBS_TABLE} LIKE 'job_type'")
     if not cur.fetchone():
         cur.execute(
@@ -321,7 +292,7 @@ def _ensure_job_columns(cur) -> None:
         ("work_model", "VARCHAR(16) NOT NULL DEFAULT 'unknown'"),
         ("experience_level", "VARCHAR(32) NOT NULL DEFAULT 'unknown'"),
         ("years_experience", "SMALLINT NULL"),
-        ("h1b_sponsorship", "VARCHAR(16) NOT NULL DEFAULT 'unknown'"),
+        ("visa_sponsorship", "VARCHAR(16) NOT NULL DEFAULT 'unknown'"),
         ("clearance_required", "VARCHAR(16) NOT NULL DEFAULT 'unknown'"),
         ("listing_inferred", "TINYINT(1) NOT NULL DEFAULT 0"),
     ):
@@ -359,17 +330,12 @@ def _ensure_job_columns(cur) -> None:
         cur.execute(
             f"ALTER TABLE {JOBS_TABLE} MODIFY COLUMN raw_description LONGTEXT NOT NULL"
         )
-    cur.execute(f"SHOW COLUMNS FROM {JOBS_TABLE} LIKE 'us_citizen_required'")
+    cur.execute(f"SHOW COLUMNS FROM {JOBS_TABLE} LIKE 'saudi_national_required'")
     if not cur.fetchone():
         cur.execute(
             f"ALTER TABLE {JOBS_TABLE} "
-            "ADD COLUMN us_citizen_required VARCHAR(16) NOT NULL DEFAULT 'no'"
+            "ADD COLUMN saudi_national_required VARCHAR(16) NOT NULL DEFAULT 'no'"
         )
-        cur.execute(f"UPDATE {JOBS_TABLE} SET listing_inferred = 0")
-    try:
-        cur.execute(f"ALTER TABLE {JOBS_TABLE} ADD KEY idx_jd_jobs_everify (e_verified)")
-    except Exception:
-        pass
 
 
 def init_db() -> bool:
@@ -385,8 +351,7 @@ def init_db() -> bool:
         with conn.cursor() as cur:
             cur.execute(CREATE_JOBS_SQL)
             cur.execute(CREATE_RUNS_SQL)
-            cur.execute(CREATE_EVERIFY_SQL)
-            cur.execute(CREATE_H1B_SQL)
+            cur.execute(CREATE_COMPANIES_SQL)
             cur.execute(CREATE_CANDIDATES_SQL)
             _ensure_job_columns(cur)
         log.info("MySQL ready (%s/%s)", cfg["host"], cfg["database"])
@@ -398,7 +363,7 @@ def init_db() -> bool:
 
 
 def backfill_listing_fields() -> int:
-    """Fill work model, experience, H1B, clearance, and US citizen on rows saved before those columns existed."""
+    """Fill work model, experience, visa, and Saudi-national flags on older rows."""
     if not mysql_configured():
         return 0
     from jobscraper.job_fields import infer_listing_fields
@@ -429,17 +394,17 @@ def backfill_listing_fields() -> int:
                         fields["work_model"],
                         str(fields["experience_level"] or "unknown")[:32],
                         fields["years_experience"],
-                        _resolved_h1b(row.get("company"), fields["h1b_sponsorship"]),
+                        fields["visa_sponsorship"],
                         fields["clearance_required"],
-                        fields["us_citizen_required"],
+                        fields["saudi_national_required"],
                         fields["job_type"],
                         row["id"],
                     )
                 )
             cur.executemany(
                 f"UPDATE {JOBS_TABLE} SET work_model=%s, experience_level=%s, "
-                f"years_experience=%s, h1b_sponsorship=%s, clearance_required=%s, "
-                f"us_citizen_required=%s, job_type=%s, listing_inferred=1 WHERE id=%s",
+                f"years_experience=%s, visa_sponsorship=%s, clearance_required=%s, "
+                f"saudi_national_required=%s, job_type=%s, listing_inferred=1 WHERE id=%s",
                 payload,
             )
         log.info("Backfilled listing fields on %s jobs", len(payload))
@@ -484,17 +449,8 @@ _STARTUP_MAINTENANCE_STARTED = False
 
 def _startup_maintenance() -> None:
     """Backfill and cleanup after uvicorn is already listening on port 9001."""
-    global _EVERIFY_INDEX
     try:
         backfill_listing_fields()
-        _EVERIFY_INDEX = None
-        from jobscraper.everify import load_rows_from_csv
-
-        if everify_count() <= 0:
-            rows = load_rows_from_csv()
-            if rows:
-                replace_everify_employers(rows)
-        enrich_jobs_everify(only_unknown=True)
         clear_copied_api_raw_descriptions()
     except Exception:
         log.exception("Startup maintenance failed")
@@ -542,7 +498,7 @@ def _fill_short_dice_descriptions() -> None:
         with conn.cursor() as cur:
             cur.execute(
                 f"SELECT id, url, title, platform FROM {JOBS_TABLE} "
-                f"WHERE platform IN ('Dice', 'LinkedIn', 'Y Combinator', 'SmartRecruiters') "
+                f"WHERE platform IN ('Indeed', 'LinkedIn', 'Bayt', 'Glassdoor', 'Google Jobs') "
                 f"AND CHAR_LENGTH(description) < 120 AND TRIM(url) <> ''"
             )
             rows = list(cur.fetchall() or [])
@@ -667,11 +623,9 @@ def _listing_fields(job: dict, description: str) -> dict:
         "work_model": str(fields["work_model"] or "unknown")[:16],
         "experience_level": level[:32],
         "years_experience": fields["years_experience"],
-        "h1b_sponsorship": _resolved_h1b(
-            job.get("company"), fields["h1b_sponsorship"]
-        )[:16],
+        "visa_sponsorship": str(fields["visa_sponsorship"] or "unknown")[:16],
         "clearance_required": str(fields["clearance_required"] or "unknown")[:16],
-        "us_citizen_required": str(fields["us_citizen_required"] or "no")[:16],
+        "saudi_national_required": str(fields["saudi_national_required"] or "no")[:16],
     }
 
 
@@ -714,12 +668,10 @@ _API_JOB_KEYS = {
     "work_model",
     "experience_level",
     "years_experience",
-    "h1b_sponsorship",
+    "visa_sponsorship",
     "clearance_required",
-    "us_citizen_required",
+    "saudi_national_required",
     "posted_at",
-    "e_verified",
-    "e_verify_name",
     "api_id",
     "job_id",
     "search_text",
@@ -732,7 +684,7 @@ def _is_copied_api_job(value: dict) -> bool:
     """True when this object is our jobs API row, not a scraped source payload."""
     if "api_id" in value:
         return True
-    copied = {"e_verified", "e_verify_name", "daysAgo", "us_citizen_required"}
+    copied = {"visa_sponsorship", "saudi_national_required", "daysAgo"}
     return copied.issubset(value) and set(value).issubset(_API_JOB_KEYS)
 
 
@@ -824,7 +776,7 @@ def _row_from_item(job: dict) -> dict | None:
         "company_key": _company_key(company),
         "skills": skills,
         "state": _clip(job.get("state"), 255),
-        "location": _clip(job.get("location"), 512, "United States"),
+        "location": _clip(job.get("location"), 512, "Saudi Arabia"),
         "platform": _clip(job.get("platform"), 120, "Unknown"),
         "days_ago": max(days_ago, 0),
         "url": _clip(job.get("url"), 1000),
@@ -842,33 +794,30 @@ def _company_ids(cur, names: dict[str, str]) -> dict[str, int]:
         if not key or key in found:
             continue
         cur.execute(
-            "SELECT id FROM companies WHERE normalized_name = %s OR LOWER(name) = %s LIMIT 1",
+            f"SELECT id FROM {COMPANIES_TABLE} WHERE normalized_name = %s OR LOWER(name) = %s LIMIT 1",
             (key, key),
         )
         row = cur.fetchone()
         if row:
             found[key] = int(row["id"])
-            _mark_company_h1b(cur, int(row["id"]), name)
             continue
-        sponsor = _company_h1b_note(name)
         cur.execute(
-            """
-            INSERT INTO companies (
-              public_id, name, normalized_name, website, h1b_sponsor,
+            f"""
+            INSERT INTO {COMPANIES_TABLE} (
+              public_id, name, normalized_name, website,
               sponsorship_notes, logo_url, created_at, updated_at
-            ) VALUES (%s, %s, %s, '', %s, %s, '', UTC_TIMESTAMP(6), UTC_TIMESTAMP(6))
-            ON DUPLICATE KEY UPDATE updated_at = companies.updated_at
+            ) VALUES (%s, %s, %s, '', '', '', UTC_TIMESTAMP(6), UTC_TIMESTAMP(6))
+            ON DUPLICATE KEY UPDATE updated_at = {COMPANIES_TABLE}.updated_at
             """,
-            (_public_id("company:" + key), name, key, 1 if sponsor else 0, sponsor or ""),
+            (_public_id("company:" + key), name, key),
         )
         cur.execute(
-            "SELECT id FROM companies WHERE public_id = %s OR normalized_name = %s LIMIT 1",
+            f"SELECT id FROM {COMPANIES_TABLE} WHERE public_id = %s OR normalized_name = %s LIMIT 1",
             (_public_id("company:" + key), key),
         )
         row = cur.fetchone()
         if row:
             found[key] = int(row["id"])
-            _mark_company_h1b(cur, int(row["id"]), name)
     return found
 
 
@@ -915,9 +864,9 @@ def upsert_jobs(jobs: list[dict]) -> int:
                         row["work_model"],
                         row["experience_level"],
                         row["years_experience"],
-                        row["h1b_sponsorship"],
+                        row["visa_sponsorship"],
                         row["clearance_required"],
-                        row["us_citizen_required"],
+                        row["saudi_national_required"],
                     )
                     for row in rows
                 ]
@@ -959,18 +908,6 @@ def _days_ago_from_iso(value: str | None, fallback: int = 0) -> int:
     return max(0, int((datetime.now(timezone.utc) - posted).total_seconds() // 86400))
 
 
-def _as_e_verified(value) -> str:
-    """Stored flag as true, false, or unknown."""
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    text = str(value or "").strip().lower()
-    if text in {"true", "yes", "1"}:
-        return "true"
-    if text in {"false", "no", "0"}:
-        return "false"
-    return "unknown"
-
-
 def _parse_raw_description(value):
     """Always an object of scrape fields that are not our columns."""
     if isinstance(value, (bytes, bytearray)):
@@ -998,12 +935,10 @@ def _job_payload(row: dict, *, include_raw: bool) -> dict:
         "work_model": row.get("work_model") or "unknown",
         "experience_level": row.get("experience_level") or "unknown",
         "years_experience": _years_value(row.get("years_experience")),
-        "h1b_sponsorship": row.get("h1b_sponsorship") or "unknown",
+        "visa_sponsorship": row.get("visa_sponsorship") or "unknown",
         "clearance_required": row.get("clearance_required") or "unknown",
-        "us_citizen_required": "yes" if row.get("us_citizen_required") == "yes" else "no",
+        "saudi_national_required": "yes" if row.get("saudi_national_required") == "yes" else "no",
         "posted_at": posted,
-        "e_verified": _as_e_verified(row.get("e_verified")),
-        "e_verify_name": row.get("e_verify_name"),
     }
     if row.get("api_id") is not None:
         payload["job_id"] = int(row["api_id"])
@@ -1130,8 +1065,8 @@ def load_jobs() -> list[dict]:
                 f"title, company, skills, state, location, platform, "
                 f"days_ago, url, LEFT(description, 800) AS description, "
                 f"job_type, work_model, experience_level, "
-                f"years_experience, h1b_sponsorship, clearance_required, us_citizen_required, "
-                f"posted_at, e_verified, e_verify_name "
+                f"years_experience, visa_sponsorship, clearance_required, saudi_national_required, "
+                f"posted_at "
                 f"FROM {JOBS_TABLE} ORDER BY last_seen_at DESC"
             )
             rows = cur.fetchall() or []
@@ -1199,7 +1134,7 @@ def _quote_ident(name: str) -> str:
 
 
 def load_app_user(candidate_id: str) -> dict | None:
-    """Read an ezyjob.users row (numeric id or public_id) into a recommend profile."""
+    """Read a users row (numeric id or public_id) into a recommend profile."""
     if not mysql_configured():
         return None
     conn = get_conn()
@@ -1660,425 +1595,6 @@ def last_scrape_meta() -> dict:
     except Exception:
         close_conn()
         return empty
-
-
-def replace_everify_employers(rows: list[dict]) -> int:
-    global _EVERIFY_INDEX
-    from jobscraper.everify import build_index, normalize_name
-
-    if not mysql_configured():
-        return 0
-    conn = get_conn()
-    if conn is None:
-        return 0
-    payload = []
-    seen = set()
-    for row in rows:
-        for name in (row.get("employer"), row.get("dba")):
-            key = normalize_name(name or "")[:255]
-            if len(key) < 4 or key in seen:
-                continue
-            seen.add(key)
-            payload.append(
-                (
-                    key,
-                    (row.get("employer") or name or "")[:512],
-                    (row.get("dba") or None),
-                    (row.get("account_status") or None),
-                    (row.get("everify_plus") or None),
-                    (row.get("date_enrolled") or None),
-                    (row.get("hiring_sites") or None),
-                )
-            )
-    with conn.cursor() as cur:
-        cur.execute(f"DELETE FROM {EVERIFY_TABLE}")
-        if payload:
-            cur.executemany(
-                f"INSERT INTO {EVERIFY_TABLE} "
-                "(name_key, employer, dba, account_status, everify_plus, date_enrolled, hiring_sites) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s)",
-                payload,
-            )
-    _EVERIFY_INDEX = build_index(rows)
-    return len(payload)
-
-
-def everify_index() -> dict:
-    global _EVERIFY_INDEX
-    from jobscraper.everify import build_index, load_rows_from_csv
-
-    if _EVERIFY_INDEX is not None:
-        return _EVERIFY_INDEX
-    rows = []
-    if mysql_configured():
-        conn = get_conn()
-        if conn is not None:
-            try:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        f"SELECT employer, dba, account_status, everify_plus, date_enrolled, hiring_sites "
-                        f"FROM {EVERIFY_TABLE}"
-                    )
-                    rows = list(cur.fetchall() or [])
-            except Exception:
-                close_conn()
-                rows = []
-    if not rows:
-        imported = load_rows_from_csv()
-        if imported and mysql_configured():
-            replace_everify_employers(imported)
-            return _EVERIFY_INDEX or {}
-        rows = imported
-    _EVERIFY_INDEX = build_index(rows)
-    return _EVERIFY_INDEX
-
-
-def everify_search_rows(company: str) -> list[dict]:
-    """Employer rows whose name or DBA contains the company keyword."""
-    from jobscraper.everify import load_rows_from_csv, normalize_name
-
-    needle = re.sub(r"[%_\\]", "", (company or "").strip())
-    key = normalize_name(needle)
-    if len(needle) < 2 and len(key) < 2:
-        return []
-    if mysql_configured():
-        conn = get_conn()
-        if conn is not None:
-            try:
-                like = f"%{needle}%"
-                key_like = f"%{key}%" if len(key) >= 2 else like
-                with conn.cursor() as cur:
-                    cur.execute(
-                        f"SELECT employer, dba, account_status, everify_plus, date_enrolled, hiring_sites "
-                        f"FROM {EVERIFY_TABLE} "
-                        f"WHERE employer LIKE %s OR dba LIKE %s OR name_key LIKE %s",
-                        (like, like, key_like),
-                    )
-                    return list(cur.fetchall() or [])
-            except Exception:
-                close_conn()
-    return load_rows_from_csv()
-
-
-def everify_count() -> int:
-    if not mysql_configured():
-        return 0
-    try:
-        conn = get_conn()
-        if conn is None:
-            return 0
-        with conn.cursor() as cur:
-            cur.execute(f"SELECT COUNT(*) AS n FROM {EVERIFY_TABLE}")
-            row = cur.fetchone() or {}
-        return int(row.get("n") or 0)
-    except Exception:
-        close_conn()
-        return 0
-
-
-def enrich_jobs_everify(*, only_unknown: bool = False) -> dict:
-    """Set job e_verified from the E-Verify employer table in this database.
-
-    A job stays unknown until that table has rows. Then a name match is true
-    and a miss is false. only_unknown skips rows that were already checked.
-    """
-    from jobscraper.everify import match_company
-
-    empty = {"updated": 0, "true": 0, "false": 0, "unknown": 0, "employers": 0}
-    if not mysql_configured():
-        return {**empty, "employers": everify_count()}
-    conn = get_conn()
-    if conn is None:
-        return empty
-    index = everify_index()
-    employers = everify_count()
-    if employers <= 0:
-        return empty
-    where = ""
-    if only_unknown:
-        where = " WHERE e_verified IS NULL OR TRIM(e_verified) = '' OR LOWER(e_verified) = 'unknown'"
-    with conn.cursor() as cur:
-        cur.execute(f"SELECT id, company FROM {JOBS_TABLE}{where}")
-        jobs = list(cur.fetchall() or [])
-        matched = 0
-        missed = 0
-        for job in jobs:
-            hit = match_company(job.get("company") or "", index)
-            if hit:
-                matched += 1
-                status = "true"
-                name = hit.get("employer") or hit.get("dba")
-            else:
-                missed += 1
-                status = "false"
-                name = ""
-            cur.execute(
-                f"UPDATE {JOBS_TABLE} SET e_verified = %s, e_verify_name = %s WHERE id = %s",
-                (status, (name or "")[:255], job.get("id")),
-            )
-    return {
-        "updated": len(jobs),
-        "true": matched,
-        "false": missed,
-        "unknown": 0,
-        "employers": employers,
-    }
-
-
-def _resolved_h1b(company: object, inferred: object) -> str:
-    """Posting text wins when it refuses sponsorship. A known sponsor fills unknown."""
-    current = str(inferred or "unknown").strip().lower() or "unknown"
-    if current == "no":
-        return "no"
-    if current == "yes":
-        return "yes"
-    if _company_h1b_note(company):
-        return "yes"
-    return "unknown"
-
-
-def _company_h1b_note(company: object) -> str:
-    from jobscraper.h1b_sponsors import match_sponsor
-
-    hit = match_sponsor(str(company or ""), h1b_index())
-    if not hit:
-        return ""
-    first = int(hit.get("first_fiscal_year") or 0)
-    last = int(hit.get("last_fiscal_year") or 0)
-    approvals = int(hit.get("approvals") or 0)
-    if first and last:
-        span = str(first) if first == last else f"{first}-{last}"
-        return f"USCIS H-1B approvals FY{span}: {approvals}"[:255]
-    return f"USCIS H-1B approvals: {approvals}"[:255]
-
-
-def _mark_company_h1b(cur, company_id: int, name: str) -> None:
-    note = _company_h1b_note(name)
-    if not note:
-        return
-    try:
-        cur.execute(
-            "UPDATE companies SET h1b_sponsor = 1, "
-            "sponsorship_notes = IF(sponsorship_notes IS NULL OR sponsorship_notes = '', %s, sponsorship_notes) "
-            "WHERE id = %s AND (h1b_sponsor IS NULL OR h1b_sponsor = 0)",
-            (note, company_id),
-        )
-    except Exception:
-        log.debug("companies.h1b_sponsor was not updated for %s", name)
-
-
-def _long_conn():
-    cfg = mysql_config()
-    if not cfg:
-        return None
-    tuned = dict(cfg)
-    tuned["read_timeout"] = 300
-    tuned["write_timeout"] = 300
-    conn = _connect(tuned)
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SET SESSION max_execution_time=0")
-            cur.execute("SET SESSION wait_timeout=600")
-    except Exception:
-        pass
-    return conn
-
-
-def h1b_count() -> int:
-    if not mysql_configured():
-        return 0
-    try:
-        conn = get_conn()
-        if conn is None:
-            return 0
-        with conn.cursor() as cur:
-            cur.execute(f"SELECT COUNT(*) AS n FROM {H1B_TABLE}")
-            row = cur.fetchone() or {}
-        return int(row.get("n") or 0)
-    except Exception:
-        close_conn()
-        return 0
-
-
-def replace_h1b_sponsors(rows: list[dict]) -> int:
-    global _H1B_INDEX
-    from jobscraper.h1b_sponsors import build_index
-
-    if not mysql_configured():
-        return 0
-    conn = _long_conn()
-    if conn is None:
-        return 0
-    try:
-        conn.autocommit(False)
-    except Exception:
-        pass
-    payload = [
-        (
-            str(row.get("name_key") or "")[:255],
-            str(row.get("employer") or "")[:512],
-            int(row.get("approvals") or 0),
-            int(row.get("denials") or 0),
-            int(row.get("first_fiscal_year") or 0),
-            int(row.get("last_fiscal_year") or 0),
-        )
-        for row in rows
-        if str(row.get("name_key") or "") and int(row.get("approvals") or 0) > 0
-    ]
-    try:
-        with conn.cursor() as cur:
-            cur.execute(f"DELETE FROM {H1B_TABLE}")
-            for start in range(0, len(payload), 1000):
-                chunk = payload[start : start + 1000]
-                cur.executemany(
-                    f"INSERT INTO {H1B_TABLE} "
-                    "(name_key, employer, approvals, denials, first_fiscal_year, last_fiscal_year) "
-                    "VALUES (%s, %s, %s, %s, %s, %s)",
-                    chunk,
-                )
-            conn.commit()
-        _H1B_INDEX = build_index(rows)
-        return len(payload)
-    except Exception:
-        try:
-            conn.rollback()
-        except Exception:
-            pass
-        log.exception("H-1B sponsor import failed")
-        raise
-    finally:
-        conn.close()
-
-
-def h1b_index() -> dict:
-    global _H1B_INDEX
-    from jobscraper.h1b_sponsors import build_index
-
-    if _H1B_INDEX is not None:
-        return _H1B_INDEX
-    rows: list[dict] = []
-    conn = _long_conn()
-    if conn is not None:
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    f"SELECT name_key, employer, approvals, denials, "
-                    f"first_fiscal_year, last_fiscal_year FROM {H1B_TABLE}"
-                )
-                rows = list(cur.fetchall() or [])
-        except Exception:
-            log.exception("H-1B sponsor index was not loaded")
-            rows = []
-        finally:
-            conn.close()
-    built = build_index(rows)
-    if rows:
-        _H1B_INDEX = built
-    return built
-
-
-def enrich_jobs_h1b() -> dict:
-    """Set h1b_sponsorship to yes when the employer has a USCIS approval and the posting does not refuse it."""
-    from jobscraper.h1b_sponsors import match_sponsor
-
-    empty = {"jobs_updated": 0, "companies_updated": 0, "employers": 0}
-    if not mysql_configured():
-        return empty
-    index = h1b_index()
-    employers = h1b_count()
-    if employers <= 0 or not index:
-        return empty
-    conn = _long_conn()
-    if conn is None:
-        return empty
-    jobs_updated = 0
-    companies_updated = 0
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                f"SELECT id, company FROM {JOBS_TABLE} "
-                f"WHERE h1b_sponsorship IS NULL OR h1b_sponsorship = '' "
-                f"OR LOWER(h1b_sponsorship) = 'unknown'"
-            )
-            job_ids = []
-            for job in cur.fetchall() or []:
-                if match_sponsor(job.get("company") or "", index):
-                    job_ids.append(int(job["id"]))
-            for start in range(0, len(job_ids), 400):
-                chunk = job_ids[start : start + 400]
-                slots = ", ".join(["%s"] * len(chunk))
-                cur.execute(
-                    f"UPDATE {JOBS_TABLE} SET h1b_sponsorship = 'yes' "
-                    f"WHERE id IN ({slots}) AND LOWER(h1b_sponsorship) <> 'no'",
-                    chunk,
-                )
-                jobs_updated += int(cur.rowcount or 0)
-            try:
-                cur.execute("SELECT id, name FROM companies")
-                company_ids = []
-                for company in cur.fetchall() or []:
-                    if match_sponsor(company.get("name") or "", index):
-                        company_ids.append(int(company["id"]))
-                note = "USCIS H-1B Employer Data Hub approval"
-                for start in range(0, len(company_ids), 400):
-                    chunk = company_ids[start : start + 400]
-                    slots = ", ".join(["%s"] * len(chunk))
-                    cur.execute(
-                        "UPDATE companies SET h1b_sponsor = 1, "
-                        "sponsorship_notes = IF(sponsorship_notes IS NULL OR sponsorship_notes = '', %s, sponsorship_notes) "
-                        f"WHERE id IN ({slots}) AND (h1b_sponsor IS NULL OR h1b_sponsor = 0)",
-                        [note, *chunk],
-                    )
-                    companies_updated += int(cur.rowcount or 0)
-            except Exception:
-                log.exception("Could not mark companies.h1b_sponsor")
-    except Exception:
-        log.exception("H-1B job enrich failed")
-        return empty
-    finally:
-        conn.close()
-    return {
-        "jobs_updated": jobs_updated,
-        "companies_updated": companies_updated,
-        "employers": employers,
-    }
-
-
-def ensure_h1b_sponsors() -> dict:
-    """Load USCIS sponsor companies when the table is empty, then mark matching jobs."""
-    from jobscraper.h1b_sponsors import collect_sponsors
-
-    with _H1B_LOAD_LOCK:
-        if not mysql_configured():
-            return {"employers": 0, "downloaded": False, "jobs_updated": 0, "companies_updated": 0}
-        init_db()
-        downloaded = False
-        employers = h1b_count()
-        if employers < 1000:
-            rows = collect_sponsors()
-            if rows:
-                employers = replace_h1b_sponsors(rows)
-                downloaded = True
-                log.info("Saved %s H-1B sponsor companies", employers)
-        global _H1B_INDEX
-        _H1B_INDEX = None
-        stats = enrich_jobs_h1b()
-        stats["downloaded"] = downloaded
-        stats["employers"] = employers or stats.get("employers") or 0
-        return stats
-
-
-def start_h1b_sponsor_load() -> None:
-    global _H1B_LOAD_STARTED
-    if _H1B_LOAD_STARTED or not mysql_configured():
-        return
-    _H1B_LOAD_STARTED = True
-    threading.Thread(
-        target=ensure_h1b_sponsors,
-        name="h1b-sponsors",
-        daemon=True,
-    ).start()
-
 
 def health() -> dict:
     """Liveness only. A locked jobs table must not hang this check into an IIS 502."""

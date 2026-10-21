@@ -18,6 +18,6 @@ class JobItem(scrapy.Item):
     work_model = scrapy.Field()
     experience_level = scrapy.Field()
     years_experience = scrapy.Field()
-    h1b_sponsorship = scrapy.Field()
+    visa_sponsorship = scrapy.Field()
     clearance_required = scrapy.Field()
-    us_citizen_required = scrapy.Field()
+    saudi_national_required = scrapy.Field()

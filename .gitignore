@@ -3,8 +3,6 @@ __pycache__/
 *.pyc
 .scrapy/
 data/*.json
-data/everify_employers.csv
-data/h1b/
 *.egg-info/
 .idea/
 .vscode/

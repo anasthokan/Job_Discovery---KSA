@@ -1,928 +1,156 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
-
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Dashboard | Job Discovery</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Google+Sans+Flex:wght@400..800&display=swap">
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>KSA Jobs</title>
   <style>
-    :root {
-      --accent: #4f46e5;
-      --accent-soft: #eef2ff;
-      --sidebar: #0f172a;
-      --sidebar-muted: #94a3b8;
-      --bg: #f4f6fb;
-      --card: #ffffff;
-      --text: #0f172a;
-      --muted: #64748b;
-      --border: #e2e8f0;
-      --radius: 12px;
-    }
-
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    html, body { height: 100%; }
-    body {
-      font-family: "Google Sans Flex", "Segoe UI", sans-serif;
-      background: var(--bg);
-      color: var(--text);
-    }
-
-    .page-wrapper.app-sidebar-layout {
-      display: grid;
-      grid-template-columns: 260px 1fr;
-      min-height: 100vh;
-    }
-
-    .mobile-top-bar { display: none; }
-    .sidebar-overlay { display: none; }
-
-    .app-sidebar {
-      background: var(--sidebar);
-      color: #fff;
-      display: flex;
-      flex-direction: column;
-      padding: 18px 14px;
-      position: sticky;
-      top: 0;
-      height: 100vh;
-    }
-
-    .sidebar-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 28px; }
-    .sidebar-logo-link { color: #fff; text-decoration: none; font-weight: 800; font-size: 1.1rem; }
-    .brand-logo-collapsed, .sidebar-collapse-btn { display: none; }
-    .sidebar-section-title {
-      font-size: 0.7rem;
-      letter-spacing: 0.08em;
-      color: var(--sidebar-muted);
-      margin-bottom: 10px;
-    }
-    .sidebar-nav-links { display: flex; flex-direction: column; gap: 4px; }
-    .sidebar-nav-link, .dropdown-link-main {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      color: #cbd5e1;
-      text-decoration: none;
-      padding: 10px 12px;
-      border-radius: 8px;
-      font-size: 0.92rem;
-    }
-    .sidebar-nav-link.active, .sidebar-nav-link:hover, .dropdown-link-main:hover {
-      background: rgba(255,255,255,0.08);
-      color: #fff;
-    }
-    .sidebar-dropdown-toggle { display: flex; align-items: center; justify-content: space-between; }
-    .dropdown-chevron-btn { background: none; border: none; color: #94a3b8; cursor: pointer; }
-    .sidebar-submenu { display: none; padding: 4px 0 8px 34px; }
-    .sidebar-dropdown-wrapper.open .sidebar-submenu { display: flex; flex-direction: column; gap: 2px; }
-    .sidebar-submenu-item { color: #94a3b8; text-decoration: none; font-size: 0.85rem; padding: 6px 0; }
-    .sidebar-submenu-item:hover { color: #fff; }
-    .sidebar-user-footer { margin-top: auto; }
-    .sidebar-user-card {
-      display: flex; align-items: center; gap: 10px;
-      text-decoration: none; color: #fff; padding: 10px; border-radius: 10px;
-    }
-    .avatar {
-      width: 36px; height: 36px; border-radius: 50%;
-      display: grid; place-items: center; font-weight: 700; font-size: 0.8rem;
-      background: var(--accent);
-    }
-    .sidebar-user-info { display: flex; flex-direction: column; }
-    .sidebar-user-name { font-size: 0.85rem; font-weight: 600; }
-    .sidebar-user-role { font-size: 0.72rem; color: var(--sidebar-muted); }
-
-    .app-main-content { min-width: 0; }
-    .dashboard-main { padding: 28px 28px 48px; }
-    .dashboard-fluid-container { max-width: 1400px; margin: 0 auto; }
-
-    .tracker-title { font-size: 1.7rem; font-weight: 800; }
-    .tracker-subtabs-row { display: flex; align-items: center; gap: 12px; margin-top: 8px; }
-    .tracker-total-label { font-size: 0.75rem; letter-spacing: 0.06em; color: var(--muted); }
-    .tracker-subtab {
-      border: 1px solid var(--border); background: #fff; border-radius: 999px;
-      padding: 6px 12px; font-size: 0.8rem; cursor: pointer;
-    }
-    .tracker-subtab.active { background: var(--accent-soft); color: var(--accent); border-color: #c7d2fe; }
-
-    .jobs-finder-searchbar { display: flex; flex-direction: column; gap: 12px; margin-bottom: 18px; }
-    .search-input-wrapper {
-      display: flex; align-items: center; gap: 8px;
-      background: #fff; border: 1px solid var(--border); border-radius: 10px; padding: 8px 12px;
-    }
-    .search-scroll-area { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; flex: 1; }
-    .search-input { border: none; outline: none; flex: 1; min-width: 180px; font: inherit; font-size: 0.95rem; }
-    .search-icon, .search-input-wrapper { color: var(--muted); }
-    .search-tag {
-      display: inline-flex; align-items: center; gap: 6px;
-      background: var(--accent-soft); color: var(--accent);
-      border-radius: 999px; padding: 4px 10px; font-size: 0.8rem; font-weight: 600;
-    }
-    .search-tag button { border: none; background: none; cursor: pointer; color: inherit; font-size: 1rem; line-height: 1; }
-    .clear-all-tags-btn { border: none; background: none; cursor: pointer; color: var(--muted); }
-    .search-filters-group { display: flex; flex-wrap: wrap; gap: 8px; }
-    .filter-pill {
-      border: 1px solid var(--border); background: #fff; border-radius: 999px;
-      padding: 8px 12px; font-size: 0.82rem; display: inline-flex; gap: 6px; align-items: center;
-    }
-    .filter-pill.active { border-color: #c7d2fe; background: var(--accent-soft); color: var(--accent); font-weight: 600; }
-    .filter-select {
-      border: 1px solid var(--border); background: #fff; border-radius: 999px;
-      padding: 8px 12px; font: inherit; font-size: 0.82rem; color: var(--text);
-    }
-    .filter-select:focus { outline: 2px solid #c7d2fe; }
-
-    .jobs-split-container {
-      display: grid;
-      grid-template-columns: 380px 1fr;
-      gap: 16px;
-      min-height: 72vh;
-    }
-    .jobs-list-panel, .job-detail-panel {
-      background: var(--card);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      overflow: hidden;
-      display: flex;
-      flex-direction: column;
-    }
-    .jobs-list-header {
-      display: flex; justify-content: space-between; align-items: center;
-      padding: 14px 16px; border-bottom: 1px solid var(--border); font-size: 0.88rem;
-    }
-    .results-count { color: var(--muted); }
-    .jobs-list-items { overflow: auto; flex: 1; }
-    .job-list-card {
-      display: flex; gap: 12px; padding: 14px 16px;
-      border-bottom: 1px solid var(--border); cursor: pointer;
-    }
-    .job-list-card:hover { background: #f8fafc; }
-    .job-list-card.active { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
-    .job-card-logo {
-      width: 40px; height: 40px; border-radius: 10px; flex-shrink: 0;
-      display: grid; place-items: center; color: #fff; font-weight: 700;
-    }
-    .bg-cyan { background: #0891b2; }
-    .bg-indigo { background: #4f46e5; }
-    .bg-slate { background: #334155; }
-    .job-card-title { font-size: 0.95rem; font-weight: 700; margin-bottom: 2px; }
-    .job-card-company, .job-card-meta, .job-card-pay { font-size: 0.8rem; color: var(--muted); }
-    .empty-state, .loading-state { padding: 36px 18px; text-align: center; color: var(--muted); }
-
-    .detail-header-bar {
-      display: flex; justify-content: space-between; align-items: center;
-      padding: 12px 18px; border-bottom: 1px solid var(--border);
-    }
-    .detail-nav-tabs { display: flex; gap: 6px; }
-    .detail-tab {
-      border: none; background: none; padding: 8px 12px; border-radius: 8px;
-      cursor: pointer; color: var(--muted); font-weight: 600;
-    }
-    .detail-tab.active { background: var(--accent-soft); color: var(--accent); }
-    .btn {
-      display: inline-flex; align-items: center; gap: 6px; border-radius: 8px;
-      padding: 8px 12px; font-weight: 600; text-decoration: none; border: 1px solid transparent; cursor: pointer;
-    }
-    .btn-primary { background: var(--accent); color: #fff; }
-    .btn-outline { background: #fff; border-color: var(--border); color: var(--text); }
-    .btn-sm { font-size: 0.82rem; }
-    .detail-content-grid { overflow: auto; padding: 20px 22px 32px; }
-    .detail-company-header-row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; color: var(--muted); font-size: 0.88rem; }
-    .company-logo-sm { width: 28px; height: 28px; border-radius: 8px; display: grid; place-items: center; color: #fff; font-size: 0.75rem; font-weight: 700; }
-    .detail-job-title { font-size: 1.45rem; font-weight: 800; margin-bottom: 16px; }
-    .job-tags-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 16px; }
-    .tag-grid-item {
-      display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 0.9rem;
-      background: #f8fafc; border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px;
-    }
-    .compensation-box, .benefits-box, .job-description-card {
-      border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; margin-bottom: 14px; background: #fff;
-    }
-    .comp-label, .benefits-title, .description-section-title { font-size: 0.8rem; color: var(--muted); margin-bottom: 8px; font-weight: 700; }
-    .comp-amount { font-size: 1.05rem; }
-    .benefits-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-    .benefit-item { font-size: 0.88rem; color: var(--text); }
-    .description-text, .description-list { font-size: 0.95rem; line-height: 1.6; color: #334155; }
-    .description-list { padding-left: 18px; margin: 8px 0 14px; }
-    .description-sub-title { margin: 14px 0 6px; font-size: 1rem; }
-
-    .status-banner {
-      font-size: 0.82rem; color: var(--muted); margin: 0 0 12px;
-    }
-    .status-banner.error { color: #b91c1c; }
-
-    @media (max-width: 1100px) {
-      .page-wrapper.app-sidebar-layout { grid-template-columns: 1fr; }
-      .app-sidebar { display: none; }
-      .mobile-top-bar {
-        display: flex; align-items: center; gap: 10px;
-        padding: 12px 16px; background: #fff; border-bottom: 1px solid var(--border);
-      }
-      .jobs-split-container { grid-template-columns: 1fr; }
-      .job-detail-panel { min-height: 420px; }
-    }
+    :root { --green: #0f6b4c; --ink: #14221c; --muted: #5c6b64; --line: #e4ebe7; --bg: #f4f7f5; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: "Segoe UI", sans-serif; background: var(--bg); color: var(--ink); }
+    header { background: var(--green); color: #fff; padding: 20px 24px; }
+    header h1 { margin: 0 0 4px; font-size: 1.4rem; }
+    header p { margin: 0; opacity: 0.9; }
+    main { max-width: 1100px; margin: 0 auto; padding: 20px; }
+    form { display: flex; flex-wrap: wrap; gap: 10px; background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
+    label { display: flex; flex-direction: column; gap: 4px; font-size: 0.8rem; color: var(--muted); }
+    input, select, button { font: inherit; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line); }
+    button { background: var(--green); color: #fff; border: 0; cursor: pointer; }
+    button.secondary { background: #fff; color: var(--green); border: 1px solid var(--green); }
+    #status { margin: 12px 0; color: var(--muted); }
+    .job { background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin-bottom: 10px; }
+    .job h2 { margin: 0 0 4px; font-size: 1.05rem; }
+    .meta { color: var(--muted); font-size: 0.9rem; }
+    a { color: var(--green); }
   </style>
 </head>
-
 <body>
-  <div class="page-wrapper app-sidebar-layout">
-
-    <div class="mobile-top-bar">
-      <div class="nav-logo">
-        <a href="/" class="nav-logo-link" style="font-weight:800;color:var(--text);text-decoration:none;">Job Discovery</a>
-      </div>
-    </div>
-
-    <aside id="app-sidebar" class="app-sidebar">
-      <div class="sidebar-header">
-        <a href="/" class="sidebar-logo-link">Job Discovery</a>
-      </div>
-
-      <div class="sidebar-nav-section">
-        <div class="sidebar-section-title">NAVIGATION</div>
-        <nav class="sidebar-nav-links">
-          <a href="/dashboard.html" class="sidebar-nav-link active">
-            <span>Jobs</span>
-          </a>
-          <a href="/" class="sidebar-nav-link">
-            <span>Scrape Board</span>
-          </a>
-          <div class="sidebar-dropdown-wrapper" id="tools-dropdown-wrapper">
-            <div class="sidebar-nav-link sidebar-dropdown-toggle" id="tools-dropdown-toggle">
-              <a href="/dashboard.html" class="dropdown-link-main"><span>Tools</span></a>
-              <button type="button" class="dropdown-chevron-btn" id="tools-chevron-btn" aria-label="Toggle Tools menu">▾</button>
-            </div>
-            <div class="sidebar-submenu" id="tools-submenu">
-              <a href="/dashboard.html" class="sidebar-submenu-item"><span>USAJobs Agencies</span></a>
-              <a href="/dashboard.html#series" class="sidebar-submenu-item"><span>Occupational Series</span></a>
-              <a href="/dashboard.html#greenhouse" class="sidebar-submenu-item"><span>Greenhouse Jobs</span></a>
-            </div>
-          </div>
-        </nav>
-      </div>
-
-      <div class="sidebar-user-footer">
-        <a href="/" class="sidebar-user-card">
-          <div class="avatar avatar-sm avatar-accent">JD</div>
-          <div class="sidebar-user-info">
-            <span class="sidebar-user-name">USAJobs Test</span>
-            <span class="sidebar-user-role">Agency subelements</span>
-          </div>
-        </a>
-      </div>
-    </aside>
-
-    <main class="app-main-content">
-      <div class="dashboard-main">
-        <div class="container dashboard-fluid-container">
-          <section id="jobs-view-section" class="tab-view-section active">
-
-            <div class="tracker-header-row" style="margin-bottom: 24px;">
-              <div>
-                <h1 class="tracker-title">Explore Jobs</h1>
-                <div class="tracker-subtabs-row">
-                  <span class="tracker-total-label"><strong id="total-jobs-explorer-count">0</strong> <span id="list-kind-label">USAJOBS AGENCIES</span></span>
-                  <button type="button" class="tracker-subtab active" data-list="agencies">Agencies</button>
-                  <button type="button" class="tracker-subtab" data-list="series">Occupational Series</button>
-                  <button type="button" class="tracker-subtab" data-list="greenhouse">Greenhouse</button>
-                </div>
-              </div>
-            </div>
-
-            <p class="status-banner" id="status-banner">Loading USAJobs agencies and occupational series…</p>
-
-            <div class="jobs-finder-searchbar">
-              <div class="search-input-wrapper" id="search-input-container">
-                <svg class="search-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <circle cx="11" cy="11" r="8"></circle>
-                  <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
-                </svg>
-                <div class="search-scroll-area" id="search-scroll-area">
-                  <div class="search-tags-box" id="search-tags-box"></div>
-                  <input type="text" class="search-input" id="search-input-field" placeholder="Find an agency or series (press Enter to add tags)">
-                </div>
-                <button type="button" class="clear-all-tags-btn" id="clear-all-tags-btn" aria-label="Clear all search tags" title="Clear all tags" style="display: none;">✕</button>
-              </div>
-
-              <div class="search-filters-group">
-                <button type="button" class="filter-pill active" id="filter-location-btn">
-                  <span class="filter-btn-label">United States</span>
-                </button>
-                <button type="button" class="filter-pill active" id="filter-job-type-btn">
-                  <span class="filter-btn-label" id="filter-kind-label">Federal Agency</span>
-                </button>
-                <button type="button" class="filter-pill" id="filter-source-btn">
-                  <span class="filter-btn-label" id="filter-source-label">USAJobs</span>
-                </button>
-                <label class="filter-pill" id="greenhouse-board-wrap" hidden>
-                  <span>Board</span>
-                  <select id="greenhouse-board" class="filter-select" aria-label="Greenhouse board"></select>
-                </label>
-              </div>
-            </div>
-
-            <div class="jobs-split-container">
-              <div class="jobs-list-panel">
-                <div class="jobs-list-header">
-                  <span class="results-count" id="results-count">Found 0 jobs</span>
-                  <span id="current-sort-label">Most relevant</span>
-                </div>
-                <div class="jobs-list-items" id="jobs-list-items">
-                  <div class="loading-state">Loading agencies…</div>
-                </div>
-              </div>
-
-              <div class="job-detail-panel">
-                <div class="detail-content-wrapper">
-                  <div class="detail-header-bar">
-                    <div class="detail-nav-tabs">
-                      <button type="button" class="detail-tab active">Overview</button>
-                      <button type="button" class="detail-tab">Company</button>
-                    </div>
-                    <div class="detail-actions">
-                      <a class="btn btn-primary btn-sm" id="btn-apply-now" href="https://www.usajobs.gov/" target="_blank" rel="noopener">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
-                        Apply
-                      </a>
-                    </div>
-                  </div>
-
-                  <div class="detail-content-grid" id="job-detail-body">
-                    <div class="empty-state">Select an agency from the list.</div>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-          </section>
-        </div>
-      </div>
-    </main>
-  </div>
-
+  <header>
+    <h1>Saudi Arabia jobs</h1>
+    <p>Indeed, LinkedIn, Bayt, and Google Jobs, saved in ksajob.</p>
+  </header>
+  <main>
+    <form id="filters">
+      <label>Keywords <input id="keywords" placeholder="accountant, nurse, python" /></label>
+      <label>Region
+        <select id="region">
+          <option value="All">All regions</option>
+          <option value="Remote">Remote</option>
+          <option>Riyadh</option>
+          <option>Makkah</option>
+          <option>Madinah</option>
+          <option>Eastern Province</option>
+          <option>Qassim</option>
+          <option>Asir</option>
+          <option>Tabuk</option>
+          <option>Hail</option>
+          <option>Northern Borders</option>
+          <option>Jazan</option>
+          <option>Najran</option>
+          <option>Al Bahah</option>
+          <option>Al Jawf</option>
+        </select>
+      </label>
+      <label>City <input id="city" placeholder="Jeddah" /></label>
+      <label>Board
+        <select id="platform">
+          <option value="All">All</option>
+          <option>Indeed</option>
+          <option>LinkedIn</option>
+          <option>Bayt</option>
+          <option>Google Jobs</option>
+        </select>
+      </label>
+      <label>Posted
+        <select id="days">
+          <option value="7">7 days</option>
+          <option value="30" selected>30 days</option>
+          <option value="1">1 day</option>
+        </select>
+      </label>
+      <button type="submit">Show jobs</button>
+      <button type="button" class="secondary" id="scrape">Scrape now</button>
+    </form>
+    <p id="status">Loading saved jobs…</p>
+    <div id="list"></div>
+  </main>
   <script>
-    const listEl = document.getElementById("jobs-list-items");
-    const detailEl = document.getElementById("job-detail-body");
-    const countEl = document.getElementById("total-jobs-explorer-count");
-    const resultsEl = document.getElementById("results-count");
-    const statusEl = document.getElementById("status-banner");
-    const searchInput = document.getElementById("search-input-field");
-    const tagsBox = document.getElementById("search-tags-box");
-    const clearTagsBtn = document.getElementById("clear-all-tags-btn");
-    const applyBtn = document.getElementById("btn-apply-now");
-    const toolsToggle = document.getElementById("tools-chevron-btn");
-    const toolsWrap = document.getElementById("tools-dropdown-wrapper");
+    const statusEl = document.getElementById("status");
+    const listEl = document.getElementById("list");
 
-    const LOCAL_API_BASES = [
-      "http://127.0.0.1:9001",
-      "http://127.0.0.1:8000",
-      "http://localhost:9001",
-      "http://localhost:8000",
-    ];
-    const GREENHOUSE_API = "https://boards-api.greenhouse.io/v1/boards";
-    const GREENHOUSE_BOARDS = [
-      "stripe", "airbnb", "discord", "figma", "cloudflare", "databricks", "reddit", "dropbox",
-      "pinterest", "instacart", "robinhood", "coinbase", "gitlab", "hashicorp", "mongodb", "datadog",
-      "snowflake", "twilio", "okta", "shopify", "doordash", "lyft", "spotify", "block", "affirm",
-      "plaid", "brex", "airtable", "asana", "duolingo", "zendesk", "hubspot", "cloudkitchens",
-      "rippling", "scaleai", "anduril", "chime", "sofi", "nvidia", "anthropic", "flexport", "gusto",
-      "calendly", "intercom", "coursera", "elastic", "confluent", "sentry", "checkr", "carta",
-      "lattice", "mozilla", "github", "zapier", "pagerduty", "1password", "cruise", "webflow",
-      "postman", "grammarly",
-    ];
-
-    const LIST_META = {
-      agencies: {
-        path: "/api/usajobs/agencies",
-        label: "USAJOBS AGENCIES",
-        kind: "Federal Agency",
-        source: "USAJobs",
-        empty: "No agencies match these tags.",
-        placeholder: "Find an agency (press Enter to add tags)",
-        locationLabel: "United States",
-      },
-      series: {
-        path: "/api/usajobs/series",
-        label: "OCCUPATIONAL SERIES",
-        kind: "Occupational Series",
-        source: "USAJobs",
-        empty: "No series match these tags.",
-        placeholder: "Find a series (press Enter to add tags)",
-        locationLabel: "United States",
-      },
-      greenhouse: {
-        label: "GREENHOUSE JOBS",
-        kind: "Greenhouse",
-        source: "Greenhouse",
-        empty: "No Greenhouse jobs match these tags.",
-        placeholder: "Find a Greenhouse job (press Enter to add tags)",
-        locationLabel: "All locations",
-      },
-    };
-
-    const boardSelect = document.getElementById("greenhouse-board");
-    const boardWrap = document.getElementById("greenhouse-board-wrap");
-    let currentList = listFromHash();
-    let lists = { agencies: [], series: [], greenhouse: [] };
-    let greenhouseBoards = [];
-    let greenhouseBoard = "stripe";
-    let greenhouseReq = 0;
-    let detailReq = 0;
-    let jobs = [];
-    let filtered = [];
-    let tags = [];
-    let selectedId = null;
-
-    function listFromHash() {
-      const hash = location.hash.replace("#", "");
-      return LIST_META[hash] ? hash : "agencies";
+    function params() {
+      const q = new URLSearchParams({
+        keywords: document.getElementById("keywords").value.trim(),
+        state: document.getElementById("region").value,
+        city: document.getElementById("city").value.trim(),
+        platform: document.getElementById("platform").value,
+        days: document.getElementById("days").value,
+        limit: "50",
+      });
+      return q;
     }
 
-    function apiBases() {
-      const override = new URLSearchParams(location.search).get("api");
-      const bases = [];
-      if (override) bases.push(override.replace(/\/$/, ""));
-      if (location.protocol !== "file:") bases.push("");
-      bases.push(...LOCAL_API_BASES);
-      return [...new Set(bases)];
-    }
-
-    function mapPayload(payload, listName) {
-      if (Array.isArray(payload?.jobs)) return payload.jobs;
-      const values = [];
-      for (const block of payload?.CodeList || []) {
-        values.push(...(block.ValidValue || []));
+    function render(jobs) {
+      if (!jobs.length) {
+        listEl.innerHTML = "<p>No Saudi listings for this filter yet.</p>";
+        return;
       }
-      const isSeries = listName === "series";
-      return values
-        .filter((row) => String(row.IsDisabled || "No").toLowerCase() !== "yes")
-        .map((row) => {
-          const code = String(row.Code || "").trim();
-          const parent = String(row.ParentCode || "").trim();
-          const acronym = String(row.Acronym || "").trim() || parent || "USAJobs";
-          const family = String(row.JobFamily || "").trim();
-          return {
-            id: `usajobs-${isSeries ? "series" : "agency"}-${code}`,
-            title: String(row.Value || "").trim() || (isSeries ? "Unknown series" : "Unknown agency"),
-            company: isSeries ? (code ? `Series ${code}` : "USAJobs") : acronym,
-            skills: [code, parent, acronym, family].filter(Boolean),
-            state: "United States",
-            location: "United States",
-            platform: "USAJobs",
-            list_type: isSeries ? "series" : "agency",
-            url: code
-              ? `https://www.usajobs.gov/Search/Results?${isSeries ? "j" : "a"}=${encodeURIComponent(code)}`
-              : "https://www.usajobs.gov/",
-            posted_at: row.LastModified || null,
-            agency_code: isSeries ? null : code,
-            parent_code: parent || null,
-            series_code: isSeries ? code : null,
-            job_family: family || null,
-          };
-        });
+      listEl.innerHTML = jobs.map((job) => `
+        <article class="job">
+          <h2>${escapeHtml(job.title || "")}</h2>
+          <div class="meta">${escapeHtml(job.company || "")} · ${escapeHtml(job.location || job.state || "Saudi Arabia")} · ${escapeHtml(job.platform || "")}</div>
+          <div class="meta">${escapeHtml(job.daysAgo || "")}</div>
+          <p><a href="${escapeHtml(job.url || "#")}" target="_blank" rel="noopener">Open listing</a></p>
+        </article>
+      `).join("");
     }
 
     function escapeHtml(value) {
-      return String(value ?? "").replace(/[&<>"']/g, (char) => ({
-        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-      }[char]));
+      return String(value).replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
     }
 
-    function setStatus(message, isError = false) {
-      statusEl.textContent = message;
-      statusEl.classList.toggle("error", isError);
+    async function loadJobs() {
+      statusEl.textContent = "Loading…";
+      const res = await fetch("/api/jobs?" + params());
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "Could not load jobs");
+      render(data.jobs || []);
+      statusEl.textContent = `${data.total ?? 0} jobs in ksajob for this filter.`;
     }
 
-    function logoClass(index) {
-      return ["bg-cyan", "bg-indigo", "bg-slate"][index % 3];
-    }
-
-    function initial(job) {
-      return String(job.company || job.title || "U").trim().charAt(0).toUpperCase();
-    }
-
-    function matchesTags(job) {
-      if (!tags.length) return true;
-      const blob = `${job.title || ""} ${job.company || ""} ${job.location || ""} ${(job.skills || []).join(" ")} ${(job.departments || []).join(" ")}`.toLowerCase();
-      return tags.every((tag) => blob.includes(tag));
-    }
-
-    function renderTags() {
-      tagsBox.innerHTML = tags.map((tag, index) => (
-        `<span class="search-tag">${escapeHtml(tag)} <button type="button" data-index="${index}" aria-label="Remove tag">&times;</button></span>`
-      )).join("");
-      clearTagsBtn.style.display = tags.length ? "inline-flex" : "none";
-    }
-
-    function setActiveList(listName, { resetSelection = true } = {}) {
-      currentList = LIST_META[listName] ? listName : "agencies";
-      const meta = LIST_META[currentList];
-      jobs = lists[currentList] || [];
-      document.getElementById("list-kind-label").textContent = meta.label;
-      document.getElementById("filter-kind-label").textContent = meta.kind;
-      document.getElementById("filter-source-label").textContent = meta.source;
-      document.querySelector("#filter-location-btn .filter-btn-label").textContent = meta.locationLabel;
-      searchInput.placeholder = meta.placeholder;
-      boardWrap.hidden = currentList !== "greenhouse";
-      document.getElementById("filter-source-btn").hidden = currentList === "greenhouse";
-      document.querySelectorAll(".tracker-subtab").forEach((btn) => {
-        btn.classList.toggle("active", btn.dataset.list === currentList);
-      });
-      const nextHash = currentList === "agencies" ? "" : `#${currentList}`;
-      if (location.hash !== nextHash) {
-        history.replaceState(null, "", `${location.pathname}${location.search}${nextHash}`);
+    async function waitForScrape() {
+      for (let i = 0; i < 90; i++) {
+        await new Promise((r) => setTimeout(r, 4000));
+        const res = await fetch("/api/scrape/status");
+        const data = await res.json();
+        if (!data.running) return data;
+        statusEl.textContent = "Scrape is still running…";
       }
-      if (resetSelection) selectedId = null;
-      applyFilters();
+      throw new Error("Scrape is still running. Refresh in a minute.");
     }
 
-    function applyFilters() {
-      filtered = jobs.filter(matchesTags);
-      countEl.textContent = String(filtered.length);
-      resultsEl.textContent = `Found ${filtered.length} jobs`;
-      if (!filtered.some((job) => job.id === selectedId)) {
-        selectedId = filtered[0]?.id || null;
-      }
-      renderList();
-      renderDetail();
-    }
+    document.getElementById("filters").addEventListener("submit", (event) => {
+      event.preventDefault();
+      loadJobs().catch((err) => { statusEl.textContent = err.message; });
+    });
 
-    function renderList() {
-      if (!filtered.length) {
-        listEl.innerHTML = `<div class="empty-state">${LIST_META[currentList].empty}</div>`;
+    document.getElementById("scrape").addEventListener("click", async () => {
+      statusEl.textContent = "Starting Saudi scrape…";
+      const res = await fetch("/api/scrape?" + params(), { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) {
+        statusEl.textContent = data.detail || "Scrape failed";
         return;
       }
-      listEl.innerHTML = filtered.map((job, index) => {
-        const code = job.series_code || job.agency_code || "";
-        const foot = job.list_type === "greenhouse"
-          ? `${(job.posted_at || "").slice(0, 10) || "Greenhouse"} · ${job.board || ""}`
-          : `${code} · ${(job.posted_at || "").slice(0, 10) || "USAJobs"}`;
-        return `
-        <div class="job-list-card ${job.id === selectedId ? "active" : ""}" data-id="${escapeHtml(job.id)}" role="button" tabindex="0">
-          <div class="job-card-logo ${logoClass(index)}"><span class="logo-initial">${escapeHtml(initial(job))}</span></div>
-          <div class="job-card-content">
-            <h3 class="job-card-title">${escapeHtml(job.title)}</h3>
-            <div class="job-card-company">${escapeHtml(job.company)}</div>
-            <div class="job-card-meta">${escapeHtml(job.location || "United States")} · ${escapeHtml(LIST_META[currentList].kind)}</div>
-            <div class="job-card-pay">${escapeHtml(foot)}</div>
-          </div>
-        </div>
-      `;
-      }).join("");
-    }
-
-    function selectedJob() {
-      return filtered.find((job) => job.id === selectedId) || null;
-    }
-
-    function descriptionHtml(text) {
-      const blocks = String(text || "").split(/\n{2,}/).map((part) => part.trim()).filter(Boolean);
-      if (!blocks.length) {
-        return `<p class="description-text">No description was published for this role.</p>`;
-      }
-      return blocks.map((block) => {
-        const lines = block.split("\n").map((line) => line.trim()).filter(Boolean);
-        const bullets = lines.length > 0 && lines.every((line) => line.startsWith("•"));
-        if (bullets) {
-          return `<ul class="description-list">${lines.map((line) => `<li>${escapeHtml(line.replace(/^•\s*/, ""))}</li>`).join("")}</ul>`;
-        }
-        return `<p class="description-text">${escapeHtml(lines.join(" "))}</p>`;
-      }).join("");
-    }
-
-    function chipList(items, emptyLabel) {
-      const rows = (items || []).filter(Boolean);
-      if (!rows.length) return `<div class="benefit-item">${escapeHtml(emptyLabel)}</div>`;
-      return rows.map((item) => `<div class="benefit-item">${escapeHtml(item)}</div>`).join("");
-    }
-
-    function paintGreenhouse(job, loading, errorText) {
-      applyBtn.href = job.url || "https://job-boards.greenhouse.io/";
-      const description = loading
-        ? `<p class="description-text">Loading the Greenhouse job description…</p>`
-        : (errorText ? `<p class="description-text">${escapeHtml(errorText)}</p>` : descriptionHtml(job.description));
-      detailEl.innerHTML = `
-        <div class="detail-top-info">
-          <div class="detail-company-header-row">
-            <div class="company-logo-sm bg-indigo">${escapeHtml(initial(job))}</div>
-            <span class="company-header-name">${escapeHtml(job.company)}</span>
-            <span class="company-header-dot">·</span>
-            <span class="company-header-time">${escapeHtml((job.posted_at || "").slice(0, 10) || "Greenhouse")}</span>
-          </div>
-          <h1 class="detail-job-title">${escapeHtml(job.title)}</h1>
-          <div class="job-tags-grid">
-            <div class="tag-grid-item"><span>${escapeHtml(job.location || "Location not listed")}</span></div>
-            <div class="tag-grid-item"><span>Greenhouse · ${escapeHtml(job.board || greenhouseBoard)}</span></div>
-            <div class="tag-grid-item"><span>Job ${escapeHtml(job.greenhouse_id || "—")}</span></div>
-            <div class="tag-grid-item"><span>${escapeHtml(job.requisition_id || "No requisition id")}</span></div>
-          </div>
-          <div class="compensation-box">
-            <div class="comp-label">Role</div>
-            <div class="comp-amount"><strong>${escapeHtml(job.company)}</strong> · ${escapeHtml(job.title)}</div>
-          </div>
-          <div class="benefits-box">
-            <div class="benefits-title">Departments</div>
-            <div class="benefits-grid">${chipList(job.departments, loading ? "Loading departments…" : "No department listed")}</div>
-          </div>
-          <div class="benefits-box">
-            <div class="benefits-title">Offices</div>
-            <div class="benefits-grid">${chipList(job.offices, loading ? "Loading offices…" : "No office listed")}</div>
-          </div>
-          <div class="card widget-card job-description-card">
-            <div class="job-description-content">
-              <h3 class="description-section-title">Job description</h3>
-              ${description}
-            </div>
-          </div>
-        </div>
-      `;
-    }
-
-    function renderDetail() {
-      const token = ++detailReq;
-      const job = selectedJob();
-      if (!job) {
-        detailEl.innerHTML = `<div class="empty-state">Select a listing from the list.</div>`;
-        applyBtn.href = currentList === "greenhouse" ? "https://job-boards.greenhouse.io/" : "https://www.usajobs.gov/";
+      const done = await waitForScrape();
+      if (done.last_scrape && done.last_scrape.ok === false) {
+        statusEl.textContent = done.last_scrape.error || "Scrape failed";
         return;
       }
-      if (job.list_type === "greenhouse") {
-        const needsDetail = job.description == null;
-        paintGreenhouse(job, needsDetail);
-        if (!needsDetail) return;
-        fetchGreenhouseJob(job.board || greenhouseBoard, job.greenhouse_id)
-          .then((full) => {
-            if (token !== detailReq) return;
-            Object.assign(job, full);
-            if (selectedId === job.id) paintGreenhouse(job, false);
-          })
-          .catch(() => {
-            if (token !== detailReq) return;
-            job.description = "";
-            if (selectedId === job.id) {
-              paintGreenhouse(job, false, "Could not load this Greenhouse job description.");
-            }
-          });
-        return;
-      }
-      applyBtn.href = job.url || "https://www.usajobs.gov/";
-      const skills = (job.skills || []).map((skill) => `<div class="benefit-item">${escapeHtml(skill)}</div>`).join("");
-      const isSeries = job.list_type === "series" || Boolean(job.series_code);
-      const codeLabel = isSeries ? "Series" : "Code";
-      const codeValue = isSeries ? (job.series_code || "—") : (job.agency_code || "—");
-      const extraLabel = isSeries ? "Job family" : "Parent";
-      const extraValue = isSeries ? (job.job_family || "—") : (job.parent_code || "—");
-      const sourceName = isSeries ? "USAJobs occupational series" : "USAJobs agency subelements";
-      detailEl.innerHTML = `
-        <div class="detail-top-info">
-          <div class="detail-company-header-row">
-            <div class="company-logo-sm bg-indigo">${escapeHtml(initial(job))}</div>
-            <span class="company-header-name">${escapeHtml(job.company)}</span>
-            <span class="company-header-dot">·</span>
-            <span class="company-header-time">${escapeHtml((job.posted_at || "").slice(0, 10) || "USAJobs")}</span>
-          </div>
-          <h1 class="detail-job-title">${escapeHtml(job.title)}</h1>
-          <div class="job-tags-grid">
-            <div class="tag-grid-item"><span>United States</span></div>
-            <div class="tag-grid-item"><span>${escapeHtml(isSeries ? "Occupational Series" : "Federal Agency")}</span></div>
-            <div class="tag-grid-item"><span>${escapeHtml(codeLabel)} ${escapeHtml(codeValue)}</span></div>
-            <div class="tag-grid-item"><span>${escapeHtml(extraLabel)} ${escapeHtml(extraValue)}</span></div>
-          </div>
-          <div class="compensation-box">
-            <div class="comp-label">${escapeHtml(isSeries ? "Series Overview" : "Agency Overview")}</div>
-            <div class="comp-amount"><strong>${escapeHtml(job.company)}</strong> · ${escapeHtml(codeValue)}</div>
-          </div>
-          <div class="benefits-box">
-            <div class="benefits-title">Codes &amp; Acronyms</div>
-            <div class="benefits-grid">${skills || '<div class="benefit-item">No codes</div>'}</div>
-          </div>
-          <div class="card widget-card job-description-card">
-            <div class="job-description-content">
-              <h3 class="description-section-title">About this listing</h3>
-              <p class="description-text">
-                Test bind from <strong>${escapeHtml(sourceName)}</strong>.
-                This row is <strong>${escapeHtml(job.title)}</strong>
-                (${escapeHtml(codeValue)}).
-              </p>
-              <h4 class="description-sub-title">Open on USAJobs</h4>
-              <ul class="description-list">
-                <li>Search this listing: <a href="${escapeHtml(job.url)}" target="_blank" rel="noopener">${escapeHtml(job.url)}</a></li>
-              </ul>
-            </div>
-          </div>
-        </div>
-      `;
-    }
-
-    listEl.addEventListener("click", (event) => {
-      const card = event.target.closest(".job-list-card");
-      if (!card) return;
-      selectedId = card.dataset.id;
-      renderList();
-      renderDetail();
+      await loadJobs();
     });
 
-    searchInput.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") {
-        event.preventDefault();
-        const value = searchInput.value.trim().toLowerCase();
-        if (value && !tags.includes(value)) tags.push(value);
-        searchInput.value = "";
-        renderTags();
-        applyFilters();
-      } else if (event.key === "Backspace" && !searchInput.value && tags.length) {
-        tags.pop();
-        renderTags();
-        applyFilters();
-      }
-    });
-
-    tagsBox.addEventListener("click", (event) => {
-      const btn = event.target.closest("button[data-index]");
-      if (!btn) return;
-      tags.splice(Number(btn.dataset.index), 1);
-      renderTags();
-      applyFilters();
-    });
-
-    clearTagsBtn.addEventListener("click", () => {
-      tags = [];
-      renderTags();
-      applyFilters();
-    });
-
-    toolsToggle.addEventListener("click", () => {
-      toolsWrap.classList.toggle("open");
-    });
-
-    function boardLabel(token) {
-      return String(token || "").replace(/-/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
-    }
-
-    function htmlToText(value) {
-      let text = String(value || "");
-      const box = document.createElement("textarea");
-      for (let i = 0; i < 2; i += 1) {
-        box.innerHTML = text;
-        if (box.value === text) break;
-        text = box.value;
-      }
-      return text
-        .replace(/<br\s*\/?>/gi, "\n")
-        .replace(/<\/(p|div|h[1-6]|tr)>/gi, "\n\n")
-        .replace(/<\/li>/gi, "\n")
-        .replace(/<li[^>]*>/gi, "• ")
-        .replace(/<[^>]+>/g, "")
-        .replace(/\u00a0/g, " ")
-        .replace(/[ \t]+\n/g, "\n")
-        .replace(/\n{3,}/g, "\n\n")
-        .trim();
-    }
-
-    function mapGreenhouseJob(row, board, includeContent = false) {
-      const location = String((row.location && row.location.name) || "").trim();
-      const departments = (row.departments || []).map((item) => item && item.name).filter(Boolean);
-      const offices = (row.offices || []).map((item) => item && item.name).filter(Boolean);
-      const posted = row.updated_at || row.first_published || "";
-      const job = {
-        id: `greenhouse-${board}-${row.id}`,
-        greenhouse_id: row.id,
-        board,
-        title: String(row.title || "").trim() || "Untitled role",
-        company: String(row.company_name || "").trim() || boardLabel(board),
-        skills: departments.length ? departments : location.split(",").map((part) => part.trim()).filter(Boolean),
-        location: location || "Location not listed",
-        platform: "Greenhouse",
-        list_type: "greenhouse",
-        url: row.absolute_url || "",
-        posted_at: posted || null,
-        requisition_id: row.requisition_id || null,
-        departments,
-        offices,
-      };
-      if (includeContent) job.description = htmlToText(row.content || "");
-      return job;
-    }
-
-    async function fetchGreenhouseJson(url) {
-      const res = await fetch(url);
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || data.message || `Greenhouse returned HTTP ${res.status}`);
-      return data;
-    }
-
-    function fetchGreenhouseJob(board, jobId) {
-      const url = `${GREENHOUSE_API}/${encodeURIComponent(board)}/jobs/${encodeURIComponent(jobId)}`;
-      return fetchGreenhouseJson(url).then((row) => mapGreenhouseJob(row, board, true));
-    }
-
-    async function fetchJson(path) {
-      let lastError = null;
-      for (const base of apiBases()) {
-        try {
-          const res = await fetch(`${base}${path}`);
-          const data = await res.json();
-          if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
-          return data;
-        } catch (err) {
-          lastError = err;
-        }
-      }
-      throw lastError || new Error(path);
-    }
-
-    async function fetchList(listName) {
-      const data = await fetchJson(LIST_META[listName].path);
-      return mapPayload(data, listName);
-    }
-
-    function fillBoardSelect() {
-      const tokens = greenhouseBoards.map((row) => row.token);
-      if (tokens.length && !tokens.includes(greenhouseBoard)) greenhouseBoard = tokens[0];
-      boardSelect.innerHTML = greenhouseBoards.map((row) => (
-        `<option value="${escapeHtml(row.token)}">${escapeHtml(row.name || row.token)}</option>`
-      )).join("");
-      if (greenhouseBoard) boardSelect.value = greenhouseBoard;
-    }
-
-    async function loadGreenhouse(board) {
-      const nextBoard = board || greenhouseBoard || "stripe";
-      if (lists.greenhouse.length && lists.greenhouse[0]?.board === nextBoard) {
-        greenhouseBoard = nextBoard;
-        setActiveList("greenhouse", { resetSelection: currentList !== "greenhouse" });
-        return;
-      }
-      const req = ++greenhouseReq;
-      greenhouseBoard = nextBoard;
-      currentList = "greenhouse";
-      document.querySelectorAll(".tracker-subtab").forEach((btn) => {
-        btn.classList.toggle("active", btn.dataset.list === "greenhouse");
-      });
-      boardWrap.hidden = false;
-      document.getElementById("filter-source-btn").hidden = true;
-      setStatus(`Loading Greenhouse jobs for ${greenhouseBoard}…`);
-      listEl.innerHTML = `<div class="loading-state">Loading Greenhouse jobs…</div>`;
-      detailEl.innerHTML = `<div class="empty-state">Loading Greenhouse jobs…</div>`;
-      try {
-        const data = await fetchGreenhouseJson(`${GREENHOUSE_API}/${encodeURIComponent(greenhouseBoard)}/jobs`);
-        if (req !== greenhouseReq || currentList !== "greenhouse") return;
-        lists.greenhouse = (data.jobs || []).map((row) => mapGreenhouseJob(row, greenhouseBoard));
-        setStatus(`Loaded ${lists.greenhouse.length} Greenhouse jobs from ${greenhouseBoard}.`);
-        setActiveList("greenhouse", { resetSelection: true });
-      } catch (err) {
-        if (req !== greenhouseReq || currentList !== "greenhouse") return;
-        setStatus(`Could not load Greenhouse jobs for ${greenhouseBoard}.`, true);
-        listEl.innerHTML = `<div class="empty-state">Greenhouse did not return jobs for this board.</div>`;
-      }
-    }
-
-    async function loadLists() {
-      try {
-        const [agencies, series] = await Promise.all([
-          fetchList("agencies"),
-          fetchList("series"),
-        ]);
-        lists.agencies = agencies;
-        lists.series = series;
-        if (currentList === "greenhouse") return;
-        setStatus(`Loaded ${agencies.length} agencies and ${series.length} occupational series from USAJobs.`);
-        setActiveList(currentList, { resetSelection: true });
-      } catch (err) {
-        if (currentList === "greenhouse") return;
-        setStatus("Failed to fetch. Start the API and open http://127.0.0.1:9001/dashboard.html", true);
-        listEl.innerHTML = `<div class="empty-state">Could not load USAJobs lists.<br><br>Run <code>python -m uvicorn api:app --host 127.0.0.1 --port 9001</code><br>then open <a href="http://127.0.0.1:9001/dashboard.html">http://127.0.0.1:9001/dashboard.html</a></div>`;
-      }
-    }
-
-    document.querySelectorAll(".tracker-subtab").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        if (btn.dataset.list === "greenhouse") {
-          loadGreenhouse(boardSelect.value || greenhouseBoard);
-          return;
-        }
-        setActiveList(btn.dataset.list);
-      });
-    });
-
-    boardSelect.addEventListener("change", () => {
-      lists.greenhouse = [];
-      loadGreenhouse(boardSelect.value);
-    });
-
-    window.addEventListener("hashchange", () => {
-      const next = listFromHash();
-      if (next === currentList) return;
-      if (next === "greenhouse") loadGreenhouse(boardSelect.value || greenhouseBoard);
-      else setActiveList(next);
-    });
-
-    greenhouseBoards = GREENHOUSE_BOARDS.map((token) => ({ token, name: boardLabel(token) }));
-    fillBoardSelect();
-    loadLists();
-    if (currentList === "greenhouse") loadGreenhouse(greenhouseBoard);
+    loadJobs().catch((err) => { statusEl.textContent = err.message; });
   </script>
 </body>
-
 </html>

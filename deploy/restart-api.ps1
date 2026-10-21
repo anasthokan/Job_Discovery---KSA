@@ -1,5 +1,5 @@
 # Restart Job Discovery on the IIS server so port 9001 answers again.
-# Run in an elevated PowerShell ON 74.208.184.175:
+# Run in an elevated PowerShell ON 74.208.184.75:
 #   cd C:\Projects\Job_Discovery
 #   powershell -ExecutionPolicy Bypass -File .\deploy\restart-api.ps1
 

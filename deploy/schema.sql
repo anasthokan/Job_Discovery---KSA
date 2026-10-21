@@ -1,4 +1,7 @@
-USE ezyjob;
+CREATE DATABASE IF NOT EXISTS ksajob
+  CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+USE ksajob;
 
 CREATE TABLE IF NOT EXISTS jobs (
   id BIGINT NOT NULL AUTO_INCREMENT,
@@ -14,25 +17,39 @@ CREATE TABLE IF NOT EXISTS jobs (
   platform VARCHAR(120) NOT NULL,
   days_ago INT UNSIGNED NULL,
   company VARCHAR(255) NULL,
-  e_verified VARCHAR(64) NOT NULL,
-  e_verify_name VARCHAR(255) NOT NULL,
   first_seen_at DATETIME(6) NULL,
   last_seen_at DATETIME(6) NULL,
   skills JSON NOT NULL,
   source_id VARCHAR(255) NULL,
   state VARCHAR(255) NOT NULL,
   url VARCHAR(1000) NOT NULL,
+  raw_description LONGTEXT NOT NULL,
   job_type VARCHAR(32) NOT NULL DEFAULT 'fulltime',
   work_model VARCHAR(16) NOT NULL DEFAULT 'unknown',
   experience_level VARCHAR(32) NOT NULL DEFAULT 'unknown',
   years_experience SMALLINT NULL,
-  h1b_sponsorship VARCHAR(16) NOT NULL DEFAULT 'unknown',
+  visa_sponsorship VARCHAR(16) NOT NULL DEFAULT 'unknown',
   clearance_required VARCHAR(16) NOT NULL DEFAULT 'unknown',
-  us_citizen_required VARCHAR(16) NOT NULL DEFAULT 'no',
+  saudi_national_required VARCHAR(16) NOT NULL DEFAULT 'no',
   listing_inferred TINYINT(1) NOT NULL DEFAULT 0,
   PRIMARY KEY (id),
   UNIQUE KEY uk_jobs_public_id (public_id),
   UNIQUE KEY uk_jobs_source_id (source_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS companies (
+  id BIGINT NOT NULL AUTO_INCREMENT,
+  public_id CHAR(32) NOT NULL,
+  name VARCHAR(255) NOT NULL,
+  normalized_name VARCHAR(255) NOT NULL,
+  website VARCHAR(512) NOT NULL DEFAULT '',
+  sponsorship_notes VARCHAR(512) NOT NULL DEFAULT '',
+  logo_url VARCHAR(512) NOT NULL DEFAULT '',
+  created_at DATETIME(6) NOT NULL,
+  updated_at DATETIME(6) NOT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_companies_public_id (public_id),
+  UNIQUE KEY uk_companies_normalized (normalized_name)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS job_discovery_candidates (
@@ -55,27 +72,4 @@ CREATE TABLE IF NOT EXISTS job_discovery_scrape_runs (
   error TEXT NULL,
   PRIMARY KEY (id),
   KEY idx_scrape_runs_started (started_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-CREATE TABLE IF NOT EXISTS job_discovery_everify_employers (
-  name_key VARCHAR(255) NOT NULL,
-  employer VARCHAR(512) NOT NULL,
-  dba VARCHAR(512) NULL,
-  account_status VARCHAR(64) NULL,
-  everify_plus VARCHAR(32) NULL,
-  date_enrolled VARCHAR(64) NULL,
-  hiring_sites VARCHAR(512) NULL,
-  PRIMARY KEY (name_key),
-  KEY idx_jd_everify_status (account_status)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-CREATE TABLE IF NOT EXISTS job_discovery_h1b_sponsors (
-  name_key VARCHAR(255) NOT NULL,
-  employer VARCHAR(512) NOT NULL,
-  approvals INT UNSIGNED NOT NULL,
-  denials INT UNSIGNED NOT NULL,
-  first_fiscal_year SMALLINT NOT NULL,
-  last_fiscal_year SMALLINT NOT NULL,
-  PRIMARY KEY (name_key),
-  KEY idx_jd_h1b_last_year (last_fiscal_year)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

@@ -1,16 +1,16 @@
 """Fields the Explore Jobs filters need, inferred from a listing.
 
-Boards rarely send experience, H1B, or clearance as columns. Title, location,
+Boards rarely send experience, visa, or Saudization as columns. Title, location,
 and description are enough to fill the values the dashboard already shows:
 
-  work_model          remote | hybrid | onsite | unknown
-  job_type            fulltime | parttime | contract | internship
-  experience_level    Intern/New Grad | Entry Level | Mid Level | Senior Level
-                      | Lead/Staff | Director/Executive | unknown
-  years_experience    minimum years stated in the posting, or null
-  h1b_sponsorship     yes | no | unknown
-  clearance_required  yes | no | unknown
-  us_citizen_required yes | no
+  work_model                 remote | hybrid | onsite | unknown
+  job_type                   fulltime | parttime | contract | internship
+  experience_level           Intern/New Grad | Entry Level | Mid Level | Senior Level
+                             | Lead/Staff | Director/Executive | unknown
+  years_experience           minimum years stated in the posting, or null
+  visa_sponsorship           yes | no | unknown   (Iqama / work visa)
+  clearance_required         yes | no | unknown
+  saudi_national_required    yes | no
 """
 
 from __future__ import annotations
@@ -31,11 +31,9 @@ YES_NO = ("yes", "no")
 
 _PLACEHOLDER_LOCS = {
     "",
-    "united states",
-    "usa",
-    "us",
-    "u.s.",
-    "u.s.a.",
+    "saudi arabia",
+    "ksa",
+    "kingdom of saudi arabia",
     "anywhere",
     "n/a",
     "na",
@@ -102,23 +100,18 @@ _NO_EXPERIENCE = re.compile(
     re.I,
 )
 
-_H1B_NO = re.compile(
-    r"(?:\bno\b|\bnot\b|\bwithout\b|\bunable\b|\bcannot\b|\bcan't\b|\bdo not\b|"
-    r"\bdon't\b|\bdoes not\b).{0,48}(?:\bsponsor(?:ship)?\b|\bh-?1b\b)"
-    r"|(?:\bsponsor(?:ship)?\b).{0,24}(?:\bnot available\b|\bnot offered\b|\bunavailable\b)"
-    r"|\bus citizens only\b"
-    r"|\bmust be (?:a )?u\.?s\.? citizens?\b"
-    r"|\bno visa sponsorship\b",
+_VISA_NO = re.compile(
+    r"saudi nationals? only|saudis only|only saudi|for saudi nationals?"
+    r"|سعوديون فقط|للسعوديين فقط|لا نكفل"
+    r"|(?:\bno\b|\bnot\b|\bwithout\b).{0,40}(?:\biqama\b|\bwork visa\b|\bsponsor(?:ship)?\b)"
+    r"|\bno visa sponsorship\b"
+    r"|\bsponsorship (?:is )?not (?:available|offered)\b",
     re.I,
 )
-_H1B_YES = re.compile(
-    r"\bh-?1b\b"
-    r"|\bh1-?b\b"
-    r"|\bvisa sponsorship\b"
-    r"|\bsponsorship (?:is )?available\b"
-    r"|\bwill sponsor\b"
-    r"|\bwe sponsor\b"
-    r"|\bopen to sponsor(?:ing|ship)?\b",
+_VISA_YES = re.compile(
+    r"\biqama\b|\bwork visa\b|\bvisa sponsorship\b"
+    r"|\bsponsorship (?:is )?available\b|\bwill sponsor\b|\bwe sponsor\b"
+    r"|نقل كفالة|كفالة|تأشيرة عمل",
     re.I,
 )
 
@@ -128,48 +121,19 @@ _CLEARANCE_NO = re.compile(
     re.I,
 )
 _CLEARANCE_YES = re.compile(
-    r"\bts/sci\b|\btop secret\b|\bsecret clearance\b|\bsecurity clearance\b"
-    r"|\bpublic trust\b|\bactive clearance\b|\bclearance required\b"
-    r"|\bmust (?:have|hold|possess)(?: a)? clearance\b"
-    r"|\bability to obtain(?: a)? (?:a )?clearance\b",
-    re.I,
-)
-# Secret and Top Secret clearances are only granted to US citizens; Public Trust is not.
-_CITIZEN_CLEARANCE = re.compile(
-    r"\bts/sci\b|\btop secret\b|\bsecret clearance\b|\b(?:active|current) secret\b"
-    r"|\b(?:obtain|maintain|hold|possess)(?: an?)? (?:active )?(?:dod |federal )?(?:security )?clearance\b",
+    r"\bsecurity clearance\b|\bclearance required\b"
+    r"|\bmust (?:have|hold|possess)(?: a)? (?:security )?clearance\b"
+    r"|تصريح أمني",
     re.I,
 )
 
-_US_NAME = r"(?:us|united states|american)"
-_CITIZEN_YES = re.compile(
-    rf"\bmust be (?:an? )?{_US_NAME} citizens?\b"
-    rf"|\bmust be (?:an? )?citizens? of the (?:us|united states)\b"
-    rf"|\b{_US_NAME} citizens? only\b"
-    rf"|\bonly (?:open to )?{_US_NAME} citizens?\b"
-    rf"|\b{_US_NAME} citizens? (?:is |are )?(?:required|needed)\b"
-    rf"|\b{_US_NAME} citizenship (?:is |will be )?(?:required|mandatory|needed|a must)\b"
-    rf"|\b(?:requires?|requiring|required) (?:active )?{_US_NAME} citizenship\b"
-    rf"|\bmust (?:have|hold|possess|maintain|provide proof of) {_US_NAME} citizenship\b"
-    rf"|\b(?:applicants|candidates) must be {_US_NAME} citizens\b"
-    rf"|\b(?:requirements?|eligibility)\s*:?\s*{_US_NAME} citizenship\b"
-    r"|\bcitizenship (?:is )?required\b"
-    r"|\bcitizenship requirement\b",
+_SAUDI_ONLY = re.compile(
+    r"saudi nationals? only|saudis only|only saudi nationals?"
+    r"|saudi nationality (?:is )?(?:required|mandatory|a must)"
+    r"|must be (?:a )?saudi(?: national)?"
+    r"|سعوديون فقط|للسعوديين فقط|الجنسية السعودية",
     re.I,
 )
-_CITIZEN_NO = re.compile(
-    rf"\b(?:{_US_NAME} )?citizenship (?:is )?not (?:required|necessary|needed|a requirement)\b"
-    r"|\bno (?:us )?citizenship (?:requirement|required)\b"
-    r"|\b(?:do|does|did)\s*(?:not|n['’]t) (?:need|have) to be (?:an? )?(?:us )?citizens?\b"
-    r"|\bcitizens?\s*(?:,|/|or|and)\s*(?:lawful )?(?:permanent residents?|green[\s-]?card(?: holders?)?|gc(?: holders?)?)\b"
-    r"|\b(?:lawful )?(?:permanent residents?|green[\s-]?card(?: holders?)?|gc(?: holders?)?)\s*(?:,|/|or|and)\s*(?:us )?citizens?\b"
-    r"|\busc\s*/\s*gc\b|\bgc\s*/\s*usc\b"
-    r"|\bus persons?\b"
-    r"|\b(?:h-?1b|opt|cpt|ead|tn|f-?1)\b.{0,40}\b(?:welcome|accepted|considered|eligible)\b"
-    r"|\b(?:open to|accept(?:s|ing)?|welcome)\b.{0,20}\b(?:all|any) (?:work authorizations?|visa types?|visas)\b",
-    re.I,
-)
-_US_DOTTED = re.compile(r"\bU\.\s?S\.(?:\s?A\.)?", re.I)
 
 _JOB_TYPE_ALIASES = {
     "full-time": "fulltime",
@@ -314,7 +278,6 @@ def _yes_no(text: str, no_re: re.Pattern[str], yes_re: re.Pattern[str]) -> str:
     """Negation only counts inside the same sentence, so 'No experience. Visa sponsorship' stays yes."""
     saw_no = False
     saw_yes = False
-    text = _US_DOTTED.sub("US", text)
     for sentence in re.split(r"[\n.;]+", text):
         if no_re.search(sentence):
             saw_no = True
@@ -327,24 +290,18 @@ def _yes_no(text: str, no_re: re.Pattern[str], yes_re: re.Pattern[str]) -> str:
     return "unknown"
 
 
-def infer_h1b(title: str = "", description: str = "") -> str:
-    return _yes_no(_clip_text(title, description), _H1B_NO, _H1B_YES)
+def infer_visa(title: str = "", description: str = "") -> str:
+    """Iqama or new work-visa sponsorship. unknown when the posting is silent."""
+    return _yes_no(_clip_text(title, description), _VISA_NO, _VISA_YES)
 
 
 def infer_clearance(title: str = "", description: str = "") -> str:
     return _yes_no(_clip_text(title, description), _CLEARANCE_NO, _CLEARANCE_YES)
 
 
-def infer_us_citizen(title: str = "", description: str = "") -> str:
-    """yes only when the posting demands US citizenship; otherwise no.
-
-    Secret / Top Secret clearance implies citizenship. Green card holders, US persons
-    (ITAR), visa sponsorship, or no mention at all mean citizenship is not required.
-    """
-    text = _clip_text(title, description)
-    if _yes_no(text, _CITIZEN_NO, _CITIZEN_YES) == "yes":
-        return "yes"
-    if infer_clearance(title, description) == "yes" and _CITIZEN_CLEARANCE.search(text):
+def infer_saudi_national(title: str = "", description: str = "") -> str:
+    """yes only when the posting is limited to Saudi nationals."""
+    if _SAUDI_ONLY.search(_clip_text(title, description)):
         return "yes"
     return "no"
 
@@ -364,9 +321,9 @@ def infer_listing_fields(
         "work_model": infer_work_model(location or "", state or "", title or "", description or ""),
         "experience_level": infer_experience_level(title or "", description or "", kind, years),
         "years_experience": years,
-        "h1b_sponsorship": infer_h1b(title or "", description or ""),
+        "visa_sponsorship": infer_visa(title or "", description or ""),
         "clearance_required": infer_clearance(title or "", description or ""),
-        "us_citizen_required": infer_us_citizen(title or "", description or ""),
+        "saudi_national_required": infer_saudi_national(title or "", description or ""),
     }
 
 
@@ -380,19 +337,19 @@ def apply_listing_filters(
     work_model: str = "",
     job_type: str = "",
     experience_level: str = "",
-    h1b_sponsorship: str = "",
+    visa_sponsorship: str = "",
     clearance_required: str = "",
-    us_citizen_required: str = "",
+    saudi_national_required: str = "",
     years: int | None = None,
 ) -> list[dict]:
     """Keep listings that match the Explore Jobs dropdowns. Blank filters are ignored."""
     work = {_WORK_ALIASES.get(part, part) for part in _split(work_model)}
     types = {_JOB_TYPE_ALIASES.get(part, part) for part in _split(job_type)}
     levels = {_LEVEL_ALIASES.get(part, part) for part in _split(experience_level)}
-    h1b = set(_split(h1b_sponsorship))
+    visa = set(_split(visa_sponsorship))
     clearance = set(_split(clearance_required))
-    citizen = set(_split(us_citizen_required))
-    if not any((work, types, levels, h1b, clearance, citizen)) and years is None:
+    saudi = set(_split(saudi_national_required))
+    if not any((work, types, levels, visa, clearance, saudi)) and years is None:
         return jobs
     kept = []
     for job in jobs:
@@ -402,11 +359,11 @@ def apply_listing_filters(
             continue
         if levels and (job.get("experience_level") or "unknown") not in levels:
             continue
-        if h1b and (job.get("h1b_sponsorship") or "unknown") not in h1b:
+        if visa and (job.get("visa_sponsorship") or "unknown") not in visa:
             continue
         if clearance and (job.get("clearance_required") or "unknown") not in clearance:
             continue
-        if citizen and (job.get("us_citizen_required") or "no") not in citizen:
+        if saudi and (job.get("saudi_national_required") or "no") not in saudi:
             continue
         if years is not None:
             required = job.get("years_experience")

@@ -1,7 +1,6 @@
-"""Indeed, Glassdoor, ZipRecruiter, and Google Jobs via python-jobspy.
+"""Indeed, LinkedIn, Glassdoor, Google Jobs, and Bayt via python-jobspy.
 
-LinkedIn stays on the existing Jina path. JobSpy rate-limits LinkedIn quickly,
-and Bayt/Naukri sit outside the US-only filter.
+Searches are locked to Saudi Arabia (sa.indeed.com and Bayt).
 """
 
 from __future__ import annotations
@@ -13,9 +12,9 @@ log = logging.getLogger("jobscraper.jobspy")
 
 SITE_TO_PLATFORM = {
     "indeed": "Indeed",
-    "glassdoor": "Glassdoor",
-    "zip_recruiter": "ZipRecruiter",
+    "linkedin": "LinkedIn",
     "google": "Google Jobs",
+    "bayt": "Bayt",
 }
 
 PLATFORM_TO_SITE = {name: site for site, name in SITE_TO_PLATFORM.items()}
@@ -72,7 +71,7 @@ def rows_to_jobs(records: list[dict]) -> list[dict]:
         location = str(_blank(row.get("location")) or "").strip()
         remote = bool(row.get("is_remote"))
         if not location:
-            location = "Remote" if remote else "United States"
+            location = "Remote, Saudi Arabia" if remote else "Saudi Arabia"
         elif remote and "remote" not in location.lower():
             location = f"{location} · Remote"
         description = _blank(row.get("description")) or ""
@@ -100,10 +99,10 @@ def scrape(
     sites: list[str],
     *,
     is_remote: bool = False,
-    results_wanted: int = 15,
-    max_terms: int = 2,
+    results_wanted: int = 20,
+    max_terms: int = 4,
 ) -> list[dict]:
-    """Return job dicts. Empty list if JobSpy is missing or every site fails."""
+    """Return Saudi job dicts. Empty list if JobSpy is missing or every site fails."""
     if not sites:
         return []
     terms = [term.strip() for term in search_terms if term and term.strip()][:max_terms]
@@ -112,34 +111,36 @@ def scrape(
     try:
         from jobspy import scrape_jobs
     except ImportError:
-        log.warning("python-jobspy is not installed; skipping Indeed/Glassdoor/ZipRecruiter/Google")
+        log.warning("python-jobspy is not installed; skipping Indeed/LinkedIn/Glassdoor/Google/Bayt")
         return []
 
     found: list[dict] = []
-    where = location or "United States"
-    for term in terms:
-        kwargs = {
-            "site_name": sites,
-            "search_term": term,
-            "location": where,
-            "results_wanted": results_wanted,
-            "country_indeed": "USA",
-            "verbose": 0,
-            "description_format": "markdown",
-        }
-        if "google" in sites:
-            kwargs["google_search_term"] = f"{term} jobs near {where}"
-        # Indeed accepts only one of hours_old or is_remote.
-        if is_remote:
-            kwargs["is_remote"] = True
-        else:
-            kwargs["hours_old"] = 168
-        try:
-            frame = scrape_jobs(**kwargs)
-        except Exception:
-            log.exception("JobSpy failed for %r on %s", term, sites)
-            continue
-        if frame is None or getattr(frame, "empty", True):
-            continue
-        found.extend(rows_to_jobs(frame.to_dict("records")))
+    where = location or "Saudi Arabia"
+    # One site per call. JobSpy cancels the whole search when one board throws,
+    # and Glassdoor has no Saudi Arabia domain.
+    for site in sites:
+        for term in terms:
+            kwargs = {
+                "site_name": [site],
+                "search_term": term,
+                "location": where,
+                "results_wanted": results_wanted,
+                "country_indeed": "saudi arabia",
+                "verbose": 0,
+                "description_format": "markdown",
+            }
+            if site == "google":
+                kwargs["google_search_term"] = f"{term} jobs in {where}"
+            if is_remote:
+                kwargs["is_remote"] = True
+            else:
+                kwargs["hours_old"] = 720
+            try:
+                frame = scrape_jobs(**kwargs)
+            except Exception:
+                log.exception("JobSpy failed for %r on %s", term, site)
+                continue
+            if frame is None or getattr(frame, "empty", True):
+                continue
+            found.extend(rows_to_jobs(frame.to_dict("records")))
     return found

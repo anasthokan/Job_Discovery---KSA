@@ -2,13 +2,13 @@
 
 Give this document to the frontend or backend developer who will call the API.
 
-**Production base URL:** `http://74.208.184.175:517`
+**Production base URL:** `https://agentsksa.atozeesolutions.com`
 
 Local example: `http://127.0.0.1:9001`
 
-Interactive try-out: [http://74.208.184.175:517/docs](http://74.208.184.175:517/docs)
+Interactive try-out: [https://agentsksa.atozeesolutions.com/docs](https://agentsksa.atozeesolutions.com/docs)
 
-Related APIs: `RESUME_API.md`, `ATS_API.md`, `CV_API.md`, `CONVERT_API.md`, `EVERIFY_API.md`
+Related APIs: `RESUME_API.md`, `ATS_API.md`, `CV_API.md`, `CONVERT_API.md`
 
 ## What it does
 
@@ -75,7 +75,7 @@ Query flags:
 | `work_model` | `""` | Comma-separated: `remote`, `hybrid`, `onsite` |
 | `job_type` | `""` | Comma-separated: `fulltime`, `contract`, `parttime`, `internship` |
 | `experience_level` | `""` | Comma-separated: `Intern/New Grad`, `Entry Level`, `Mid Level`, `Senior Level`, `Lead/Staff`, `Director/Executive` |
-| `h1b_sponsorship` | `""` | `yes` or `no`. `yes` means the posting offers sponsorship, or the company has a USCIS H-1B approval (FY2009–FY2023). `no` means the posting says it will not sponsor. `unknown` means neither source says |
+| `visa_sponsorship` | `""` | `yes` or `no`. Iqama or work-visa sponsorship inferred from the posting. `unknown` means the posting does not say |
 | `clearance_required` | `""` | `yes` or `no` |
 | `us_citizen_required` | `""` | `yes` or `no`. `yes` = posting demands US citizenship |
 | `years` | omit | Candidate years. Drops jobs that require more. Jobs with no stated years stay |
@@ -98,39 +98,23 @@ The response is immediate (`202`, `"started": true`). The scrape keeps running a
 curl "{BASE_URL}/api/scrape/status"
 ```
 
-`last_scrape.db_total` is the number of rows in `ezyjob.jobs`. `409` if another scrape is already running.
+`last_scrape.db_total` is the number of rows in `ksajob.jobs`. `409` if another scrape is already running.
 
-This run is upserted into MySQL database `ezyjob`, table `jobs`, when `.env` has `MYSQL_DATABASE=ezyjob`. Duplicate URL/id rows are updated (`last_seen_at`), not inserted twice.
+This run is upserted into MySQL database `ksajob`, table `jobs`, when `.env` has `MYSQL_DATABASE=ksajob`. Duplicate URL/id rows are updated (`last_seen_at`), not inserted twice.
 
 Omit `keywords` (or send empty) to scrape **all fields**. If you pass `python,react`, a job matching **either** token is kept.
 
-A background scheduler also calls the same scrape at **08:00 and 20:00** `Asia/Kolkata` (override with `SCRAPE_HOURS` / `SCRAPE_TZ` in `.env`). Empty `SCRAPE_KEYWORDS` pulls **all job fields** (engineering, marketing, sales, HR, healthcare, finance, …). Comma-separated scrape keywords match **any** token (OR).
+A background scheduler also calls the same scrape at **08:00 and 20:00** `Asia/Riyadh` (override with `SCRAPE_HOURS` / `SCRAPE_TZ` in `.env`). Empty `SCRAPE_KEYWORDS` pulls a default set of roles. Comma-separated scrape keywords match **any** token (OR).
 
 Use this when the cache is empty or stale. Then call `/api/jobs` or `/api/recommend`.
 
-## E-Verify flag
+## Visa and Saudization
 
-Each listing includes `e_verified`: `true`, `false`, or `unknown`. The employer list is saved in MySQL from `data/everify_employers.csv`. A job stays `unknown` until that table has rows. Then the company name is checked against the table: `true` if the name is there, `false` if it is not. Names often differ (legal vs DBA), so `false` is not proof the employer is unenrolled.
-
-Export the employer table from that page (Download → Crosstab/Data), save as `data/everify_employers.csv`, then:
-
-```bash
-curl -X POST "{BASE_URL}/api/everify/refresh"
-curl "{BASE_URL}/api/jobs?e_verified=true&limit=20"
-curl "{BASE_URL}/api/everify/lookup?company=Microsoft"
-```
-
-The E-Verify Checker screen (company, state, industry, STEM OPT) is `EVERIFY_API.md`. Give that file to the frontend engineer.
-
-| Method | Path | Use |
-| --- | --- | --- |
-| GET | `/api/everify/status` | CSV path + loaded employer count |
-| GET | `/api/everify/lookup` | Check one company name |
-| POST | `/api/everify/refresh` | Reload CSV and rematch all saved jobs |
+Each listing includes `visa_sponsorship` (`yes`, `no`, or `unknown`) and `saudi_national_required` (`yes` or `no`). These are read from the posting. There is no E-Verify or H-1B field.
 
 ## Recommend by candidate API id
 
-Registration creates the candidate in ezyjob. Pass that same id here. Do not send the password or EEO answers (gender, race, veteran, disability). Those are ignored and are not used to rank jobs.
+Registration creates the candidate in ksajob. Pass that same id here. Do not send the password or EEO answers (gender, race, veteran, disability). Those are ignored and are not used to rank jobs.
 
 Save the profile once, when the user finishes registration:
 
@@ -311,7 +295,7 @@ HTTP `200`:
 
 Missing fields may be `null` or `[]`. `url` is the apply / posting link. `daysAgo` is a label such as `just now`, `2 min ago`, `1 hour ago`, `7 days ago`, or `1 month ago`. Show that string as-is. The `days` query still filters by whole days.
 
-`work_model`, `job_type`, `experience_level`, `years_experience`, `h1b_sponsorship`, `clearance_required`, and `us_citizen_required` are saved on each row. Work model, job type, experience, clearance, and citizenship are read from the posting. `h1b_sponsorship` is `yes` when the posting offers sponsorship, or when USCIS shows that company had at least one H-1B approval in fiscal years 2009–2023. A posting that says it will not sponsor stays `no`. `unknown` means the posting is silent and the company is not in that USCIS file. `years_experience` is `null` when no minimum is stated. Recommended jobs include the same fields.
+`work_model`, `job_type`, `experience_level`, `years_experience`, `visa_sponsorship`, `clearance_required`, and `saudi_national_required` are saved on each row. They are read from the posting. `years_experience` is `null` when no minimum is stated.
 
 `us_citizen_required` is always `yes` or `no`, never `unknown`. It is `yes` when the posting says so ("must be a U.S. citizen", "US citizenship required", "U.S. citizens only") or asks for a Secret / Top Secret / TS/SCI clearance, which only citizens can hold. Everything else is `no`: citizen **or** green card / permanent resident, "U.S. person" (ITAR), visa sponsorship offered, H1B/OPT welcome, or no mention of citizenship at all.
 
