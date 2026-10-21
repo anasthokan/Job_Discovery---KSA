@@ -1,4 +1,4 @@
-# If port 9001 stops answering, restart it. PM2 leaves a hung process marked online.
+# If port 9002 stops answering, restart it. PM2 leaves a hung process marked online.
 $root = Split-Path $PSScriptRoot -Parent
 $log = Join-Path $root "data\api-watch.log"
 New-Item -ItemType Directory -Force -Path (Split-Path $log) | Out-Null
@@ -9,7 +9,7 @@ function Write-Watch($message) {
 }
 
 try {
-  $response = Invoke-WebRequest -Uri "http://127.0.0.1:9001/api/health" -TimeoutSec 8 -UseBasicParsing
+  $response = Invoke-WebRequest -Uri "http://127.0.0.1:9002/api/health" -TimeoutSec 8 -UseBasicParsing
   if ($response.StatusCode -eq 200) {
     exit 0
   }

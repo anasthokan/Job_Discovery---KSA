@@ -1,4 +1,4 @@
-# Restart Job Discovery on the IIS server so port 9001 answers again.
+# Restart Job Discovery on the IIS server so port 9002 answers again.
 # Run in an elevated PowerShell ON 74.208.184.75:
 #   cd C:\Projects\Job_Discovery
 #   powershell -ExecutionPolicy Bypass -File .\deploy\restart-api.ps1
@@ -9,15 +9,15 @@ Set-Location $root
 
 $pm2 = Get-Command pm2 -ErrorAction SilentlyContinue
 if ($pm2) {
-  pm2 restart job-discovery --update-env
+  pm2 restart job-discovery-ksa --update-env
   if ($LASTEXITCODE -ne 0) {
     pm2 start (Join-Path $root "ecosystem.config.cjs")
   }
   pm2 save
 } else {
-  $listening = Get-NetTCPConnection -LocalPort 9001 -State Listen -ErrorAction SilentlyContinue
+  $listening = Get-NetTCPConnection -LocalPort 9002 -State Listen -ErrorAction SilentlyContinue
   if ($listening) {
-    Write-Host "API is already listening on port 9001. Left it running."
+    Write-Host "API is already listening on port 9002. Left it running."
   } else {
     Start-Process -FilePath "cmd.exe" -ArgumentList "/c", "start-job-discovery.bat" -WorkingDirectory $root -WindowStyle Minimized
   }
@@ -34,5 +34,5 @@ try {
 }
 
 Start-Sleep -Seconds 3
-$health = Invoke-RestMethod -Uri "http://127.0.0.1:9001/api/health" -TimeoutSec 15
+$health = Invoke-RestMethod -Uri "http://127.0.0.1:9002/api/health" -TimeoutSec 15
 Write-Host ($health | ConvertTo-Json -Compress)

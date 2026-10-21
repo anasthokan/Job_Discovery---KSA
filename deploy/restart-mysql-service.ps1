@@ -22,5 +22,5 @@ foreach ($svc in $services) {
 
 Start-Sleep -Seconds 8
 python (Join-Path $PSScriptRoot "open_mysql_connections.py")
-curl.exe -m 30 "http://127.0.0.1:9001/api/jobs?state=All&platform=All&days=30&limit=5&page=1"
+curl.exe -m 30 "http://127.0.0.1:9002/api/jobs?state=All&platform=All&days=30&limit=5&page=1"
 Write-Host ""

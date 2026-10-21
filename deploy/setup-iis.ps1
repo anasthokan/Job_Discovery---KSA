@@ -1,4 +1,4 @@
-# Creates/updates IIS site for Job Discovery (reverse proxy to uvicorn :9001).
+# Creates/updates IIS site for Job Discovery (reverse proxy to uvicorn :9002).
 # Run ON the Windows IIS server as Administrator:
 #   cd C:\Projects\Job_Discovery
 #   powershell -ExecutionPolicy Bypass -File .\deploy\setup-iis.ps1
@@ -9,7 +9,7 @@ param(
   [string]$ServerIP = "74.208.184.75",
   [string]$HostName = "agentsksa.atozeesolutions.com",
   [int]$Port = 80,
-  [int]$AppPort = 9001
+  [int]$AppPort = 9002
 )
 
 $ErrorActionPreference = "Stop"
@@ -71,6 +71,10 @@ $webConfig = @"
     <proxy enabled="true" timeout="00:12:00" responseBufferLimit="0" />
     <rewrite>
       <rules>
+        <rule name="AcmeChallenge" stopProcessing="true">
+          <match url="^\.well-known/acme-challenge/" />
+          <action type="None" />
+        </rule>
         <rule name="ReverseProxyToJobDiscovery" stopProcessing="true">
           <match url="(.*)" />
           <action type="Rewrite" url="http://127.0.0.1:$AppPort/{R:1}" appendQueryString="true" />
@@ -151,7 +155,7 @@ $eco = Join-Path $AppRoot "ecosystem.config.cjs"
 $ecoBody = @"
 module.exports = {
   apps: [{
-    name: "job-discovery",
+    name: "job-discovery-ksa",
     script: "python",
     args: "-m uvicorn api:app --host 127.0.0.1 --port $AppPort",
     cwd: $(ConvertTo-Json $AppRoot),
@@ -167,7 +171,7 @@ module.exports = {
 [System.IO.File]::WriteAllText($eco, $ecoBody, $utf8)
 
 Push-Location $AppRoot
-pm2 delete job-discovery 2>$null
+pm2 delete job-discovery-ksa 2>$null
 pm2 start $eco
 pm2 save
 Pop-Location
@@ -183,7 +187,7 @@ try {
   $health = Invoke-RestMethod -Uri "http://127.0.0.1:$AppPort/api/health" -TimeoutSec 5
   Write-Host "Uvicorn health: $($health | ConvertTo-Json -Compress)" -ForegroundColor Green
 } catch {
-  Write-Host "Uvicorn not responding yet on :$AppPort. Check: pm2 logs job-discovery" -ForegroundColor Yellow
+  Write-Host "Uvicorn not responding yet on :$AppPort. Check: pm2 logs job-discovery-ksa" -ForegroundColor Yellow
 }
 
 Write-Host ""
