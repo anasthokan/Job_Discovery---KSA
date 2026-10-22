@@ -235,6 +235,65 @@ def _upsert_sql(cur) -> str:
     return sql.replace(") AS new", values + ") AS new", 1)
 
 
+_MISSING_DEFAULT = re.compile(r"Field '([^']+)' doesn't have a default value")
+
+
+def _column_literal(cur, table: str, name: str) -> str:
+    cur.execute(f"SHOW COLUMNS FROM {table} LIKE %s", (name,))
+    row = cur.fetchone() or {}
+    column_type = str(_row_value(row, "type") or "")
+    base = column_type.split("(", 1)[0].strip().lower()
+    return _sql_default(base, column_type)
+
+
+def _inject_column(sql: str, name: str, literal: str) -> str:
+    column = _quote_ident(name)
+    updated, count = re.subn(r"\)\s*VALUES\s*\(", lambda _match: f", {column}) VALUES (", sql, count=1)
+    if count != 1:
+        return sql
+    updated, count = re.subn(r"\)(\s*AS\s+new\b)", lambda match: f", {literal})" + match.group(1), updated, count=1)
+    if count == 1:
+        return updated
+    updated, count = re.subn(
+        r"\)(\s*ON\s+DUPLICATE\b)",
+        lambda match: f", {literal})" + match.group(1),
+        updated,
+        count=1,
+    )
+    return updated if count == 1 else sql
+
+
+def _write_row(cur, sql: str, params, *, table: str, many: bool = False) -> None:
+    """Insert, and if MySQL rejects a required column, send that column and try again."""
+    seen: set[str] = set()
+    for _attempt in range(8):
+        try:
+            if many:
+                cur.executemany(sql, params)
+            else:
+                cur.execute(sql, params)
+            return
+        except Exception as exc:
+            code = exc.args[0] if getattr(exc, "args", None) else None
+            match = _MISSING_DEFAULT.search(str(exc))
+            if code != 1364 or not match:
+                raise
+            field = match.group(1)
+            if field in seen:
+                raise
+            seen.add(field)
+            literal = _column_literal(cur, table, field)
+            try:
+                cur.execute(
+                    f"ALTER TABLE {table} ALTER COLUMN {_quote_ident(field)} SET DEFAULT {literal}"
+                )
+                log.info("Set default %s on %s.%s after save error", literal, table, field)
+            except Exception:
+                log.exception("Could not set default on %s.%s", table, field)
+            sql = _inject_column(sql, field, literal)
+            log.warning("Retrying %s insert with %s = %s", table, field, literal)
+
+
 # jobs.id is a bigint autoincrement. The scraper id is stored in source_id.
 UPSERT_SQL = f"""
 INSERT INTO {JOBS_TABLE} (
@@ -924,7 +983,8 @@ def _company_ids(cur, names: dict[str, str]) -> dict[str, int]:
         if row:
             found[key] = int(row["id"])
             continue
-        cur.execute(
+        _write_row(
+            cur,
             f"""
             INSERT INTO {COMPANIES_TABLE} (
               public_id, name, normalized_name, website,
@@ -933,6 +993,7 @@ def _company_ids(cur, names: dict[str, str]) -> dict[str, int]:
             ON DUPLICATE KEY UPDATE updated_at = {COMPANIES_TABLE}.updated_at
             """,
             (_public_id("company:" + key), name, key),
+            table=COMPANIES_TABLE,
         )
         cur.execute(
             f"SELECT id FROM {COMPANIES_TABLE} WHERE public_id = %s OR normalized_name = %s LIMIT 1",
@@ -994,7 +1055,7 @@ def upsert_jobs(jobs: list[dict]) -> int:
                     )
                     for row in rows
                 ]
-                cur.executemany(_upsert_sql(cur), payload)
+                _write_row(cur, _upsert_sql(cur), payload, table=JOBS_TABLE, many=True)
         return len(rows)
     except Exception:
         close_conn()

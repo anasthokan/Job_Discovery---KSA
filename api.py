@@ -990,6 +990,7 @@ def health():
         "jobs_list": True,
         "jobs_recommend": True,
         "country": "Saudi Arabia",
+        "save_fix": 3,
         "resume_parse": True,
         "ats_score": True,
         "cv_from_job": True,
