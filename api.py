@@ -203,6 +203,7 @@ app = FastAPI(
     description="Job listings API, skill-based job recommendations, resume/CV parse, ATS resume score, job-description-to-CV, PDF/DOCX conversion, and MySQL job storage.",
     version="1.6.0",
     lifespan=lifespan,
+    redirect_slashes=False,
 )
 app.add_middleware(
     CORSMiddleware,
@@ -211,6 +212,19 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def strip_trailing_slash(request: Request, call_next):
+    """IIS follows a slash redirect to 127.0.0.1 and the browser then times out."""
+    path = request.scope.get("path") or ""
+    if len(path) > 1 and path.endswith("/"):
+        trimmed = path.rstrip("/") or "/"
+        request.scope["path"] = trimmed
+        raw = request.scope.get("raw_path")
+        if isinstance(raw, (bytes, bytearray)):
+            request.scope["raw_path"] = trimmed.encode("utf-8")
+    return await call_next(request)
 
 
 class ResumeTextRequest(BaseModel):
