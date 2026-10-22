@@ -10,7 +10,8 @@ Set-Location $root
 $watch = Join-Path $PSScriptRoot "watch-api.ps1"
 try {
   $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$watch`""
-  $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 2) -RepetitionDuration ([TimeSpan]::MaxValue)
+  # Task Scheduler rejects TimeSpan.MaxValue (P99999999D). 9999 days is the longest duration it accepts.
+  $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 2) -RepetitionDuration (New-TimeSpan -Days 9999)
   Register-ScheduledTask -TaskName "JobDiscoveryHealth" -Action $action -Trigger $trigger -Force | Out-Null
   Write-Host "Health watchdog scheduled every 2 minutes."
 } catch {
