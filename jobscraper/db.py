@@ -199,6 +199,42 @@ def _default_omitted_columns(cur) -> None:
         log.info("Set default %s on %s.%s", default, JOBS_TABLE, name)
 
 
+def _omitted_required_columns(cur) -> list[tuple[str, str]]:
+    """NOT NULL jobs columns this INSERT does not send. Strict mode rejects the row without them."""
+    cur.execute(
+        """
+        SELECT COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, EXTRA
+        FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = %s
+          AND IS_NULLABLE = 'NO'
+          AND COLUMN_DEFAULT IS NULL
+        """,
+        (JOBS_TABLE,),
+    )
+    extras = []
+    for column in cur.fetchall() or []:
+        name = str(_row_value(column, "column_name") or "")
+        extra = str(_row_value(column, "extra") or "").lower()
+        if not name or name in _UPSERT_COLUMNS:
+            continue
+        if "auto_increment" in extra or "generated" in extra:
+            continue
+        literal = _sql_default(str(_row_value(column, "data_type") or ""), str(_row_value(column, "column_type") or ""))
+        extras.append((name, literal))
+    return extras
+
+
+def _upsert_sql(cur) -> str:
+    extras = _omitted_required_columns(cur)
+    if not extras:
+        return UPSERT_SQL
+    columns = ", " + ", ".join(_quote_ident(name) for name, _literal in extras)
+    values = ", " + ", ".join(literal for _name, literal in extras)
+    sql = UPSERT_SQL.replace(") VALUES (", columns + ") VALUES (", 1)
+    return sql.replace(") AS new", values + ") AS new", 1)
+
+
 # jobs.id is a bigint autoincrement. The scraper id is stored in source_id.
 UPSERT_SQL = f"""
 INSERT INTO {JOBS_TABLE} (
@@ -958,7 +994,7 @@ def upsert_jobs(jobs: list[dict]) -> int:
                     )
                     for row in rows
                 ]
-                cur.executemany(UPSERT_SQL, payload)
+                cur.executemany(_upsert_sql(cur), payload)
         return len(rows)
     except Exception:
         close_conn()
