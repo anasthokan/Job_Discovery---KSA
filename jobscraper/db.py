@@ -113,6 +113,92 @@ CREATE TABLE IF NOT EXISTS {RUNS_TABLE} (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 """
 
+# Columns this scraper writes. Other NOT NULL columns on the shared jobs table
+# (for example sponsors_work_visa) still need a default or MySQL error 1364 aborts the save.
+_UPSERT_COLUMNS = {
+    "public_id",
+    "source_id",
+    "title",
+    "company",
+    "company_ref_id",
+    "skills",
+    "state",
+    "location",
+    "platform",
+    "days_ago",
+    "url",
+    "description",
+    "raw_description",
+    "posted_at",
+    "is_active",
+    "job_type",
+    "work_model",
+    "experience_level",
+    "years_experience",
+    "visa_sponsorship",
+    "clearance_required",
+    "saudi_national_required",
+    "listing_inferred",
+    "first_seen_at",
+    "last_seen_at",
+    "created_at",
+    "updated_at",
+}
+
+
+def _row_value(row: dict, name: str):
+    for key, value in row.items():
+        if str(key).lower() == name:
+            return value
+    return None
+
+
+def _sql_default(data_type: str, column_type: str) -> str:
+    kind = (data_type or "").lower()
+    if kind in {"tinyint", "smallint", "mediumint", "int", "bigint", "decimal", "float", "double", "bit", "year", "bool", "boolean"}:
+        return "0"
+    if kind == "date":
+        return "'1970-01-01'"
+    if kind in {"datetime", "timestamp"}:
+        return "CURRENT_TIMESTAMP"
+    if kind == "json":
+        return "('{}')"
+    if kind == "enum":
+        match = re.search(r"enum\(\s*'((?:[^'\\]|\\.)*)'", column_type or "", re.I)
+        if match:
+            return "'" + match.group(1).replace("'", "''") + "'"
+    return "''"
+
+
+def _default_omitted_columns(cur) -> None:
+    """Shared jobs columns we do not insert must have a default, or strict mode rejects the row."""
+    cur.execute(
+        """
+        SELECT COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, EXTRA
+        FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = %s
+          AND IS_NULLABLE = 'NO'
+          AND COLUMN_DEFAULT IS NULL
+        """,
+        (JOBS_TABLE,),
+    )
+    for column in cur.fetchall() or []:
+        name = str(_row_value(column, "column_name") or "")
+        extra = str(_row_value(column, "extra") or "").lower()
+        if not name or name in _UPSERT_COLUMNS:
+            continue
+        if "auto_increment" in extra or "generated" in extra:
+            continue
+        default = _sql_default(str(_row_value(column, "data_type") or ""), str(_row_value(column, "column_type") or ""))
+        try:
+            cur.execute(f"ALTER TABLE {JOBS_TABLE} ALTER COLUMN {_quote_ident(name)} SET DEFAULT {default}")
+        except Exception:
+            log.exception("Could not set default on %s.%s", JOBS_TABLE, name)
+            continue
+        log.info("Set default %s on %s.%s", default, JOBS_TABLE, name)
+
+
 # jobs.id is a bigint autoincrement. The scraper id is stored in source_id.
 UPSERT_SQL = f"""
 INSERT INTO {JOBS_TABLE} (
@@ -336,6 +422,7 @@ def _ensure_job_columns(cur) -> None:
             f"ALTER TABLE {JOBS_TABLE} "
             "ADD COLUMN saudi_national_required VARCHAR(16) NOT NULL DEFAULT 'no'"
         )
+    _default_omitted_columns(cur)
 
 
 def init_db() -> bool:
@@ -840,6 +927,7 @@ def upsert_jobs(jobs: list[dict]) -> int:
     try:
         with _LOCK:
             with conn.cursor() as cur:
+                _default_omitted_columns(cur)
                 company_ids = _company_ids(
                     cur,
                     {row["company_key"]: row["company"] for row in rows if row["company_key"]},
