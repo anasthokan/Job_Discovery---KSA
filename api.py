@@ -797,7 +797,7 @@ def _recommend_payload(
     return payload
 
 
-def run_spider(keywords: str, location: str, platform: str, city: str = "") -> None:
+def run_spider(keywords: str, location: str, platform: str, city: str = "", target: int = 0) -> None:
     DATA_FILE.parent.mkdir(exist_ok=True)
     if DATA_FILE.exists():
         DATA_FILE.unlink()
@@ -816,16 +816,20 @@ def run_spider(keywords: str, location: str, platform: str, city: str = "") -> N
         f"city={city}",
         "-a",
         f"platform={platform}",
+        "-a",
+        f"target={max(0, int(target or 0))}",
         "-s",
         "LOG_LEVEL=WARNING",
     ]
+    # A 5,000-job run searches about 40 roles on 4 boards and can take one to two hours.
+    timeout = 10800 if target >= 1000 else SCRAPE_TIMEOUT
     try:
         result = subprocess.run(
             cmd,
             cwd=ROOT,
             capture_output=True,
             text=True,
-            timeout=SCRAPE_TIMEOUT,
+            timeout=timeout,
             check=False,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
         )
@@ -990,7 +994,7 @@ def health():
         "jobs_list": True,
         "jobs_recommend": True,
         "country": "Saudi Arabia",
-        "save_fix": 3,
+        "save_fix": 4,
         "resume_parse": True,
         "ats_score": True,
         "cv_from_job": True,
@@ -1118,32 +1122,40 @@ def scrape_jobs(
     platform: str = Query("All"),
     days: int = Query(30),
     city: str = Query(""),
+    target: int = Query(0, ge=0, le=20000, description="How many jobs to aim for. 5000 searches many fields and takes one to two hours."),
 ):
     """Start a scrape and return immediately. IIS closes long requests with 502."""
     if not SCRAPE_LOCK.acquire(blocking=False):
         raise HTTPException(status_code=409, detail="A scrape is already running. Try again in a moment.")
     thread = threading.Thread(
         target=_scrape_background,
-        args=(keywords, state, platform, city),
+        args=(keywords, state, platform, city, target),
         name="job-scrape",
         daemon=True,
     )
     thread.start()
+    message = "Scrape started. Poll GET /api/scrape/status until running is false, then check the ksajob.jobs table."
+    if target >= 1000:
+        message = (
+            f"Large scrape started for about {target} jobs across many fields. "
+            "It can take one to two hours. Poll GET /api/scrape/status until running is false."
+        )
     return JSONResponse(
         status_code=202,
         content={
             "ok": True,
             "started": True,
             "running": True,
-            "message": "Scrape started. Poll GET /api/scrape/status until running is false, then check the ksajob.jobs table.",
+            "target": target,
+            "message": message,
         },
     )
 
 
-def _scrape_background(keywords: str, state: str, platform: str, city: str) -> None:
+def _scrape_background(keywords: str, state: str, platform: str, city: str, target: int = 0) -> None:
     global _LAST_SCRAPE
     try:
-        run_spider(keywords, state, platform, city)
+        run_spider(keywords, state, platform, city, target)
         jobs = [
             job
             for job in load_jobs_json()

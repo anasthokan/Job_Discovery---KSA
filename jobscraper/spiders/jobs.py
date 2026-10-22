@@ -101,18 +101,66 @@ DEFAULT_SEARCH_QUERIES = (
     "teacher",
 )
 
+# Used when a scrape asks for 1,000 or more jobs. One short run only covers a few of these.
+BROAD_SEARCH_QUERIES = (
+    "software engineer",
+    "data analyst",
+    "accountant",
+    "nurse",
+    "sales executive",
+    "human resources",
+    "project manager",
+    "customer service",
+    "mechanical engineer",
+    "teacher",
+    "civil engineer",
+    "electrical engineer",
+    "marketing",
+    "driver",
+    "chef",
+    "pharmacist",
+    "doctor",
+    "receptionist",
+    "security officer",
+    "warehouse",
+    "procurement",
+    "finance",
+    "graphic designer",
+    "java developer",
+    "python developer",
+    "network engineer",
+    "quality engineer",
+    "safety officer",
+    "logistics",
+    "administrator",
+    "technician",
+    "architect",
+    "lawyer",
+    "recruiter",
+    "business analyst",
+    "devops engineer",
+    "SAP consultant",
+    "cashier",
+    "storekeeper",
+    "sales manager",
+)
+
 
 class JobsSpider(scrapy.Spider):
     """Saudi Arabia listings from Indeed, LinkedIn, Google Jobs, and Bayt."""
 
     name = "jobs"
 
-    def __init__(self, keywords="", location="All", city="", platform="All", *args, **kwargs):
+    def __init__(self, keywords="", location="All", city="", platform="All", target="0", *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.keywords = [k.strip().lower() for k in keywords.split(",") if k.strip()]
         self.location = location or "All"
         self.city = city or ""
         self.platform = platform or "All"
+        try:
+            self.target = max(0, int(target or 0))
+        except (TypeError, ValueError):
+            self.target = 0
 
     def _search_queries(self) -> list[str]:
         if self.keywords:
@@ -186,7 +234,18 @@ class JobsSpider(scrapy.Spider):
         queries = self._search_queries()
         where = self._search_location()
         remote = self.location == "Remote"
-        single_board = self.platform != "All"
+        if self.target >= 1000 and not self.keywords:
+            queries = list(BROAD_SEARCH_QUERIES)
+        if self.target >= 1000:
+            max_terms = min(len(queries), 40)
+            slots = max(len(sites) * max_terms, 1)
+            results_wanted = min(100, max(50, (self.target * 3 + slots - 1) // slots))
+            hours_old = 24 * 180
+        else:
+            single_board = self.platform != "All"
+            max_terms = 4 if single_board else 3
+            results_wanted = 40 if single_board else 20
+            hours_old = 720
         try:
             rows = await asyncio.to_thread(
                 scrape_jobspy,
@@ -194,8 +253,9 @@ class JobsSpider(scrapy.Spider):
                 where,
                 sites,
                 is_remote=remote,
-                results_wanted=40 if single_board else 20,
-                max_terms=4 if single_board else 3,
+                results_wanted=results_wanted,
+                max_terms=max_terms,
+                hours_old=hours_old,
             )
         except Exception:
             self.logger.exception("JobSpy scrape failed")
