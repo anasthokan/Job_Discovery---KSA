@@ -115,6 +115,33 @@ def _schedule_hours() -> list[int]:
     return hours or [8, 20]
 
 
+def _scrape_target() -> int:
+    """Jobs the twice-daily run aims for. 1000+ searches every field, up to 100 listings each."""
+    raw = _env("SCRAPE_TARGET", "5000") or "5000"
+    try:
+        target = int(raw)
+    except ValueError:
+        target = 5000
+    return max(0, min(target, 20000))
+
+
+def _kept_scrape_count() -> int:
+    return sum(
+        1
+        for job in load_jobs_json()
+        if is_ksa_job(
+            job.get("state") or "",
+            job.get("location") or "",
+            allow_bare_remote=(job.get("platform") or "") in KSA_SCOPED_PLATFORMS,
+        )
+    )
+
+
+def _store_last_scrape(*, ok: bool, error: str | None, count: int, db_total: int | None) -> None:
+    global _LAST_SCRAPE
+    _LAST_SCRAPE = {"ok": ok, "error": error, "count": count, "db_total": db_total}
+
+
 def scheduled_scrape() -> None:
     if not SCRAPE_LOCK.acquire(blocking=False):
         log.warning("Scheduled scrape skipped: another scrape is running")
@@ -124,10 +151,16 @@ def scheduled_scrape() -> None:
         state = _env("SCRAPE_STATE", "All") or "All"
         platform = _env("SCRAPE_PLATFORM", "All") or "All"
         city = _env("SCRAPE_CITY", "")
-        log.info("Scheduled scrape starting keywords=%s", keywords)
-        run_spider(keywords, state, platform, city)
-        log.info("Scheduled scrape finished")
-    except Exception:
+        target = _scrape_target()
+        log.info("Scheduled scrape starting keywords=%s target=%s", keywords or "(all fields)", target)
+        run_spider(keywords, state, platform, city, target)
+        count = _kept_scrape_count()
+        db_total = mysql_job_count() if mysql_configured() else count
+        _store_last_scrape(ok=True, error=None, count=count, db_total=db_total)
+        log.info("Scheduled scrape finished count=%s db_total=%s", count, db_total)
+    except Exception as exc:
+        detail = getattr(exc, "detail", None) or str(exc)
+        _store_last_scrape(ok=False, error=str(detail)[:500], count=0, db_total=None)
         log.exception("Scheduled scrape failed")
     finally:
         SCRAPE_LOCK.release()
@@ -1005,6 +1038,7 @@ def health():
             "enabled": _truthy("SCRAPE_SCHEDULE_ENABLED", "true"),
             "tz": _env("SCRAPE_TZ", "Asia/Riyadh") or "Asia/Riyadh",
             "hours": _schedule_hours(),
+            "target": _scrape_target(),
         },
     }
 
@@ -1153,28 +1187,15 @@ def scrape_jobs(
 
 
 def _scrape_background(keywords: str, state: str, platform: str, city: str, target: int = 0) -> None:
-    global _LAST_SCRAPE
     try:
         run_spider(keywords, state, platform, city, target)
-        jobs = [
-            job
-            for job in load_jobs_json()
-            if is_ksa_job(
-                job.get("state") or "",
-                job.get("location") or "",
-                allow_bare_remote=(job.get("platform") or "") in KSA_SCOPED_PLATFORMS,
-            )
-        ]
-        _LAST_SCRAPE = {
-            "ok": True,
-            "error": None,
-            "count": len(jobs),
-            "db_total": mysql_job_count() if mysql_configured() else len(jobs),
-        }
-        log.info("Scrape saved %s jobs (db_total=%s)", len(jobs), _LAST_SCRAPE["db_total"])
+        count = _kept_scrape_count()
+        db_total = mysql_job_count() if mysql_configured() else count
+        _store_last_scrape(ok=True, error=None, count=count, db_total=db_total)
+        log.info("Scrape saved %s jobs (db_total=%s)", count, db_total)
     except Exception as exc:
         detail = getattr(exc, "detail", None) or str(exc)
-        _LAST_SCRAPE = {"ok": False, "error": str(detail)[:500], "count": 0, "db_total": None}
+        _store_last_scrape(ok=False, error=str(detail)[:500], count=0, db_total=None)
         log.exception("Background scrape failed")
     finally:
         SCRAPE_LOCK.release()
@@ -1192,6 +1213,7 @@ def scrape_status():
             "tz": _env("SCRAPE_TZ", "Asia/Riyadh") or "Asia/Riyadh",
             "hours": _schedule_hours(),
             "keywords": _env("SCRAPE_KEYWORDS", ""),
+            "target": _scrape_target(),
             "state": _env("SCRAPE_STATE", "All") or "All",
             "platform": _env("SCRAPE_PLATFORM", "All") or "All",
         },

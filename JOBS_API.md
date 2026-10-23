@@ -15,7 +15,7 @@ Related APIs: `RESUME_API.md`, `ATS_API.md`, `CV_API.md`, `CONVERT_API.md`
 1. **Listings** — return US job listings (title, company, skills, description, job_type, location, board, apply URL)
 2. **Scrape** — refresh from public job boards and **upsert into MySQL** (JSON file is a backup)
 3. **Recommend** — rank those listings against candidate skills (or a resume)
-4. **Schedule** — scrape runs **twice a day** (default 08:00 and 20:00 IST) so the database stays fresh
+4. **Schedule** — scrape runs **twice a day** (default 08:00 and 20:00 Asia/Riyadh) across the full role list, aiming for about 5000 jobs
 
 Listings come from MySQL when `.env` has `MYSQL_*` set, otherwise from the last `data/jobs.json` scrape. If `count` is `0`, scrape first (or call recommend with `refresh= true`).
 
@@ -104,7 +104,7 @@ This run is upserted into MySQL database `ksajob`, table `jobs`, when `.env` has
 
 Omit `keywords` (or send empty) to scrape **all fields**. If you pass `python,react`, a job matching **either** token is kept.
 
-A background scheduler also calls the same scrape at **08:00 and 20:00** `Asia/Riyadh` (override with `SCRAPE_HOURS` / `SCRAPE_TZ` in `.env`). Empty `SCRAPE_KEYWORDS` pulls a default set of roles. Comma-separated scrape keywords match **any** token (OR).
+A background scheduler also calls the same scrape at **08:00 and 20:00** `Asia/Riyadh` (override with `SCRAPE_HOURS` / `SCRAPE_TZ` in `.env`). It aims for **5000** jobs (`SCRAPE_TARGET`) and, when `SCRAPE_KEYWORDS` is empty, searches the full role list at up to 100 listings per board. That run takes one to two hours. Comma-separated scrape keywords match **any** token (OR).
 
 Use this when the cache is empty or stale. Then call `/api/jobs` or `/api/recommend`.
 

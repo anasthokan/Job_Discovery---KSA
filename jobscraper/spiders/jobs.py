@@ -237,15 +237,21 @@ class JobsSpider(scrapy.Spider):
         if self.target >= 1000 and not self.keywords:
             queries = list(BROAD_SEARCH_QUERIES)
         if self.target >= 1000:
-            max_terms = min(len(queries), 40)
-            slots = max(len(sites) * max_terms, 1)
-            results_wanted = min(100, max(50, (self.target * 3 + slots - 1) // slots))
+            # Every role in the list, and the most listings JobSpy will return per board.
+            max_terms = len(queries)
+            results_wanted = 100
             hours_old = 24 * 180
         else:
             single_board = self.platform != "All"
             max_terms = 4 if single_board else 3
             results_wanted = 40 if single_board else 20
             hours_old = 720
+        self.logger.info(
+            "Searching %s roles on %s boards, %s listings each",
+            min(len(queries), max_terms),
+            len(sites),
+            results_wanted,
+        )
         try:
             rows = await asyncio.to_thread(
                 scrape_jobspy,
