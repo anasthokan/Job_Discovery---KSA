@@ -39,6 +39,7 @@ from jobscraper.document_convert import (
     preview_text_from_docx,
 )
 from jobscraper.jd_to_cv import JobToCvError, build_cv_from_job
+from jobscraper.globaljobs import globaljobs_status, interval_minutes as globaljobs_interval, sync_global_jobs
 from jobscraper.job_fields import (
     EXPERIENCE_LEVELS,
     WORK_MODELS,
@@ -191,6 +192,18 @@ def _start_scheduler() -> BackgroundScheduler | None:
             max_instances=1,
             coalesce=True,
             misfire_grace_time=3600,
+        )
+    if _truthy("GLOBALJOBS_ENABLED", "true"):
+        scheduler.add_job(
+            sync_global_jobs,
+            "interval",
+            minutes=globaljobs_interval(),
+            id="dev-global-jobs",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=60,
+            next_run_time=datetime.now(tz),
         )
     scheduler.start()
     log.info("Scrape schedule: %s:00 %s", hours, tz_name)
@@ -1042,6 +1055,7 @@ def health():
             "hours": _schedule_hours(),
             "target": _scrape_target(),
         },
+        "globaljobs": globaljobs_status(),
     }
 
 
@@ -1067,6 +1081,7 @@ def filters():
             "LinkedIn",
             "Google Jobs",
             "Bayt",
+            "Dev Global Jobs",
         ],
         "days": [1, 3, 7, 30],
         "work_models": list(WORK_MODELS),
@@ -1219,6 +1234,7 @@ def scrape_status():
             "state": _env("SCRAPE_STATE", "All") or "All",
             "platform": _env("SCRAPE_PLATFORM", "All") or "All",
         },
+        "globaljobs": globaljobs_status(),
         **cache_meta(),
     }
 

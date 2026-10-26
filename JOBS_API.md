@@ -108,6 +108,8 @@ A background scheduler also calls the same scrape at **08:00 and 20:00** `Asia/R
 
 Use this when the cache is empty or stale. Then call `/api/jobs` or `/api/recommend`.
 
+A second feed, Dev Global Jobs, runs every minute (`GLOBALJOBS_INTERVAL_MINUTES`) for `country=sa`. Each listing is loaded by id so the full description is stored. The job URL stays on devglobaljobs.com. Their limit is 120 requests per minute per IP. This feed uses at most 100. Show a visible "Powered by Dev Global Jobs" link wherever those rows are displayed.
+
 ## Visa and Saudization
 
 Each listing includes `visa_sponsorship` (`yes`, `no`, or `unknown`) and `saudi_national_required` (`yes` or `no`). These are read from the posting. There is no E-Verify or H-1B field.

@@ -73,6 +73,7 @@ KSA_SCOPED_PLATFORMS = frozenset({
     "Indeed",
     "Google Jobs",
     "Bayt",
+    "Dev Global Jobs",
 })
 
 _KSA_RE = re.compile(
