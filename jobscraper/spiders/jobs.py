@@ -12,7 +12,6 @@ from jobscraper.jobspy_source import sites_for_platform
 from jobscraper.locations import muse_location, normalize_scraped_location, parse_state
 
 HTML_RE = re.compile(r"<[^>]+>")
-WS_RE = re.compile(r"\s+")
 NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
 SYNONYMS = {
     "developer": ("developer", "engineer", "dev"),
@@ -30,8 +29,15 @@ def _source_json(value) -> str:
 
 
 def strip_html(value) -> str:
-    text = HTML_RE.sub(" ", str(value or ""))
-    return WS_RE.sub(" ", text).strip()
+    """Drop tags and keep the full posting text, including paragraph breaks."""
+    text = str(value or "")
+    text = re.sub(r"(?i)<\s*br\s*/?>", "\n", text)
+    text = re.sub(r"(?i)</\s*(p|div|li|h[1-6]|tr|ul|ol)\s*>", "\n", text)
+    text = HTML_RE.sub(" ", text)
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    lines = [re.sub(r"[ \t]+", " ", line).strip() for line in text.split("\n")]
+    text = "\n".join(line for line in lines if line)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
 def normalize_text(value) -> str:

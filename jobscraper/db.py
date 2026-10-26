@@ -680,8 +680,9 @@ def _fill_short_dice_descriptions() -> None:
         with conn.cursor() as cur:
             cur.execute(
                 f"SELECT id, url, title, platform FROM {JOBS_TABLE} "
-                f"WHERE platform IN ('Indeed', 'LinkedIn', 'Bayt', 'Glassdoor', 'Google Jobs') "
-                f"AND CHAR_LENGTH(description) < 120 AND TRIM(url) <> ''"
+                f"WHERE platform IN ('LinkedIn', 'Bayt', 'Indeed') "
+                f"AND TRIM(url) <> '' "
+                f"AND (CHAR_LENGTH(description) < 400 OR description = title)"
             )
             rows = list(cur.fetchall() or [])
     except Exception:
@@ -692,28 +693,32 @@ def _fill_short_dice_descriptions() -> None:
         return
     log.info("Filling %s short descriptions from posting pages", len(rows))
     filled = 0
-    failures = 0
+    failures: dict[str, int] = {}
+    blocked: set[str] = set()
     for row in rows:
+        platform = str(row.get("platform") or "")
+        if platform in blocked:
+            continue
         time.sleep(0.25)
         url = str(row.get("url") or "").strip()
         if not url:
             continue
         try:
-            text = fetch_posting_paragraph(row.get("platform") or "", url)
+            text = fetch_posting_paragraph(platform, url)
         except urllib.error.HTTPError as exc:
             if exc.code not in {404, 410}:
-                failures += 1
-            if failures >= 20:
-                log.warning("Stopped description fill after repeated request failures")
-                break
+                failures[platform] = failures.get(platform, 0) + 1
+            if failures.get(platform, 0) >= 15:
+                blocked.add(platform)
+                log.warning("Stopped description fill for %s after repeated request failures", platform)
             continue
         except Exception:
-            failures += 1
-            if failures >= 20:
-                log.warning("Stopped description fill after repeated request failures")
-                break
+            failures[platform] = failures.get(platform, 0) + 1
+            if failures.get(platform, 0) >= 15:
+                blocked.add(platform)
+                log.warning("Stopped description fill for %s after repeated request failures", platform)
             continue
-        failures = 0
+        failures[platform] = 0
         if not text:
             continue
         payload = json.dumps({"jobDescription": text}, ensure_ascii=False)

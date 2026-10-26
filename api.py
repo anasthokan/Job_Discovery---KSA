@@ -76,6 +76,7 @@ from jobscraper.db import (
     mysql_configured,
     save_candidate as save_candidate_mysql,
     start_scrape_run,
+    start_startup_maintenance,
     upsert_jobs,
 )
 
@@ -202,6 +203,7 @@ def _boot() -> None:
     try:
         init_mysql()
         import_json_if_empty(DATA_FILE)
+        start_startup_maintenance()
     except Exception:
         log.exception("API boot failed")
     if _BOOT_STOP.is_set():

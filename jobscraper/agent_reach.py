@@ -237,11 +237,13 @@ def parse_linkedin_markdown(text: str) -> list[dict]:
 
 def posting_paragraph(text: str, title: str = "") -> str:
     """Real posting text. A title or one short line is not a description."""
-    body = re.sub(r"\s+", " ", html.unescape(text or "")).strip()
+    raw = html.unescape(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    lines = [re.sub(r"[ \t]+", " ", line).strip() for line in raw.split("\n")]
+    body = re.sub(r"\n{3,}", "\n\n", "\n".join(line for line in lines if line)).strip()
     heading = re.sub(r"\s+", " ", title or "").strip()
-    if len(body) < 120:
+    if len(re.sub(r"\s+", " ", body)) < 120:
         return ""
-    if heading and body.lower() == heading.lower():
+    if heading and re.sub(r"\s+", " ", body).lower() == heading.lower():
         return ""
     return body
 
@@ -435,6 +437,13 @@ def linkedin_board_from_html(page: str) -> dict:
     return board
 
 
+def _html_to_text(fragment: str) -> str:
+    text = re.sub(r"(?i)<\s*br\s*/?>", "\n", fragment or "")
+    text = re.sub(r"(?i)</\s*(p|div|li|h[1-6]|tr|ul|ol)\s*>", "\n", text)
+    text = re.sub(r"<[^>]+>", " ", text)
+    return posting_paragraph(text)
+
+
 def linkedin_description_from_html(page: str) -> str:
     match = re.search(
         r'<div[^>]*class="[^"]*show-more-less-html__markup[^"]*"[^>]*>',
@@ -443,8 +452,29 @@ def linkedin_description_from_html(page: str) -> str:
     )
     if not match:
         return ""
-    plain = re.sub(r"<[^>]+>", " ", _inner_html(page, match.start()))
-    return posting_paragraph(plain)
+    return _html_to_text(_inner_html(page, match.start()))
+
+
+def indeed_description_from_html(page: str) -> str:
+    match = re.search(
+        r'<div[^>]*id="jobDescriptionText"[^>]*>',
+        page or "",
+        re.I,
+    )
+    if not match:
+        return ""
+    return _html_to_text(_inner_html(page, match.start()))
+
+
+def bayt_description_from_html(page: str) -> str:
+    match = re.search(
+        r'<div[^>]*(?:id="job_description"|class="[^"]*job-description[^"]*")[^>]*>',
+        page or "",
+        re.I,
+    )
+    if not match:
+        return ""
+    return _html_to_text(_inner_html(page, match.start()))
 
 
 def yc_description_from_html(page: str) -> str:
@@ -507,6 +537,10 @@ def fetch_posting_paragraph(platform: str, url: str) -> str:
         return dice_description_from_html(page)
     if name == "LinkedIn":
         return linkedin_description_from_html(page)
+    if name == "Bayt":
+        return bayt_description_from_html(page)
+    if name == "Indeed":
+        return indeed_description_from_html(page)
     if name == "Y Combinator":
         return yc_description_from_html(page)
     if name == "SmartRecruiters":

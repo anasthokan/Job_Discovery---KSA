@@ -144,4 +144,29 @@ def scrape(
             if frame is None or getattr(frame, "empty", True):
                 continue
             found.extend(rows_to_jobs(frame.to_dict("records")))
-    return found
+    return _fill_short_descriptions(found)
+
+
+def _fill_short_descriptions(jobs: list[dict]) -> list[dict]:
+    """LinkedIn and Bayt search cards omit the posting. Load the full page text."""
+    import time
+
+    from jobscraper.agent_reach import fetch_posting_paragraph
+
+    filled = 0
+    for job in jobs:
+        current = str(job.get("search_text") or "").strip()
+        if len(current) >= 400 or job.get("platform") not in {"LinkedIn", "Bayt", "Indeed"}:
+            continue
+        try:
+            full = fetch_posting_paragraph(job.get("platform") or "", job.get("url") or "")
+        except Exception:
+            log.exception("Description fetch failed for %s", job.get("url"))
+            continue
+        time.sleep(0.15)
+        if full and len(full) > len(current):
+            job["search_text"] = full
+            filled += 1
+    if filled:
+        log.info("Filled %s full descriptions from posting pages", filled)
+    return jobs
