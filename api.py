@@ -60,6 +60,7 @@ from jobscraper.recommend import (
     parse_skill_query,
     recommend_jobs,
 )
+from jobscraper.profile_autofill import autofill_from_parsed
 from jobscraper.resume_parser import ResumeParseError, parse_resume_bytes, parse_resume_text
 from jobscraper.db import (
     close_conn as close_mysql,
@@ -194,6 +195,16 @@ def _start_scheduler() -> BackgroundScheduler | None:
             coalesce=True,
             misfire_grace_time=3600,
         )
+    scheduler.add_job(
+        start_dice_description_backfill,
+        "interval",
+        minutes=10,
+        id="posting-descriptions",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=120,
+    )
     if _truthy("GLOBALJOBS_ENABLED", "true"):
         scheduler.add_job(
             sync_global_jobs,
@@ -249,8 +260,8 @@ async def lifespan(_app):
 
 app = FastAPI(
     title="Job Discovery",
-    description="Job listings API, skill-based job recommendations, resume/CV parse, ATS resume score, job-description-to-CV, PDF/DOCX conversion, and MySQL job storage.",
-    version="1.6.0",
+    description="Job listings API, skill-based job recommendations, resume/CV parse, profile autofill from a resume, ATS resume score, job-description-to-CV, PDF/DOCX conversion, and MySQL job storage.",
+    version="1.7.0",
     lifespan=lifespan,
     redirect_slashes=False,
 )
@@ -1048,6 +1059,7 @@ def health():
         "country": "Saudi Arabia",
         "save_fix": 4,
         "resume_parse": True,
+        "profile_autofill": True,
         "ats_score": True,
         "cv_from_job": True,
         "pdf_docx_convert": True,
@@ -1676,6 +1688,155 @@ def parse_resume_from_text(
     except ResumeParseError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     return _resume_response(parsed, include_raw)
+
+
+class ProfileJob(BaseModel):
+    company: str = ""
+    job_title: str = ""
+    start_date: str = ""
+    end_date: str = ""
+    responsibilities: str = ""
+
+
+class ProfileSchool(BaseModel):
+    school: str = ""
+    degree: str = ""
+    field_of_study: str = ""
+    graduation_year: str = ""
+    grade: str = ""
+
+
+class ProfilePersonal(BaseModel):
+    first_name: str = ""
+    last_name: str = ""
+    preferred_name: str = ""
+    email: str = ""
+    phone_country_code: str = ""
+    phone_number: str = ""
+    nationality: str = ""
+
+
+class ProfileAddress(BaseModel):
+    building_number: str = ""
+    street: str = ""
+    district: str = ""
+    city: str = ""
+    region: str = ""
+    postal_code: str = ""
+    additional_number: str = ""
+    short_address: str = ""
+    country: str = ""
+
+
+class ProfileLinks(BaseModel):
+    linkedin_url: str = ""
+    github_url: str = ""
+    portfolio_url: str = ""
+    personal_website: str = ""
+
+
+class ProfileWorkAuthorization(BaseModel):
+    authorized_to_work: str = ""
+    need_iqama_or_work_visa: str = ""
+    work_authorization_type: str = ""
+    work_authorization_validity: str = ""
+
+
+class ProfileLogistics(BaseModel):
+    desired_monthly_salary_sar: str = ""
+    notice_period: str = ""
+    willing_to_relocate: str = ""
+    open_to_remote: str = ""
+    meets_minimum_working_age: str = ""
+    how_heard: str = ""
+
+
+class ProfileOptionalIds(BaseModel):
+    gender: str = ""
+    disability_status: str = ""
+
+
+class ProfileCustomAnswer(BaseModel):
+    question: str = ""
+    answer: str = ""
+
+
+class ProfileAutofillResponse(BaseModel):
+    ok: bool = True
+    source: ResumeSource
+    executive_summary: str = ""
+    work_experience: list[ProfileJob] = Field(default_factory=list)
+    education: list[ProfileSchool] = Field(default_factory=list)
+    skills: str = ""
+    personal: ProfilePersonal
+    national_address: ProfileAddress
+    online_profiles: ProfileLinks
+    work_authorization: ProfileWorkAuthorization
+    logistics: ProfileLogistics
+    optional_identifiers: ProfileOptionalIds
+    custom_answers: list[ProfileCustomAnswer] = Field(default_factory=list)
+
+
+def _autofill_or_http(parsed: dict) -> dict:
+    filled = autofill_from_parsed(parsed)
+    source = filled.get("source") or {}
+    if not source.get("content_type"):
+        source["content_type"] = "text/plain"
+    filled["source"] = source
+    return filled
+
+
+@app.get("/api/profile/autofill", summary="Profile autofill contract")
+def profile_autofill_contract():
+    return {
+        "ok": True,
+        "service": "profile-autofill",
+        "note": "Separate from /api/resume/parse. Fields missing from the resume are empty strings.",
+        "max_upload_bytes": 8 * 1024 * 1024,
+        "formats": ["pdf", "docx", "txt"],
+        "endpoints": {
+            "upload": {
+                "method": "POST",
+                "path": "/api/profile/autofill",
+                "content_type": "multipart/form-data",
+                "field": "file",
+            },
+            "text": {
+                "method": "POST",
+                "path": "/api/profile/autofill-text",
+                "content_type": "application/json",
+                "body": {"text": "resume text"},
+            },
+        },
+        "docs": "/docs",
+    }
+
+
+@app.post(
+    "/api/profile/autofill",
+    response_model=ProfileAutofillResponse,
+    summary="Upload a resume and fill the profile form",
+)
+async def profile_autofill_file(
+    request: Request,
+    file: UploadFile | None = File(None, description="Resume file: PDF, DOCX, or TXT"),
+):
+    data, filename, content_type = await _load_resume_upload(request, file)
+    parsed = _parse_or_http(data, filename, content_type)
+    return _autofill_or_http(parsed)
+
+
+@app.post(
+    "/api/profile/autofill-text",
+    response_model=ProfileAutofillResponse,
+    summary="Fill the profile form from pasted resume text",
+)
+def profile_autofill_from_text(body: ResumeTextRequest):
+    try:
+        parsed = parse_resume_text(body.text)
+    except ResumeParseError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    return _autofill_or_http(parsed)
 
 
 def _job_from_cache(job_id: str | None) -> dict | None:

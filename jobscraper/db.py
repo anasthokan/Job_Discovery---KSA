@@ -808,11 +808,11 @@ _FILL_AGAIN = False
 
 
 def start_dice_description_backfill() -> None:
-    """Fill title-only descriptions from each board's own posting page.
+    """Keep filling title-only descriptions for as long as the API is running.
 
-    A scrape can finish after the startup pass, so this may run again.
-    A second request while a pass is already walking the table waits and
-    runs once more, instead of leaving the new rows as the title.
+    One pass is not enough. The morning scrape saves LinkedIn cards with no
+    body, and LinkedIn often refuses a burst of requests. This worker stays
+    up, writes the newest blanks first, and tries the refused ones again.
     """
     global _FILL_AGAIN, _FILL_RUNNING
     if not mysql_configured():
@@ -828,9 +828,17 @@ def start_dice_description_backfill() -> None:
         try:
             while True:
                 _FILL_AGAIN = False
-                _fill_short_dice_descriptions()
-                if not _FILL_AGAIN:
-                    break
+                filled, retryable = _fill_short_dice_descriptions()
+                if _FILL_AGAIN:
+                    continue
+                pause = 180 if retryable else 600
+                log.info(
+                    "Description refill sleeping %ss (filled=%s, still blank=%s)",
+                    pause,
+                    filled,
+                    retryable,
+                )
+                _wait_before_next_fill(pause)
         finally:
             with _FILL_LOCK:
                 _FILL_RUNNING = False
@@ -838,7 +846,31 @@ def start_dice_description_backfill() -> None:
     threading.Thread(target=_run, name="posting-descriptions", daemon=True).start()
 
 
-def _fill_short_dice_descriptions() -> None:
+def _wait_before_next_fill(seconds: int) -> None:
+    """Sleep, but wake immediately when a scrape has just saved new rows."""
+    import time
+
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if _FILL_AGAIN:
+            return
+        time.sleep(2)
+
+
+def _mark_posting_missing(cur, row_id: int) -> None:
+    """Remember a removed posting so the refill does not request it every pass."""
+    marker = '{"posting_missing":true}'
+    cur.execute(
+        f"UPDATE {JOBS_TABLE} SET raw_description = IF("
+        f"JSON_VALID(raw_description) AND CHAR_LENGTH(raw_description) > 2 "
+        f"AND CAST(raw_description AS CHAR) NOT LIKE %s, "
+        f"JSON_MERGE_PATCH(raw_description, %s), %s) "
+        f"WHERE id = %s",
+        ('%"api_id"%', marker, marker, row_id),
+    )
+
+
+def _fill_short_dice_descriptions() -> tuple[int, int]:
     import time
     import urllib.error
 
@@ -856,18 +888,20 @@ def _fill_short_dice_descriptions() -> None:
                 f"AND TRIM(url) <> '' "
                 f"AND url NOT LIKE %s "
                 f"AND (CHAR_LENGTH(description) < 400 OR description = title) "
+                f"AND CAST(raw_description AS CHAR) NOT LIKE %s "
                 f"ORDER BY id DESC",
-                ("%example.com%",),
+                ("%example.com%", "%posting_missing%"),
             )
             rows = list(cur.fetchall() or [])
     except Exception:
         close_conn()
         log.exception("Could not list short job descriptions")
-        return
+        return 0, 0
     if not rows:
-        return
+        return 0, 0
     log.info("Filling %s short descriptions from posting pages", len(rows))
     filled = 0
+    retryable = 0
     consecutive_failures = 0
     for row in rows:
         time.sleep(1.0)
@@ -876,12 +910,19 @@ def _fill_short_dice_descriptions() -> None:
         if not url or _is_placeholder_url(url):
             continue
         text = ""
+        gone = False
         for attempt in range(4):
             try:
                 text = fetch_posting_paragraph(platform, url)
                 break
             except urllib.error.HTTPError as exc:
                 if exc.code in {404, 410}:
+                    try:
+                        with conn.cursor() as cur:
+                            _mark_posting_missing(cur, int(row["id"]))
+                    except Exception:
+                        log.exception("Could not mark removed posting %s", url)
+                    gone = True
                     break
                 if exc.code == 429 and attempt < 3:
                     time.sleep(12)
@@ -892,7 +933,10 @@ def _fill_short_dice_descriptions() -> None:
                 log.exception("Description fetch failed for %s", url)
                 text = ""
                 break
+        if gone:
+            continue
         if not text or len(text) < 120:
+            retryable += 1
             consecutive_failures += 1
             if consecutive_failures >= 8:
                 log.warning("Description fill is being rate limited. Pausing before the next posting.")
@@ -911,6 +955,7 @@ def _fill_short_dice_descriptions() -> None:
                 break
             log.exception("Job description update failed")
     log.info("Filled %s descriptions from posting pages", filled)
+    return filled, retryable
 
 
 def _as_skills_json(value) -> str:
