@@ -60,6 +60,7 @@ from jobscraper.recommend import (
     parse_skill_query,
     recommend_jobs,
 )
+from jobscraper.linkedin_profile import LinkedInProfileError, autofill_from_linkedin
 from jobscraper.profile_autofill import autofill_from_parsed
 from jobscraper.resume_parser import ResumeParseError, parse_resume_bytes, parse_resume_text
 from jobscraper.db import (
@@ -1060,6 +1061,7 @@ def health():
         "save_fix": 4,
         "resume_parse": True,
         "profile_autofill": True,
+        "profile_linkedin": True,
         "ats_score": True,
         "cv_from_job": True,
         "pdf_docx_convert": True,
@@ -1807,6 +1809,12 @@ def profile_autofill_contract():
                 "content_type": "application/json",
                 "body": {"text": "resume text"},
             },
+            "linkedin": {
+                "method": "POST",
+                "path": "/api/profile/linkedin",
+                "content_type": "application/json",
+                "body": {"url": "https://www.linkedin.com/in/username"},
+            },
         },
         "docs": "/docs",
     }
@@ -1837,6 +1845,31 @@ def profile_autofill_from_text(body: ResumeTextRequest):
     except ResumeParseError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     return _autofill_or_http(parsed)
+
+
+@app.post(
+    "/api/profile/linkedin",
+    response_model=ProfileAutofillResponse,
+    summary="Fill the profile form from a LinkedIn profile link",
+)
+async def profile_from_linkedin_link(request: Request):
+    """Same fields as the resume upload. Missing public fields are empty strings."""
+    content_type = (request.headers.get("content-type") or "").lower()
+    target = ""
+    if "application/json" in content_type:
+        try:
+            body = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Send JSON with a url field.") from exc
+        if isinstance(body, dict):
+            target = str(body.get("url") or body.get("link") or "")
+    else:
+        form = await request.form()
+        target = str(form.get("url") or form.get("link") or "")
+    try:
+        return autofill_from_linkedin(target)
+    except LinkedInProfileError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
 def _job_from_cache(job_id: str | None) -> dict | None:
