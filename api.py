@@ -77,6 +77,7 @@ from jobscraper.db import (
     mysql_configured,
     save_candidate as save_candidate_mysql,
     start_scrape_run,
+    start_dice_description_backfill,
     start_startup_maintenance,
     upsert_jobs,
 )
@@ -899,6 +900,9 @@ def run_spider(keywords: str, location: str, platform: str, city: str = "", targ
         finish_scrape_run(run_id, job_count_value=0, error=detail[:2000])
         raise HTTPException(status_code=502, detail=detail[:2000]) from exc
     finish_scrape_run(run_id, job_count_value=len(this_run) or saved)
+    # The startup refill has already finished by the time a scheduled scrape
+    # saves new LinkedIn rows. Run it again for the rows that arrived with no body.
+    start_dice_description_backfill()
 
 
 def _resume_response(parsed: dict, include_raw: bool) -> dict:

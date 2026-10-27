@@ -150,23 +150,41 @@ def scrape(
 def _fill_short_descriptions(jobs: list[dict]) -> list[dict]:
     """LinkedIn and Bayt search cards omit the posting. Load the full page text."""
     import time
+    import urllib.error
 
     from jobscraper.agent_reach import fetch_posting_paragraph
 
     filled = 0
     for job in jobs:
         current = str(job.get("search_text") or "").strip()
-        if len(current) >= 400 or job.get("platform") not in {"LinkedIn", "Bayt", "Indeed"}:
+        title = str(job.get("title") or "").strip()
+        platform = job.get("platform") or ""
+        if platform not in {"LinkedIn", "Bayt", "Indeed"}:
             continue
-        try:
-            full = fetch_posting_paragraph(job.get("platform") or "", job.get("url") or "")
-        except Exception:
-            log.exception("Description fetch failed for %s", job.get("url"))
+        if len(current) >= 400 and current.casefold() != title.casefold():
             continue
-        time.sleep(0.15)
+        full = ""
+        for attempt in range(4):
+            try:
+                full = fetch_posting_paragraph(platform, job.get("url") or "")
+                break
+            except urllib.error.HTTPError as exc:
+                if exc.code in {404, 410}:
+                    break
+                if exc.code == 429 and attempt < 3:
+                    time.sleep(12)
+                    continue
+                log.warning("Description fetch failed for %s", job.get("url"))
+                break
+            except Exception:
+                log.exception("Description fetch failed for %s", job.get("url"))
+                break
+        time.sleep(0.8)
         if full and len(full) > len(current):
             job["search_text"] = full
             filled += 1
+        elif title and current.casefold() == title.casefold():
+            job["search_text"] = ""
     if filled:
         log.info("Filled %s full descriptions from posting pages", filled)
     return jobs

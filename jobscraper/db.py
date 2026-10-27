@@ -14,6 +14,7 @@ import re
 import threading
 from datetime import date, datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
@@ -316,7 +317,11 @@ ON DUPLICATE KEY UPDATE
   location = new.location,
   platform = new.platform,
   days_ago = new.days_ago,
-  url = new.url,
+  url = IF(
+    new.url LIKE '%example.com%' OR TRIM(new.url) = '',
+    {JOBS_TABLE}.url,
+    new.url
+  ),
   description = IF(
     CHAR_LENGTH(new.description) > CHAR_LENGTH({JOBS_TABLE}.description),
     new.description,
@@ -629,9 +634,155 @@ def clear_copied_api_raw_descriptions() -> int:
 _STARTUP_MAINTENANCE_STARTED = False
 
 
-def _startup_maintenance() -> None:
-    """Backfill and cleanup after uvicorn is already listening on port 9001."""
+def _is_placeholder_url(url: str) -> bool:
+    """jobs.example.com and other example.com links are demo rows, not postings."""
+    host = urlparse(str(url or "").strip()).netloc.lower().split(":")[0]
+    if host.startswith("www."):
+        host = host[4:]
+    return host == "example.com" or host.endswith(".example.com")
+
+
+def _is_placeholder_source(source_id: str) -> bool:
+    return str(source_id or "").strip().lower().startswith("seed-")
+
+
+def repair_placeholder_urls() -> int:
+    """Replace an example.com link when the scrape saved the real posting URL."""
+    if not mysql_configured():
+        return 0
+    conn = get_conn()
+    if conn is None:
+        return 0
     try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"UPDATE {JOBS_TABLE} "
+                f"SET url = JSON_UNQUOTE(JSON_EXTRACT(raw_description, '$.job_url')) "
+                f"WHERE (url LIKE %s OR url LIKE %s) "
+                f"AND JSON_VALID(raw_description) "
+                f"AND JSON_UNQUOTE(JSON_EXTRACT(raw_description, '$.job_url')) LIKE 'http%%' "
+                f"AND JSON_UNQUOTE(JSON_EXTRACT(raw_description, '$.job_url')) NOT LIKE %s",
+                ("%://jobs.example.com/%", "%://example.com/%", "%example.com%"),
+            )
+            fixed = int(cur.rowcount or 0)
+        if fixed:
+            log.info("Replaced %s placeholder job URLs from the saved source link", fixed)
+        return fixed
+    except Exception:
+        close_conn()
+        log.exception("placeholder URL repair failed")
+        return 0
+
+
+def delete_placeholder_jobs() -> int:
+    """Remove demo rows whose apply link is not a real posting."""
+    if not mysql_configured():
+        return 0
+    conn = get_conn()
+    if conn is None:
+        return 0
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"DELETE FROM {JOBS_TABLE} "
+                f"WHERE url LIKE %s OR url LIKE %s OR source_id LIKE %s",
+                ("%://jobs.example.com/%", "%://example.com/%", "seed-%"),
+            )
+            removed = int(cur.rowcount or 0)
+        if removed:
+            log.info("Removed %s placeholder job rows", removed)
+        return removed
+    except Exception:
+        close_conn()
+        log.exception("placeholder job cleanup failed")
+        return 0
+
+
+def _store_full_description(cur, row: dict, text: str) -> None:
+    """Save posting text and the fields that are read from it."""
+    from jobscraper.job_fields import infer_listing_fields
+
+    fields = infer_listing_fields(
+        title=str(row.get("title") or ""),
+        location=str(row.get("location") or ""),
+        state=str(row.get("state") or ""),
+        description=text,
+        job_type=row.get("job_type") or "",
+    )
+    payload = json.dumps({"jobDescription": text}, ensure_ascii=False)
+    cur.execute(
+        f"UPDATE {JOBS_TABLE} SET description = %s, "
+        f"raw_description = IF("
+        f"JSON_VALID(raw_description) AND CHAR_LENGTH(raw_description) > 2 "
+        f"AND CAST(raw_description AS CHAR) NOT LIKE %s, "
+        f"JSON_MERGE_PATCH(raw_description, %s), "
+        f"IF(CHAR_LENGTH(raw_description) > 2 AND CAST(raw_description AS CHAR) NOT LIKE %s, "
+        f"raw_description, %s)), "
+        f"work_model = %s, experience_level = %s, years_experience = %s, "
+        f"visa_sponsorship = %s, clearance_required = %s, saudi_national_required = %s, "
+        f"job_type = %s, listing_inferred = 1 "
+        f"WHERE id = %s AND CHAR_LENGTH(description) < CHAR_LENGTH(%s)",
+        (
+            text,
+            '%"api_id"%',
+            payload,
+            '%"api_id"%',
+            payload,
+            str(fields["work_model"] or "unknown")[:16],
+            str(fields["experience_level"] or "unknown")[:32],
+            fields["years_experience"],
+            str(fields["visa_sponsorship"] or "unknown")[:16],
+            str(fields["clearance_required"] or "unknown")[:16],
+            str(fields["saudi_national_required"] or "no")[:16],
+            fields["job_type"],
+            row["id"],
+            text,
+        ),
+    )
+
+
+def fill_descriptions_from_raw() -> int:
+    """Copy a full posting out of raw_description when the description column is shorter."""
+    if not mysql_configured():
+        return 0
+    conn = get_conn()
+    if conn is None:
+        return 0
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT id, title, location, state, job_type, "
+                f"JSON_UNQUOTE(JSON_EXTRACT(raw_description, '$.jobDescription')) AS body "
+                f"FROM {JOBS_TABLE} "
+                f"WHERE JSON_VALID(raw_description) "
+                f"AND JSON_EXTRACT(raw_description, '$.jobDescription') IS NOT NULL "
+                f"AND CHAR_LENGTH(JSON_UNQUOTE(JSON_EXTRACT(raw_description, '$.jobDescription'))) "
+                f"> CHAR_LENGTH(description)"
+            )
+            rows = list(cur.fetchall() or [])
+            filled = 0
+            for row in rows:
+                text = str(row.get("body") or "").strip()
+                if len(text) < 120:
+                    continue
+                _store_full_description(cur, row, text)
+                if cur.rowcount:
+                    filled += 1
+        if filled:
+            log.info("Copied full descriptions from raw_description on %s jobs", filled)
+        return filled
+    except Exception:
+        close_conn()
+        log.exception("raw description copy failed")
+        return 0
+
+
+def _startup_maintenance() -> None:
+    """Backfill and cleanup after uvicorn is already listening."""
+    try:
+        repair_placeholder_urls()
+        delete_placeholder_jobs()
+        fill_descriptions_from_raw()
         backfill_listing_fields()
         clear_copied_api_raw_descriptions()
     except Exception:
@@ -651,20 +802,40 @@ def start_startup_maintenance() -> None:
     ).start()
 
 
-_DICE_BACKFILL_STARTED = False
+_FILL_LOCK = threading.Lock()
+_FILL_RUNNING = False
+_FILL_AGAIN = False
 
 
 def start_dice_description_backfill() -> None:
-    """Fill title-only descriptions from each board's own posting page."""
-    global _DICE_BACKFILL_STARTED
-    if _DICE_BACKFILL_STARTED or not mysql_configured():
+    """Fill title-only descriptions from each board's own posting page.
+
+    A scrape can finish after the startup pass, so this may run again.
+    A second request while a pass is already walking the table waits and
+    runs once more, instead of leaving the new rows as the title.
+    """
+    global _FILL_AGAIN, _FILL_RUNNING
+    if not mysql_configured():
         return
-    _DICE_BACKFILL_STARTED = True
-    threading.Thread(
-        target=_fill_short_dice_descriptions,
-        name="posting-descriptions",
-        daemon=True,
-    ).start()
+    with _FILL_LOCK:
+        if _FILL_RUNNING:
+            _FILL_AGAIN = True
+            return
+        _FILL_RUNNING = True
+
+    def _run() -> None:
+        global _FILL_AGAIN, _FILL_RUNNING
+        try:
+            while True:
+                _FILL_AGAIN = False
+                _fill_short_dice_descriptions()
+                if not _FILL_AGAIN:
+                    break
+        finally:
+            with _FILL_LOCK:
+                _FILL_RUNNING = False
+
+    threading.Thread(target=_run, name="posting-descriptions", daemon=True).start()
 
 
 def _fill_short_dice_descriptions() -> None:
@@ -679,10 +850,13 @@ def _fill_short_dice_descriptions() -> None:
     try:
         with conn.cursor() as cur:
             cur.execute(
-                f"SELECT id, url, title, platform FROM {JOBS_TABLE} "
+                f"SELECT id, url, title, platform, location, state, job_type "
+                f"FROM {JOBS_TABLE} "
                 f"WHERE platform IN ('LinkedIn', 'Bayt', 'Indeed') "
                 f"AND TRIM(url) <> '' "
-                f"AND (CHAR_LENGTH(description) < 400 OR description = title)"
+                f"AND url NOT LIKE %s "
+                f"AND (CHAR_LENGTH(description) < 400 OR description = title)",
+                ("%example.com%",),
             )
             rows = list(cur.fetchall() or [])
     except Exception:
@@ -693,48 +867,41 @@ def _fill_short_dice_descriptions() -> None:
         return
     log.info("Filling %s short descriptions from posting pages", len(rows))
     filled = 0
-    failures: dict[str, int] = {}
-    blocked: set[str] = set()
+    consecutive_failures = 0
     for row in rows:
-        platform = str(row.get("platform") or "")
-        if platform in blocked:
-            continue
-        time.sleep(0.25)
+        time.sleep(1.0)
         url = str(row.get("url") or "").strip()
-        if not url:
+        platform = str(row.get("platform") or "")
+        if not url or _is_placeholder_url(url):
             continue
-        try:
-            text = fetch_posting_paragraph(platform, url)
-        except urllib.error.HTTPError as exc:
-            if exc.code not in {404, 410}:
-                failures[platform] = failures.get(platform, 0) + 1
-            if failures.get(platform, 0) >= 15:
-                blocked.add(platform)
-                log.warning("Stopped description fill for %s after repeated request failures", platform)
+        text = ""
+        for attempt in range(4):
+            try:
+                text = fetch_posting_paragraph(platform, url)
+                break
+            except urllib.error.HTTPError as exc:
+                if exc.code in {404, 410}:
+                    break
+                if exc.code == 429 and attempt < 3:
+                    time.sleep(12)
+                    continue
+                text = ""
+                break
+            except Exception:
+                log.exception("Description fetch failed for %s", url)
+                text = ""
+                break
+        if not text or len(text) < 120:
+            consecutive_failures += 1
+            if consecutive_failures >= 8:
+                log.warning("Description fill is being rate limited. Pausing before the next posting.")
+                time.sleep(45)
+                consecutive_failures = 0
             continue
-        except Exception:
-            failures[platform] = failures.get(platform, 0) + 1
-            if failures.get(platform, 0) >= 15:
-                blocked.add(platform)
-                log.warning("Stopped description fill for %s after repeated request failures", platform)
-            continue
-        failures[platform] = 0
-        if not text:
-            continue
-        payload = json.dumps({"jobDescription": text}, ensure_ascii=False)
+        consecutive_failures = 0
         try:
             with conn.cursor() as cur:
-                cur.execute(
-                    f"UPDATE {JOBS_TABLE} SET description = %s, "
-                    f"raw_description = IF("
-                    f"JSON_VALID(raw_description) AND CHAR_LENGTH(raw_description) > 2 "
-                    f"AND CAST(raw_description AS CHAR) NOT LIKE %s, "
-                    f"JSON_MERGE_PATCH(raw_description, %s), "
-                    f"IF(CHAR_LENGTH(raw_description) > 2 AND CAST(raw_description AS CHAR) NOT LIKE %s, "
-                    f"raw_description, %s)) "
-                    f"WHERE id = %s AND CHAR_LENGTH(description) < CHAR_LENGTH(%s)",
-                    (text, '%"api_id"%', payload, '%"api_id"%', payload, row["id"], text),
-                )
+                _store_full_description(cur, row, text)
             filled += 1
         except Exception:
             close_conn()
@@ -950,7 +1117,14 @@ def _row_from_item(job: dict) -> dict | None:
     if not source_id or not title or not company:
         return None
     skills = _as_skills_json(job.get("skills"))
+    url = _clip(job.get("url"), 1000)
+    if _is_placeholder_url(url) or _is_placeholder_source(source_id):
+        return None
     description = str(job.get("description") or job.get("search_text") or "").strip()
+    # LinkedIn cards often repeat the title and nothing else. Saving that
+    # makes About the Role look filled when the posting was never loaded.
+    if description and title and description.casefold() == title.casefold():
+        description = ""
     try:
         days_ago = int(job.get("daysAgo") or 0)
     except (TypeError, ValueError):
@@ -966,7 +1140,7 @@ def _row_from_item(job: dict) -> dict | None:
         "location": _clip(job.get("location"), 512, "Saudi Arabia"),
         "platform": _clip(job.get("platform"), 120, "Unknown"),
         "days_ago": max(days_ago, 0),
-        "url": _clip(job.get("url"), 1000),
+        "url": url,
         "description": description,
         "raw_description": _raw_description_json(job),
         "posted_at": _posted_mysql(job.get("posted_at")),
@@ -1257,7 +1431,11 @@ def load_jobs() -> list[dict]:
                 f"job_type, work_model, experience_level, "
                 f"years_experience, visa_sponsorship, clearance_required, saudi_national_required, "
                 f"posted_at "
-                f"FROM {JOBS_TABLE} ORDER BY last_seen_at DESC"
+                f"FROM {JOBS_TABLE} "
+                f"WHERE url NOT LIKE %s AND url NOT LIKE %s "
+                f"AND (source_id IS NULL OR source_id NOT LIKE %s) "
+                f"ORDER BY last_seen_at DESC",
+                ("%://jobs.example.com/%", "%://example.com/%", "seed-%"),
             )
             rows = cur.fetchall() or []
         load_jobs.last_error = None
