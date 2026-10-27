@@ -855,7 +855,8 @@ def _fill_short_dice_descriptions() -> None:
                 f"WHERE platform IN ('LinkedIn', 'Bayt', 'Indeed') "
                 f"AND TRIM(url) <> '' "
                 f"AND url NOT LIKE %s "
-                f"AND (CHAR_LENGTH(description) < 400 OR description = title)",
+                f"AND (CHAR_LENGTH(description) < 400 OR description = title) "
+                f"ORDER BY id DESC",
                 ("%example.com%",),
             )
             rows = list(cur.fetchall() or [])
