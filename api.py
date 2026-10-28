@@ -607,11 +607,17 @@ def parse_keywords(raw: str) -> list[str]:
     return [part.strip().lower() for part in (raw or "").split(",") if part.strip()]
 
 
-def format_time_ago(posted_at, fallback_days: int = 0) -> str:
+def format_time_ago(posted_at, fallback_days: int = 0, *, date_only: bool = False) -> str:
     """Relative label for the job card: '2 min ago', '1 hour ago', '7 days ago', '1 month ago'."""
     posted = _as_utc(posted_at)
     if posted is None:
         return _ago_from_days(fallback_days)
+    # Calendar-day stamps (JobSpy LinkedIn) are midnight UTC. Measuring hours from
+    # midnight makes "posted today" look like "14 hours ago" instead of LinkedIn's
+    # real "6 hours ago". Keep day-granularity until a precise stamp is saved.
+    if date_only or _is_midnight(posted):
+        days = (datetime.now(timezone.utc).date() - posted.date()).days
+        return _ago_from_days(max(days, 0))
     seconds = int((datetime.now(timezone.utc) - posted).total_seconds())
     if seconds < 60:
         return "just now"
@@ -647,6 +653,10 @@ def _as_utc(value) -> datetime | None:
     return posted
 
 
+def _is_midnight(posted: datetime) -> bool:
+    return posted.hour == 0 and posted.minute == 0 and posted.second == 0 and posted.microsecond == 0
+
+
 def _ago_from_days(days: int) -> str:
     try:
         count = max(int(days or 0), 0)
@@ -673,12 +683,13 @@ def _with_time_ago(jobs: list[dict]) -> list[dict]:
             fallback = int(job.get("daysAgo") or 0)
         except (TypeError, ValueError):
             fallback = 0
-        row["daysAgo"] = format_time_ago(
-            job.get("platform_posted_at")
-            or job.get("platformPostedAt")
-            or job.get("posted_at"),
-            fallback,
+        precise = job.get("platform_posted_at") or job.get("platformPostedAt")
+        posted = precise or job.get("posted_at")
+        stamp = _as_utc(posted)
+        date_only = stamp is not None and _is_midnight(stamp) and not (
+            precise and not _is_midnight(_as_utc(precise) or stamp)
         )
+        row["daysAgo"] = format_time_ago(posted, fallback, date_only=date_only)
         presented.append(row)
     attach_descriptions(presented)
     if len(presented) <= 200:

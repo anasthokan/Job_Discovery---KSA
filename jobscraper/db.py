@@ -342,7 +342,17 @@ ON DUPLICATE KEY UPDATE
     )
   ),
   posted_at = COALESCE(new.posted_at, {JOBS_TABLE}.posted_at),
-  platform_posted_at = COALESCE(new.platform_posted_at, {JOBS_TABLE}.platform_posted_at),
+  platform_posted_at = IF(
+    new.platform_posted_at IS NULL,
+    {JOBS_TABLE}.platform_posted_at,
+    IF(
+      {JOBS_TABLE}.platform_posted_at IS NULL
+        OR TIME({JOBS_TABLE}.platform_posted_at) = '00:00:00'
+        OR TIME(new.platform_posted_at) <> '00:00:00',
+      new.platform_posted_at,
+      {JOBS_TABLE}.platform_posted_at
+    )
+  ),
   job_type = new.job_type,
   work_model = new.work_model,
   experience_level = new.experience_level,
@@ -490,10 +500,20 @@ def _ensure_job_columns(cur) -> None:
         if not cur.fetchone():
             cur.execute(f"ALTER TABLE {JOBS_TABLE} ADD COLUMN {name} {ddl}")
             if name == "platform_posted_at":
+                # Only copy precise stamps. Date-only midnight values make daysAgo
+                # look like "14 hours ago" instead of LinkedIn's "6 hours ago".
                 cur.execute(
                     f"UPDATE {JOBS_TABLE} SET platform_posted_at = posted_at "
-                    f"WHERE platform_posted_at IS NULL AND posted_at IS NOT NULL"
+                    f"WHERE platform_posted_at IS NULL AND posted_at IS NOT NULL "
+                    f"AND TIME(posted_at) <> '00:00:00'"
                 )
+    cur.execute(f"SHOW COLUMNS FROM {JOBS_TABLE} LIKE 'platform_posted_at'")
+    if cur.fetchone():
+        cur.execute(
+            f"UPDATE {JOBS_TABLE} SET platform_posted_at = NULL "
+            f"WHERE platform = 'LinkedIn' AND platform_posted_at IS NOT NULL "
+            f"AND TIME(platform_posted_at) = '00:00:00'"
+        )
     cur.execute(f"SHOW COLUMNS FROM {JOBS_TABLE} LIKE 'description'")
     description_column = cur.fetchone()
     description_type = ""
@@ -718,9 +738,11 @@ def _store_full_description(cur, row: dict, text: str, platform_posted_at: str =
     if posted and len(body) < 120:
         cur.execute(
             f"UPDATE {JOBS_TABLE} SET "
-            f"platform_posted_at = COALESCE(%s, platform_posted_at), "
+            f"platform_posted_at = %s, "
             f"posted_at = COALESCE(%s, posted_at) "
-            f"WHERE id = %s AND platform_posted_at IS NULL",
+            f"WHERE id = %s AND ("
+            f"platform_posted_at IS NULL OR TIME(platform_posted_at) = '00:00:00'"
+            f")",
             (posted, posted, row["id"]),
         )
         return
@@ -743,9 +765,16 @@ def _store_full_description(cur, row: dict, text: str, platform_posted_at: str =
         f"work_model = %s, experience_level = %s, years_experience = %s, "
         f"visa_sponsorship = %s, clearance_required = %s, saudi_national_required = %s, "
         f"job_type = %s, listing_inferred = 1, "
-        f"platform_posted_at = COALESCE(%s, platform_posted_at), "
+        f"platform_posted_at = IF("
+        f"%s IS NULL, platform_posted_at, "
+        f"IF(platform_posted_at IS NULL OR TIME(platform_posted_at) = '00:00:00' "
+        f"OR TIME(%s) <> '00:00:00', %s, platform_posted_at)"
+        f"), "
         f"posted_at = COALESCE(%s, posted_at) "
-        f"WHERE id = %s AND CHAR_LENGTH(description) < CHAR_LENGTH(%s)",
+        f"WHERE id = %s AND ("
+        f"CHAR_LENGTH(description) < CHAR_LENGTH(%s) OR "
+        f"(%s IS NOT NULL AND (platform_posted_at IS NULL OR TIME(platform_posted_at) = '00:00:00'))"
+        f")",
         (
             body,
             '%"api_id"%',
@@ -761,8 +790,11 @@ def _store_full_description(cur, row: dict, text: str, platform_posted_at: str =
             fields["job_type"],
             posted,
             posted,
+            posted,
+            posted,
             row["id"],
             body,
+            posted,
         ),
     )
 
@@ -915,7 +947,8 @@ def _fill_short_dice_descriptions() -> tuple[int, int]:
                 f"AND url NOT LIKE %s "
                 f"AND ("
                 f"CHAR_LENGTH(description) < 400 OR description = title "
-                f"OR platform_posted_at IS NULL"
+                f"OR platform_posted_at IS NULL "
+                f"OR (platform = 'LinkedIn' AND TIME(platform_posted_at) = '00:00:00')"
                 f") "
                 f"AND CAST(raw_description AS CHAR) NOT LIKE %s "
                 f"ORDER BY id DESC",

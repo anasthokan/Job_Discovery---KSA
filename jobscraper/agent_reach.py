@@ -116,15 +116,39 @@ def relative_days(value: str) -> int:
     return amount * 365
 
 
-def absolute_posted_at(value, *, now: datetime | None = None) -> str:
-    """Turn a board date or '19 hours ago' into a UTC ISO timestamp for MySQL."""
+def is_date_only_stamp(value) -> bool:
+    """True when the stamp is only a calendar day (midnight), not a precise post time."""
+    if value is None or value == "":
+        return True
+    if isinstance(value, datetime):
+        return value.hour == 0 and value.minute == 0 and value.second == 0 and value.microsecond == 0
+    text = str(value).strip()
+    if not text:
+        return True
+    if len(text) == 10 and text[4] == "-" and text[7] == "-":
+        return True
+    if re.match(r"^\d{4}-\d{2}-\d{2}[ T]00:00:00(\.0+)?$", text):
+        return True
+    return False
+
+
+def absolute_posted_at(value, *, now: datetime | None = None, allow_date_only: bool = True) -> str:
+    """Turn a board date or '19 hours ago' into a UTC ISO timestamp for MySQL.
+
+    LinkedIn search often only sends a calendar day. Pass allow_date_only=False when
+    you need the precise platform time (hours/minutes), so callers can fetch the
+    guest page label instead of treating midnight as the post time.
+    """
     if value is None or value == "":
         return ""
     if isinstance(value, datetime):
         posted = value
         if posted.tzinfo is None:
             posted = posted.replace(tzinfo=timezone.utc)
-        return posted.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        stamp = posted.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        if not allow_date_only and is_date_only_stamp(stamp):
+            return ""
+        return stamp
     if isinstance(value, (int, float)):
         ts = float(value)
         if ts > 1e12:
@@ -133,12 +157,15 @@ def absolute_posted_at(value, *, now: datetime | None = None) -> str:
             posted = datetime.fromtimestamp(ts, tz=timezone.utc)
         except (OSError, OverflowError, ValueError):
             return ""
-        return posted.strftime("%Y-%m-%d %H:%M:%S")
+        stamp = posted.strftime("%Y-%m-%d %H:%M:%S")
+        if not allow_date_only and is_date_only_stamp(stamp):
+            return ""
+        return stamp
     text = str(value).strip()
     if not text or text.lower() in {"none", "nat", "nan"}:
         return ""
     if text.isdigit():
-        return absolute_posted_at(int(text), now=now)
+        return absolute_posted_at(int(text), now=now, allow_date_only=allow_date_only)
     clock = now or datetime.now(timezone.utc)
     if clock.tzinfo is None:
         clock = clock.replace(tzinfo=timezone.utc)
@@ -172,11 +199,16 @@ def absolute_posted_at(value, *, now: datetime | None = None) -> str:
             posted = parsedate_to_datetime(cleaned)
         except (TypeError, ValueError, OverflowError):
             if len(text) >= 10 and text[4] == "-" and text[7] == "-":
+                if not allow_date_only:
+                    return ""
                 return text[:10] + " 00:00:00"
             return ""
     if posted.tzinfo is None:
         posted = posted.replace(tzinfo=timezone.utc)
-    return posted.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    stamp = posted.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    if not allow_date_only and is_date_only_stamp(stamp):
+        return ""
+    return stamp
 
 
 def linkedin_search_urls(query: str, location: str, remote: bool) -> list[str]:

@@ -38,18 +38,22 @@ def _blank(value):
     return value
 
 
-def _posted(value) -> str:
-    """Keep full timestamp when JobSpy gives one; relative labels become absolute."""
+def _posted(value, *, precise: bool = False) -> str:
+    """Keep full timestamp when JobSpy gives one; relative labels become absolute.
+
+    precise=True skips calendar-day-only values (midnight). LinkedIn search often
+    only returns the date, which would wrongly show as '14 hours ago' at night.
+    """
     from jobscraper.agent_reach import absolute_posted_at
 
     value = _blank(value)
     if value is None:
         return ""
-    if isinstance(value, datetime):
-        return absolute_posted_at(value)
-    if isinstance(value, date):
+    if isinstance(value, date) and not isinstance(value, datetime):
+        if precise:
+            return ""
         return f"{value.isoformat()} 00:00:00"
-    return absolute_posted_at(value)
+    return absolute_posted_at(value, allow_date_only=not precise)
 
 
 def _skills(value) -> list[str]:
@@ -87,7 +91,10 @@ def rows_to_jobs(records: list[dict]) -> list[dict]:
                 "platform": SITE_TO_PLATFORM.get(site, site.replace("_", " ").title()),
                 "url": str(url).strip(),
                 "posted_at": _posted(row.get("date_posted")),
-                "platform_posted_at": _posted(row.get("date_posted")),
+                # LinkedIn/Indeed search cards are usually date-only. Keep that in
+                # posted_at for coarse filters, but only treat a real clock time as
+                # platform_posted_at so "6 hours ago" can be fetched from the page.
+                "platform_posted_at": _posted(row.get("date_posted"), precise=True),
                 "job_type": _blank(row.get("job_type")),
                 "search_text": str(description),
                 "raw": row,
@@ -155,7 +162,7 @@ def _fill_short_descriptions(jobs: list[dict]) -> list[dict]:
     import time
     import urllib.error
 
-    from jobscraper.agent_reach import fetch_posting_details
+    from jobscraper.agent_reach import fetch_posting_details, is_date_only_stamp
 
     filled = 0
     for job in jobs:
@@ -165,7 +172,12 @@ def _fill_short_descriptions(jobs: list[dict]) -> list[dict]:
         if platform not in {"LinkedIn", "Bayt", "Indeed"}:
             continue
         needs_text = len(current) < 400 or current.casefold() == title.casefold()
-        needs_posted = not str(job.get("platform_posted_at") or job.get("posted_at") or "").strip()
+        existing_platform = str(job.get("platform_posted_at") or "").strip()
+        # LinkedIn guest pages carry "6 hours ago". Date-only JobSpy stamps must not
+        # block that fetch, or daysAgo stays stuck on midnight ("14 hours ago").
+        needs_posted = platform == "LinkedIn" and (
+            not existing_platform or is_date_only_stamp(existing_platform)
+        )
         if not needs_text and not needs_posted:
             continue
         details = {"description": "", "platform_posted_at": ""}
@@ -187,7 +199,7 @@ def _fill_short_descriptions(jobs: list[dict]) -> list[dict]:
         time.sleep(0.8)
         full = str(details.get("description") or "")
         platform_posted = str(details.get("platform_posted_at") or "").strip()
-        if platform_posted and needs_posted:
+        if platform_posted and needs_posted and not is_date_only_stamp(platform_posted):
             job["platform_posted_at"] = platform_posted
             job["posted_at"] = platform_posted
         if needs_text and full and len(full) > len(current):
