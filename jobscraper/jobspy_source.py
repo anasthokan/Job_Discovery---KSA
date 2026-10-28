@@ -39,15 +39,17 @@ def _blank(value):
 
 
 def _posted(value) -> str:
+    """Keep full timestamp when JobSpy gives one; relative labels become absolute."""
+    from jobscraper.agent_reach import absolute_posted_at
+
     value = _blank(value)
     if value is None:
         return ""
     if isinstance(value, datetime):
-        return value.date().isoformat()
+        return absolute_posted_at(value)
     if isinstance(value, date):
-        return value.isoformat()
-    text = str(value).strip()
-    return text[:10] if len(text) >= 10 else text
+        return f"{value.isoformat()} 00:00:00"
+    return absolute_posted_at(value)
 
 
 def _skills(value) -> list[str]:
@@ -85,6 +87,7 @@ def rows_to_jobs(records: list[dict]) -> list[dict]:
                 "platform": SITE_TO_PLATFORM.get(site, site.replace("_", " ").title()),
                 "url": str(url).strip(),
                 "posted_at": _posted(row.get("date_posted")),
+                "platform_posted_at": _posted(row.get("date_posted")),
                 "job_type": _blank(row.get("job_type")),
                 "search_text": str(description),
                 "raw": row,
@@ -152,7 +155,7 @@ def _fill_short_descriptions(jobs: list[dict]) -> list[dict]:
     import time
     import urllib.error
 
-    from jobscraper.agent_reach import fetch_posting_paragraph
+    from jobscraper.agent_reach import fetch_posting_details
 
     filled = 0
     for job in jobs:
@@ -161,12 +164,14 @@ def _fill_short_descriptions(jobs: list[dict]) -> list[dict]:
         platform = job.get("platform") or ""
         if platform not in {"LinkedIn", "Bayt", "Indeed"}:
             continue
-        if len(current) >= 400 and current.casefold() != title.casefold():
+        needs_text = len(current) < 400 or current.casefold() == title.casefold()
+        needs_posted = not str(job.get("platform_posted_at") or job.get("posted_at") or "").strip()
+        if not needs_text and not needs_posted:
             continue
-        full = ""
+        details = {"description": "", "platform_posted_at": ""}
         for attempt in range(4):
             try:
-                full = fetch_posting_paragraph(platform, job.get("url") or "")
+                details = fetch_posting_details(platform, job.get("url") or "")
                 break
             except urllib.error.HTTPError as exc:
                 if exc.code in {404, 410}:
@@ -180,10 +185,15 @@ def _fill_short_descriptions(jobs: list[dict]) -> list[dict]:
                 log.exception("Description fetch failed for %s", job.get("url"))
                 break
         time.sleep(0.8)
-        if full and len(full) > len(current):
+        full = str(details.get("description") or "")
+        platform_posted = str(details.get("platform_posted_at") or "").strip()
+        if platform_posted and needs_posted:
+            job["platform_posted_at"] = platform_posted
+            job["posted_at"] = platform_posted
+        if needs_text and full and len(full) > len(current):
             job["search_text"] = full
             filled += 1
-        elif title and current.casefold() == title.casefold():
+        elif needs_text and title and current.casefold() == title.casefold():
             job["search_text"] = ""
     if filled:
         log.info("Filled %s full descriptions from posting pages", filled)

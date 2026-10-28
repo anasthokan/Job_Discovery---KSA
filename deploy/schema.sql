@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   location VARCHAR(512) NOT NULL,
   description LONGTEXT NOT NULL,
   posted_at DATETIME(6) NULL,
+  platform_posted_at DATETIME(6) NULL,
   is_active TINYINT(1) NOT NULL,
   company_ref_id BIGINT NULL,
   platform VARCHAR(120) NOT NULL,

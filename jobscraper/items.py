@@ -12,6 +12,7 @@ class JobItem(scrapy.Item):
     daysAgo = scrapy.Field()
     url = scrapy.Field()
     posted_at = scrapy.Field()
+    platform_posted_at = scrapy.Field()
     description = scrapy.Field()
     raw_description = scrapy.Field()
     job_type = scrapy.Field()

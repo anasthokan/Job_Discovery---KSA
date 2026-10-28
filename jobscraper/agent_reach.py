@@ -5,7 +5,8 @@ from __future__ import annotations
 import html
 import json
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from urllib.parse import unquote, urlencode, urlparse, urlunparse
 
 JINA_PREFIX = "https://r.jina.ai/"
@@ -115,6 +116,69 @@ def relative_days(value: str) -> int:
     return amount * 365
 
 
+def absolute_posted_at(value, *, now: datetime | None = None) -> str:
+    """Turn a board date or '19 hours ago' into a UTC ISO timestamp for MySQL."""
+    if value is None or value == "":
+        return ""
+    if isinstance(value, datetime):
+        posted = value
+        if posted.tzinfo is None:
+            posted = posted.replace(tzinfo=timezone.utc)
+        return posted.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    if isinstance(value, (int, float)):
+        ts = float(value)
+        if ts > 1e12:
+            ts /= 1000.0
+        try:
+            posted = datetime.fromtimestamp(ts, tz=timezone.utc)
+        except (OSError, OverflowError, ValueError):
+            return ""
+        return posted.strftime("%Y-%m-%d %H:%M:%S")
+    text = str(value).strip()
+    if not text or text.lower() in {"none", "nat", "nan"}:
+        return ""
+    if text.isdigit():
+        return absolute_posted_at(int(text), now=now)
+    clock = now or datetime.now(timezone.utc)
+    if clock.tzinfo is None:
+        clock = clock.replace(tzinfo=timezone.utc)
+    match = RELATIVE_RE.search(text)
+    if match:
+        token = match.group(1).lower()
+        if token in {"today", "just now"}:
+            return clock.strftime("%Y-%m-%d %H:%M:%S")
+        if token == "yesterday":
+            return (clock - timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
+        amount = int(match.group(2) or 0)
+        unit = (match.group(3) or "day").lower()
+        if unit.startswith("minute"):
+            delta = timedelta(minutes=amount)
+        elif unit.startswith("hour"):
+            delta = timedelta(hours=amount)
+        elif unit.startswith("day"):
+            delta = timedelta(days=amount)
+        elif unit.startswith("week"):
+            delta = timedelta(weeks=amount)
+        elif unit.startswith("month"):
+            delta = timedelta(days=amount * 30)
+        else:
+            delta = timedelta(days=amount * 365)
+        return (clock - delta).strftime("%Y-%m-%d %H:%M:%S")
+    cleaned = text.replace("Z", "+00:00")
+    try:
+        posted = datetime.fromisoformat(cleaned)
+    except ValueError:
+        try:
+            posted = parsedate_to_datetime(cleaned)
+        except (TypeError, ValueError, OverflowError):
+            if len(text) >= 10 and text[4] == "-" and text[7] == "-":
+                return text[:10] + " 00:00:00"
+            return ""
+    if posted.tzinfo is None:
+        posted = posted.replace(tzinfo=timezone.utc)
+    return posted.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
 def linkedin_search_urls(query: str, location: str, remote: bool) -> list[str]:
     urls = []
     for start in (0, 10, 20):
@@ -206,7 +270,7 @@ def parse_linkedin_markdown(text: str) -> list[dict]:
                 if extra.lower() in SKIP_LINES:
                     continue
                 if RELATIVE_RE.search(extra):
-                    posted = extra
+                    posted = absolute_posted_at(extra)
                     loc_part = RELATIVE_RE.sub("", extra)
                     loc_part = re.sub(
                         r"(actively hiring|be an early applicant)",
@@ -228,6 +292,7 @@ def parse_linkedin_markdown(text: str) -> list[dict]:
                 "location": location,
                 "url": url,
                 "posted_at": posted,
+                "platform_posted_at": posted,
                 "daysAgo": relative_days(posted),
                 "platform": "LinkedIn",
             }
@@ -296,7 +361,8 @@ def parse_dice_search_html(page: str) -> list[dict]:
                 "company": str(row.get("companyName") or "Unknown").strip() or "Unknown",
                 "location": location or "Saudi Arabia",
                 "url": url,
-                "posted_at": str(row.get("postedDate") or ""),
+                "posted_at": absolute_posted_at(row.get("postedDate") or ""),
+                "platform_posted_at": absolute_posted_at(row.get("postedDate") or ""),
                 "summary": str(row.get("summary") or ""),
                 "job_type": str(row.get("employmentType") or ""),
                 "raw": row,
@@ -397,6 +463,37 @@ def _camel_label(label: str) -> str:
     return words[0] + "".join(part.capitalize() for part in words[1:])
 
 
+def linkedin_posted_label(page: str) -> str:
+    """Relative or absolute post time from a LinkedIn guest job HTML fragment."""
+    text = page or ""
+    timed = re.search(
+        r'<time[^>]*datetime="([^"]+)"[^>]*>\s*([^<]*?)\s*</time>',
+        text,
+        re.I | re.S,
+    )
+    if timed:
+        stamp = absolute_posted_at(timed.group(1).strip())
+        if stamp:
+            return stamp
+        label = _plain_piece(timed.group(2))
+        if RELATIVE_RE.search(label):
+            return absolute_posted_at(label)
+    for pattern in (
+        r'class="[^"]*posted-time-ago__text[^"]*"[^>]*>\s*([^<]+?)\s*<',
+        r'class="[^"]*topcard__flavor--metadata[^"]*"[^>]*>\s*([^<]+?)\s*<',
+    ):
+        match = re.search(pattern, text, re.I | re.S)
+        if not match:
+            continue
+        label = _plain_piece(match.group(1))
+        if RELATIVE_RE.search(label):
+            return absolute_posted_at(label)
+    match = RELATIVE_RE.search(text[:8000])
+    if match:
+        return absolute_posted_at(match.group(0))
+    return ""
+
+
 def linkedin_board_from_html(page: str) -> dict:
     """Structured fields on the LinkedIn guest page, not our job columns."""
     text = page or ""
@@ -429,6 +526,9 @@ def linkedin_board_from_html(page: str) -> dict:
         caption = _plain_piece(applicants.group(1))
         if caption:
             board["applicants"] = caption
+    posted = linkedin_posted_label(text)
+    if posted:
+        board["platformPostedAt"] = posted
     for label, value in _LINKEDIN_CRITERIA_RE.findall(text):
         key = _camel_label(label)
         piece = _plain_piece(value)
@@ -505,13 +605,14 @@ def smartrecruiters_description(payload: dict) -> str:
     return posting_paragraph(" ".join(parts))
 
 
-def fetch_posting_paragraph(platform: str, url: str) -> str:
-    """Load the source posting and return its paragraph, never a made-up line."""
+def fetch_posting_details(platform: str, url: str) -> dict:
+    """Load the source posting. Returns description plus platform_posted_at when found."""
     import urllib.request
 
+    empty = {"description": "", "platform_posted_at": ""}
     target = (url or "").strip()
     if not target:
-        return ""
+        return empty
     name = platform or ""
     headers = dict(DICE_HEADERS)
     if name == "Dice":
@@ -519,12 +620,12 @@ def fetch_posting_paragraph(platform: str, url: str) -> str:
     if name == "LinkedIn":
         match = re.search(r"(\d{6,})", target)
         if not match:
-            return ""
+            return empty
         target = f"https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/{match.group(1)}"
     elif name == "SmartRecruiters" and "api.smartrecruiters.com" not in target:
         match = re.search(r"smartrecruiters\.com/([^/]+)/([^/?#]+)", target)
         if not match:
-            return ""
+            return empty
         target = (
             "https://api.smartrecruiters.com/v1/companies/"
             f"{match.group(1)}/postings/{match.group(2)}"
@@ -534,22 +635,30 @@ def fetch_posting_paragraph(platform: str, url: str) -> str:
     with urllib.request.urlopen(request, timeout=25) as response:
         page = response.read().decode("utf-8", "ignore")
     if name == "Dice":
-        return dice_description_from_html(page)
+        return {"description": dice_description_from_html(page), "platform_posted_at": ""}
     if name == "LinkedIn":
-        return linkedin_description_from_html(page)
+        return {
+            "description": linkedin_description_from_html(page),
+            "platform_posted_at": linkedin_posted_label(page),
+        }
     if name == "Bayt":
-        return bayt_description_from_html(page)
+        return {"description": bayt_description_from_html(page), "platform_posted_at": ""}
     if name == "Indeed":
-        return indeed_description_from_html(page)
+        return {"description": indeed_description_from_html(page), "platform_posted_at": ""}
     if name == "Y Combinator":
-        return yc_description_from_html(page)
+        return {"description": yc_description_from_html(page), "platform_posted_at": ""}
     if name == "SmartRecruiters":
         try:
             payload = json.loads(page)
         except json.JSONDecodeError:
-            return ""
-        return smartrecruiters_description(payload)
-    return ""
+            return empty
+        return {"description": smartrecruiters_description(payload), "platform_posted_at": ""}
+    return empty
+
+
+def fetch_posting_paragraph(platform: str, url: str) -> str:
+    """Load the source posting and return its paragraph, never a made-up line."""
+    return fetch_posting_details(platform, url).get("description") or ""
 
 
 def parse_dice_markdown(text: str) -> list[dict]:
@@ -577,7 +686,7 @@ def parse_dice_markdown(text: str) -> list[dict]:
             if "•" in stripped:
                 place, _, when = stripped.partition("•")
                 location = place.strip() or location
-                posted = when.strip()
+                posted = absolute_posted_at(when.strip())
                 break
         ident = url.rstrip("/").split("/")[-1]
         jobs.append(
@@ -588,6 +697,7 @@ def parse_dice_markdown(text: str) -> list[dict]:
                 "location": location,
                 "url": url,
                 "posted_at": posted,
+                "platform_posted_at": posted,
                 "daysAgo": relative_days(posted),
                 "platform": "Dice",
             }
@@ -652,6 +762,7 @@ def parse_yc_markdown(text: str) -> list[dict]:
                 "location": location or "Saudi Arabia",
                 "url": f"https://www.workatastartup.com/jobs/{job_id}",
                 "posted_at": "",
+                "platform_posted_at": "",
                 "daysAgo": 0,
                 "platform": "Y Combinator",
             }
@@ -700,7 +811,8 @@ def parse_hn_comment(hit: dict) -> dict | None:
         "company": company or "Unknown",
         "location": location or "Remote",
         "url": f"https://news.ycombinator.com/item?id={object_id}",
-        "posted_at": str(created),
+        "posted_at": absolute_posted_at(created),
+        "platform_posted_at": absolute_posted_at(created),
         "daysAgo": 0,
         "platform": "Hacker News",
         "search_text": text,

@@ -654,7 +654,12 @@ def _with_time_ago(jobs: list[dict]) -> list[dict]:
             fallback = int(job.get("daysAgo") or 0)
         except (TypeError, ValueError):
             fallback = 0
-        row["daysAgo"] = format_time_ago(job.get("posted_at"), fallback)
+        row["daysAgo"] = format_time_ago(
+            job.get("platform_posted_at")
+            or job.get("platformPostedAt")
+            or job.get("posted_at"),
+            fallback,
+        )
         presented.append(row)
     attach_descriptions(presented)
     if len(presented) <= 200:

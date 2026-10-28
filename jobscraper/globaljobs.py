@@ -125,6 +125,7 @@ def _to_job(record: dict) -> dict | None:
         "url": str(record.get("url") or f"{API_BASE}/jobs/detail/{job_id}").strip(),
         "description": description,
         "posted_at": str(record.get("postedAt") or ""),
+        "platform_posted_at": str(record.get("postedAt") or ""),
         "daysAgo": _days_ago(str(record.get("postedAt") or "")),
         "job_type": str(record.get("jobType") or ""),
         "raw": record,

@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS {JOBS_TABLE} (
   location VARCHAR(512) NOT NULL,
   description LONGTEXT NOT NULL,
   posted_at DATETIME(6) NULL,
+  platform_posted_at DATETIME(6) NULL,
   is_active TINYINT(1) NOT NULL,
   company_ref_id BIGINT NULL,
   platform VARCHAR(120) NOT NULL,
@@ -131,6 +132,7 @@ _UPSERT_COLUMNS = {
     "description",
     "raw_description",
     "posted_at",
+    "platform_posted_at",
     "is_active",
     "job_type",
     "work_model",
@@ -299,12 +301,12 @@ def _write_row(cur, sql: str, params, *, table: str, many: bool = False) -> None
 UPSERT_SQL = f"""
 INSERT INTO {JOBS_TABLE} (
   public_id, source_id, title, company, company_ref_id, skills, state, location,
-  platform, days_ago, url, description, raw_description, posted_at, is_active,
+  platform, days_ago, url, description, raw_description, posted_at, platform_posted_at, is_active,
   job_type, work_model, experience_level, years_experience, visa_sponsorship, clearance_required,
   saudi_national_required, listing_inferred, first_seen_at, last_seen_at, created_at, updated_at
 ) VALUES (
   %s, %s, %s, %s, %s, %s, %s, %s,
-  %s, %s, %s, %s, %s, %s, 1,
+  %s, %s, %s, %s, %s, %s, %s, 1,
   %s, %s, %s, %s, %s, %s,
   %s, 1, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), UTC_TIMESTAMP(6)
 ) AS new
@@ -339,7 +341,8 @@ ON DUPLICATE KEY UPDATE
       IF(CHAR_LENGTH({JOBS_TABLE}.raw_description) > 2, {JOBS_TABLE}.raw_description, '{{}}')
     )
   ),
-  posted_at = new.posted_at,
+  posted_at = COALESCE(new.posted_at, {JOBS_TABLE}.posted_at),
+  platform_posted_at = COALESCE(new.platform_posted_at, {JOBS_TABLE}.platform_posted_at),
   job_type = new.job_type,
   work_model = new.work_model,
   experience_level = new.experience_level,
@@ -481,10 +484,16 @@ def _ensure_job_columns(cur) -> None:
         ("visa_sponsorship", "VARCHAR(16) NOT NULL DEFAULT 'unknown'"),
         ("clearance_required", "VARCHAR(16) NOT NULL DEFAULT 'unknown'"),
         ("listing_inferred", "TINYINT(1) NOT NULL DEFAULT 0"),
+        ("platform_posted_at", "DATETIME(6) NULL"),
     ):
         cur.execute(f"SHOW COLUMNS FROM {JOBS_TABLE} LIKE '{name}'")
         if not cur.fetchone():
             cur.execute(f"ALTER TABLE {JOBS_TABLE} ADD COLUMN {name} {ddl}")
+            if name == "platform_posted_at":
+                cur.execute(
+                    f"UPDATE {JOBS_TABLE} SET platform_posted_at = posted_at "
+                    f"WHERE platform_posted_at IS NULL AND posted_at IS NOT NULL"
+                )
     cur.execute(f"SHOW COLUMNS FROM {JOBS_TABLE} LIKE 'description'")
     description_column = cur.fetchone()
     description_type = ""
@@ -698,18 +707,31 @@ def delete_placeholder_jobs() -> int:
         return 0
 
 
-def _store_full_description(cur, row: dict, text: str) -> None:
+def _store_full_description(cur, row: dict, text: str, platform_posted_at: str = "") -> None:
     """Save posting text and the fields that are read from it."""
     from jobscraper.job_fields import infer_listing_fields
 
+    body = str(text or "").strip()
+    posted = _posted_mysql(platform_posted_at)
+    if not body and not posted:
+        return
+    if posted and len(body) < 120:
+        cur.execute(
+            f"UPDATE {JOBS_TABLE} SET "
+            f"platform_posted_at = COALESCE(%s, platform_posted_at), "
+            f"posted_at = COALESCE(%s, posted_at) "
+            f"WHERE id = %s AND platform_posted_at IS NULL",
+            (posted, posted, row["id"]),
+        )
+        return
     fields = infer_listing_fields(
         title=str(row.get("title") or ""),
         location=str(row.get("location") or ""),
         state=str(row.get("state") or ""),
-        description=text,
+        description=body,
         job_type=row.get("job_type") or "",
     )
-    payload = json.dumps({"jobDescription": text}, ensure_ascii=False)
+    payload = json.dumps({"jobDescription": body}, ensure_ascii=False)
     cur.execute(
         f"UPDATE {JOBS_TABLE} SET description = %s, "
         f"raw_description = IF("
@@ -720,10 +742,12 @@ def _store_full_description(cur, row: dict, text: str) -> None:
         f"raw_description, %s)), "
         f"work_model = %s, experience_level = %s, years_experience = %s, "
         f"visa_sponsorship = %s, clearance_required = %s, saudi_national_required = %s, "
-        f"job_type = %s, listing_inferred = 1 "
+        f"job_type = %s, listing_inferred = 1, "
+        f"platform_posted_at = COALESCE(%s, platform_posted_at), "
+        f"posted_at = COALESCE(%s, posted_at) "
         f"WHERE id = %s AND CHAR_LENGTH(description) < CHAR_LENGTH(%s)",
         (
-            text,
+            body,
             '%"api_id"%',
             payload,
             '%"api_id"%',
@@ -735,8 +759,10 @@ def _store_full_description(cur, row: dict, text: str) -> None:
             str(fields["clearance_required"] or "unknown")[:16],
             str(fields["saudi_national_required"] or "no")[:16],
             fields["job_type"],
+            posted,
+            posted,
             row["id"],
-            text,
+            body,
         ),
     )
 
@@ -874,7 +900,7 @@ def _fill_short_dice_descriptions() -> tuple[int, int]:
     import time
     import urllib.error
 
-    from jobscraper.agent_reach import fetch_posting_paragraph
+    from jobscraper.agent_reach import fetch_posting_details
 
     conn = get_conn()
     if conn is None:
@@ -882,12 +908,15 @@ def _fill_short_dice_descriptions() -> tuple[int, int]:
     try:
         with conn.cursor() as cur:
             cur.execute(
-                f"SELECT id, url, title, platform, location, state, job_type "
+                f"SELECT id, url, title, platform, location, state, job_type, platform_posted_at "
                 f"FROM {JOBS_TABLE} "
                 f"WHERE platform IN ('LinkedIn', 'Bayt', 'Indeed') "
                 f"AND TRIM(url) <> '' "
                 f"AND url NOT LIKE %s "
-                f"AND (CHAR_LENGTH(description) < 400 OR description = title) "
+                f"AND ("
+                f"CHAR_LENGTH(description) < 400 OR description = title "
+                f"OR platform_posted_at IS NULL"
+                f") "
                 f"AND CAST(raw_description AS CHAR) NOT LIKE %s "
                 f"ORDER BY id DESC",
                 ("%example.com%", "%posting_missing%"),
@@ -909,11 +938,11 @@ def _fill_short_dice_descriptions() -> tuple[int, int]:
         platform = str(row.get("platform") or "")
         if not url or _is_placeholder_url(url):
             continue
-        text = ""
+        details = {"description": "", "platform_posted_at": ""}
         gone = False
         for attempt in range(4):
             try:
-                text = fetch_posting_paragraph(platform, url)
+                details = fetch_posting_details(platform, url)
                 break
             except urllib.error.HTTPError as exc:
                 if exc.code in {404, 410}:
@@ -927,15 +956,17 @@ def _fill_short_dice_descriptions() -> tuple[int, int]:
                 if exc.code == 429 and attempt < 3:
                     time.sleep(12)
                     continue
-                text = ""
+                details = {"description": "", "platform_posted_at": ""}
                 break
             except Exception:
                 log.exception("Description fetch failed for %s", url)
-                text = ""
+                details = {"description": "", "platform_posted_at": ""}
                 break
         if gone:
             continue
-        if not text or len(text) < 120:
+        text = str(details.get("description") or "")
+        platform_posted = str(details.get("platform_posted_at") or "")
+        if (not text or len(text) < 120) and not platform_posted:
             retryable += 1
             consecutive_failures += 1
             if consecutive_failures >= 8:
@@ -946,7 +977,7 @@ def _fill_short_dice_descriptions() -> tuple[int, int]:
         consecutive_failures = 0
         try:
             with conn.cursor() as cur:
-                _store_full_description(cur, row, text)
+                _store_full_description(cur, row, text, platform_posted)
             filled += 1
         except Exception:
             close_conn()
@@ -982,29 +1013,11 @@ def _company_key(name: str) -> str:
 
 
 def _posted_mysql(value) -> str | None:
-    if isinstance(value, datetime):
-        return value.strftime("%Y-%m-%d %H:%M:%S")
-    text = str(value or "").strip()
-    if not text or text.lower() in {"none", "nat", "nan"}:
-        return None
-    if text.isdigit():
-        try:
-            stamp = int(text)
-            if stamp > 10_000_000_000:
-                stamp //= 1000
-            return datetime.fromtimestamp(stamp, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-        except (OverflowError, OSError, ValueError):
-            return None
-    cleaned = text.replace("Z", "+00:00")
-    try:
-        parsed = datetime.fromisoformat(cleaned)
-    except ValueError:
-        if len(text) >= 10 and text[4] == "-" and text[7] == "-":
-            return text[:10] + " 00:00:00"
-        return None
-    if parsed.tzinfo is not None:
-        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
-    return parsed.strftime("%Y-%m-%d %H:%M:%S")
+    """Accept ISO dates, epoch stamps, or board labels like '19 hours ago'."""
+    from jobscraper.agent_reach import absolute_posted_at
+
+    stamp = absolute_posted_at(value)
+    return stamp or None
 
 
 def _listing_fields(job: dict, description: str) -> dict:
@@ -1072,6 +1085,10 @@ _API_JOB_KEYS = {
     "clearance_required",
     "saudi_national_required",
     "posted_at",
+    "platform_posted_at",
+    "platformPostedAt",
+    "saved_at",
+    "savedAt",
     "api_id",
     "job_id",
     "search_text",
@@ -1189,7 +1206,12 @@ def _row_from_item(job: dict) -> dict | None:
         "url": url,
         "description": description,
         "raw_description": _raw_description_json(job),
-        "posted_at": _posted_mysql(job.get("posted_at")),
+        "posted_at": _posted_mysql(
+            job.get("platform_posted_at") or job.get("platformPostedAt") or job.get("posted_at")
+        ),
+        "platform_posted_at": _posted_mysql(
+            job.get("platform_posted_at") or job.get("platformPostedAt") or job.get("posted_at")
+        ),
         **_listing_fields(job, description),
     }
 
@@ -1270,6 +1292,7 @@ def upsert_jobs(jobs: list[dict]) -> int:
                         row["description"],
                         row["raw_description"] or "",
                         row["posted_at"],
+                        row["platform_posted_at"],
                         row["job_type"] if row["job_type"] in {"fulltime", "parttime", "contract", "internship"} else "fulltime",
                         row["work_model"],
                         row["experience_level"],
@@ -1325,11 +1348,22 @@ def _parse_raw_description(value):
     return source_extras(value)
 
 
+def _fmt_mysql_dt(value) -> str | None:
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d %H:%M:%S")
+    text = str(value or "").strip()
+    return text or None
+
+
 def _job_payload(row: dict, *, include_raw: bool) -> dict:
-    posted = row.get("posted_at")
-    if isinstance(posted, datetime):
-        posted = posted.strftime("%Y-%m-%d %H:%M:%S")
-    days = _days_ago_from_iso(posted, int(row.get("days_ago") or 0))
+    platform_posted = _fmt_mysql_dt(row.get("platform_posted_at")) or _fmt_mysql_dt(row.get("posted_at"))
+    posted = platform_posted or _fmt_mysql_dt(row.get("posted_at"))
+    saved = (
+        _fmt_mysql_dt(row.get("first_seen_at"))
+        or _fmt_mysql_dt(row.get("created_at"))
+        or None
+    )
+    days = _days_ago_from_iso(platform_posted or posted, int(row.get("days_ago") or 0))
     payload = {
         "id": row.get("id"),
         "title": row.get("title"),
@@ -1349,6 +1383,10 @@ def _job_payload(row: dict, *, include_raw: bool) -> dict:
         "clearance_required": row.get("clearance_required") or "unknown",
         "saudi_national_required": "yes" if row.get("saudi_national_required") == "yes" else "no",
         "posted_at": posted,
+        "platform_posted_at": platform_posted,
+        "platformPostedAt": platform_posted,
+        "saved_at": saved,
+        "savedAt": saved,
     }
     if row.get("api_id") is not None:
         payload["job_id"] = int(row["api_id"])
@@ -1476,7 +1514,7 @@ def load_jobs() -> list[dict]:
                 f"days_ago, url, LEFT(description, 800) AS description, "
                 f"job_type, work_model, experience_level, "
                 f"years_experience, visa_sponsorship, clearance_required, saudi_national_required, "
-                f"posted_at "
+                f"posted_at, platform_posted_at, first_seen_at, created_at "
                 f"FROM {JOBS_TABLE} "
                 f"WHERE url NOT LIKE %s AND url NOT LIKE %s "
                 f"AND (source_id IS NULL OR source_id NOT LIKE %s) "
