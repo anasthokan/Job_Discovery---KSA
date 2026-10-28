@@ -976,6 +976,11 @@ def run_spider(keywords: str, location: str, platform: str, city: str = "", targ
     DATA_FILE.parent.mkdir(exist_ok=True)
     if DATA_FILE.exists():
         DATA_FILE.unlink()
+    # The keyword list is long (every database skill and certification).
+    # Passing it on the Windows command line gets cut, so the spider starts
+    # with no terms and exits in a couple of seconds with zero jobs.
+    keyword_file = DATA_FILE.parent / "scrape_keywords.txt"
+    keyword_file.write_text(keywords, encoding="utf-8")
     run_id = start_scrape_run(keywords, location, platform)
     cmd = [
         sys.executable,
@@ -984,7 +989,7 @@ def run_spider(keywords: str, location: str, platform: str, city: str = "", targ
         "crawl",
         "jobs",
         "-a",
-        f"keywords={keywords}",
+        f"keywords_file={keyword_file}",
         "-a",
         f"location={location}",
         "-a",
@@ -994,7 +999,7 @@ def run_spider(keywords: str, location: str, platform: str, city: str = "", targ
         "-a",
         f"target={max(0, int(target or 0))}",
         "-s",
-        "LOG_LEVEL=WARNING",
+        "LOG_LEVEL=INFO",
     ]
     # A 5,000-job run searches about 40 roles on 4 boards and can take one to two hours.
     timeout = 10800 if target >= 1000 else SCRAPE_TIMEOUT
@@ -1019,6 +1024,11 @@ def run_spider(keywords: str, location: str, platform: str, city: str = "", targ
         finish_scrape_run(run_id, job_count_value=0, error=detail[-2000:])
         raise HTTPException(status_code=502, detail=detail[-2000:])
     this_run = load_jobs_json()
+    if not this_run:
+        detail = "\n".join(part.strip() for part in (result.stderr, result.stdout) if part and part.strip())
+        detail = (detail or "Scrape ended with 0 jobs. The boards were not searched.").strip()
+        finish_scrape_run(run_id, job_count_value=0, error=detail[-2000:])
+        raise HTTPException(status_code=502, detail=detail[-2000:])
     try:
         saved = upsert_jobs(this_run)
     except Exception as exc:
@@ -1317,10 +1327,11 @@ def scrape_jobs(
         daemon=True,
     )
     thread.start()
-    message = "Scrape started. Poll GET /api/scrape/status until running is false, then check the ksajob.jobs table."
-    if target >= 1000:
+    response_target = _scrape_target() if not (keywords or "").strip() and target <= 0 else target
+    message = "Scrape started. Poll GET /api/scrape/status until running is false. running stays true while boards are still being searched."
+    if response_target >= 1000:
         message = (
-            f"Large scrape started for about {target} jobs across many fields. "
+            f"Large scrape started for about {response_target} jobs across database skills and certifications. "
             "It can take one to two hours. Poll GET /api/scrape/status until running is false."
         )
     return JSONResponse(
@@ -1329,7 +1340,7 @@ def scrape_jobs(
             "ok": True,
             "started": True,
             "running": True,
-            "target": target,
+            "target": response_target,
             "message": message,
         },
     )
@@ -1337,6 +1348,7 @@ def scrape_jobs(
 
 def _scrape_background(keywords: str, state: str, platform: str, city: str, target: int = 0) -> None:
     try:
+        from_database = not (keywords or "").strip()
         keywords = _keywords_for_scrape(keywords)
         if not keywords:
             _store_last_scrape(
@@ -1346,6 +1358,10 @@ def _scrape_background(keywords: str, state: str, platform: str, city: str, targ
                 db_total=mysql_job_count() if mysql_configured() else 0,
             )
             return
+        # Postman sends no target. A database scrape should keep running across
+        # the stored skills and certifications, not exit after an empty pass.
+        if from_database and target <= 0:
+            target = _scrape_target()
         run_spider(keywords, state, platform, city, target)
         count = _kept_scrape_count()
         db_total = mysql_job_count() if mysql_configured() else count

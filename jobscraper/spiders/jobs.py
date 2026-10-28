@@ -2,6 +2,7 @@ import asyncio
 import re
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+from pathlib import Path
 
 import scrapy
 
@@ -99,9 +100,17 @@ class JobsSpider(scrapy.Spider):
 
     name = "jobs"
 
-    def __init__(self, keywords="", location="All", city="", platform="All", target="0", *args, **kwargs):
+    def __init__(self, keywords="", keywords_file="", location="All", city="", platform="All", target="0", *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.keywords = [k.strip().lower() for k in keywords.split(",") if k.strip()]
+        raw = ""
+        if keywords_file:
+            try:
+                raw = Path(keywords_file).read_text(encoding="utf-8")
+            except OSError:
+                raw = ""
+        if not raw.strip():
+            raw = keywords or ""
+        self.keywords = [k.strip().lower() for k in raw.split(",") if k.strip()]
         self.location = location or "All"
         self.city = city or ""
         self.platform = platform or "All"
