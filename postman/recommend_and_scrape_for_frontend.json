@@ -1,0 +1,138 @@
+{
+  "title": "EzyJob KSA — Recommend and scrape (for frontend)",
+  "base_url": "https://agentsksa.atozeesolutions.com",
+  "note": "Same endpoints as before. No new path. Recommend ranks by skills, certifications, and experience. If SCRAPE_KEYWORDS in .env is empty, that setting is ignored. The scrape searches skills and certifications stored in MySQL, not a fixed role list. Experience is used only to rank, not to search boards.",
+  "scrape": {
+    "start": {
+      "method": "POST",
+      "path": "/api/scrape",
+      "example_request": "POST {{base_url}}/api/scrape?keywords=&state=All&platform=All",
+      "query": {
+        "keywords": {
+          "value": "",
+          "use": "Leave empty. The API then searches skills and certifications from the database. If you send python,sql, only those words are searched."
+        },
+        "state": "All",
+        "platform": "All"
+      },
+      "response_status": 202,
+      "sample_response": {
+        "ok": true,
+        "started": true,
+        "running": true,
+        "target": 0,
+        "message": "Scrape started. Poll GET /api/scrape/status until running is false, then check the ksajob.jobs table."
+      }
+    },
+    "status": {
+      "method": "GET",
+      "path": "/api/scrape/status",
+      "example_request": "GET {{base_url}}/api/scrape/status",
+      "use": "Call until running is false. Do not treat the previous error as the result of the scrape you just started.",
+      "sample_response": {
+        "ok": true,
+        "running": false,
+        "last_scrape": {
+          "ok": true,
+          "error": null,
+          "count": 120,
+          "db_total": 4500
+        }
+      }
+    }
+  },
+  "recommend": {
+    "by_user": {
+      "method": "GET",
+      "path": "/api/recommend/{candidate_id}",
+      "example_request": "GET {{base_url}}/api/recommend/1?limit=20&page=1",
+      "use": "Recommended Roles for the logged-in user. The API reads that user's skills, certifications, and work history from the database. Do not send the password."
+    },
+    "by_body": {
+      "method": "POST",
+      "path": "/api/recommend",
+      "content_type": "application/json",
+      "example_request": {
+        "skills": ["Python", "SQL"],
+        "certifications": ["PMP"],
+        "resume": {
+          "experience": [
+            {
+              "title": "Software Engineer",
+              "company": "Acme",
+              "start_date": "2021-01",
+              "end_date": "Present",
+              "is_current": true
+            }
+          ]
+        },
+        "limit": 20
+      },
+      "use": "Use when the screen has the skill list, certification list, and work history in hand. Job titles and years come from resume.experience."
+    },
+    "sample_response": {
+      "ok": true,
+      "candidate_id": "1",
+      "count": 1,
+      "total": 18,
+      "skills": ["Python", "SQL"],
+      "certifications": ["PMP"],
+      "experience_titles": ["Software Engineer"],
+      "years": 5,
+      "hint": null,
+      "jobs": [
+        {
+          "id": "linkedin-li-4484439240",
+          "job_id": 88385,
+          "title": "Senior Software Engineer",
+          "company": "Acme",
+          "skills": ["Python", "SQL"],
+          "location": "Riyadh, Saudi Arabia",
+          "platform": "LinkedIn",
+          "daysAgo": "2 days ago",
+          "experience_level": "Senior Level",
+          "years_experience": 4,
+          "url": "https://www.linkedin.com/jobs/view/4484439240",
+          "match": {
+            "score": 81,
+            "matched_skills": ["Python", "SQL"],
+            "missing_skills": [],
+            "matched_certifications": ["PMP"],
+            "missing_certifications": [],
+            "matched_titles": ["Software Engineer"],
+            "experience_fit": "match"
+          }
+        }
+      ],
+      "pagination": {
+        "page": 1,
+        "page_size": 20,
+        "total": 18,
+        "total_pages": 1,
+        "has_next": false,
+        "has_previous": false
+      }
+    }
+  },
+  "new_response_fields": {
+    "skills": "Skills used to rank this response.",
+    "certifications": "Certifications used to rank this response.",
+    "experience_titles": "Past job titles used to rank this response.",
+    "years": "Candidate years used to rank. Null when dates are missing.",
+    "hint": "Null when jobs were found. A string when nothing matched.",
+    "jobs[].match.score": "0 to 100. Sort is already done. Highest score is first.",
+    "jobs[].match.matched_skills": "Skills found on this job.",
+    "jobs[].match.missing_skills": "Candidate skills not found on this job.",
+    "jobs[].match.matched_certifications": "Certifications found on this job.",
+    "jobs[].match.missing_certifications": "Candidate certifications not found on this job.",
+    "jobs[].match.matched_titles": "Past titles that overlap this job title.",
+    "jobs[].match.experience_fit": "match, stretch, unknown, or none. match means years and level are close."
+  },
+  "ui_mapping": {
+    "recommended_list": "jobs, already sorted by match.score",
+    "match_badge": "job.match.score",
+    "why_this_job": "job.match.matched_skills, job.match.matched_certifications, job.match.matched_titles",
+    "experience_label": "job.match.experience_fit",
+    "empty_state": "hint"
+  }
+}

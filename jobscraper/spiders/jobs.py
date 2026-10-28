@@ -94,64 +94,6 @@ def days_ago(value) -> int:
     return max(0, (datetime.now(timezone.utc) - posted).days)
 
 
-DEFAULT_SEARCH_QUERIES = (
-    "software engineer",
-    "data analyst",
-    "accountant",
-    "nurse",
-    "sales",
-    "human resources",
-    "project manager",
-    "customer service",
-    "mechanical engineer",
-    "teacher",
-)
-
-# Used when a scrape asks for 1,000 or more jobs. One short run only covers a few of these.
-BROAD_SEARCH_QUERIES = (
-    "software engineer",
-    "data analyst",
-    "accountant",
-    "nurse",
-    "sales executive",
-    "human resources",
-    "project manager",
-    "customer service",
-    "mechanical engineer",
-    "teacher",
-    "civil engineer",
-    "electrical engineer",
-    "marketing",
-    "driver",
-    "chef",
-    "pharmacist",
-    "doctor",
-    "receptionist",
-    "security officer",
-    "warehouse",
-    "procurement",
-    "finance",
-    "graphic designer",
-    "java developer",
-    "python developer",
-    "network engineer",
-    "quality engineer",
-    "safety officer",
-    "logistics",
-    "administrator",
-    "technician",
-    "architect",
-    "lawyer",
-    "recruiter",
-    "business analyst",
-    "devops engineer",
-    "SAP consultant",
-    "cashier",
-    "storekeeper",
-    "sales manager",
-)
-
-
 class JobsSpider(scrapy.Spider):
     """Saudi Arabia listings from Indeed, LinkedIn, Google Jobs, and Bayt."""
 
@@ -169,9 +111,7 @@ class JobsSpider(scrapy.Spider):
             self.target = 0
 
     def _search_queries(self) -> list[str]:
-        if self.keywords:
-            return list(self.keywords)
-        return list(DEFAULT_SEARCH_QUERIES)
+        return list(self.keywords)
 
     def _search_location(self) -> str:
         hint = muse_location(self.city, self.location)
@@ -237,24 +177,21 @@ class JobsSpider(scrapy.Spider):
         if not sites:
             self.logger.warning("No KSA board for platform %s", self.platform)
             return
+        if not self.keywords:
+            self.logger.warning(
+                "No search terms. An empty keyword list is ignored, and the database has no skills or certifications."
+            )
+            return
         queries = self._search_queries()
         where = self._search_location()
         remote = self.location == "Remote"
-        if self.target >= 1000 and not self.keywords:
-            queries = list(BROAD_SEARCH_QUERIES)
         if self.target >= 1000:
-            # Every role in the list, and the most listings JobSpy will return per board.
             max_terms = len(queries)
             results_wanted = 100
             hours_old = 24 * 180
         else:
             single_board = self.platform != "All"
-            # A recommend refresh sends skills and certifications together.
-            # Searching only the first three dropped the rest of the profile.
-            if self.keywords:
-                max_terms = min(len(queries), 12)
-            else:
-                max_terms = 4 if single_board else 3
+            max_terms = len(queries)
             results_wanted = 40 if single_board else 20
             hours_old = 720
         self.logger.info(

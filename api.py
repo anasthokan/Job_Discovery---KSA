@@ -152,15 +152,19 @@ def _store_last_scrape(*, ok: bool, error: str | None, count: int, db_total: int
 
 
 def _keywords_for_scrape(keywords: str) -> str:
-    """Use the caller's keywords, otherwise skills and certifications stored in MySQL."""
+    """Ignore an empty SCRAPE_KEYWORDS value and search the database instead.
+
+    Experience is not a search term. Only skills and certifications already
+    stored in MySQL are used. The old fixed role list is not a fallback.
+    """
     text = (keywords or "").strip()
     if text:
         return text
-    terms = catalog_search_terms(limit=40)
+    terms = catalog_search_terms(limit=80)
     if terms:
-        log.info("Scrape using %s skills and certifications from the database", len(terms))
+        log.info("SCRAPE_KEYWORDS is empty. Searching %s skills and certifications from the database", len(terms))
         return ",".join(terms)
-    log.info("No skills or certifications stored; scrape will use the default role list")
+    log.warning("SCRAPE_KEYWORDS is empty and the database has no skills or certifications. Scrape skipped.")
     return ""
 
 
@@ -174,7 +178,15 @@ def scheduled_scrape() -> None:
         platform = _env("SCRAPE_PLATFORM", "All") or "All"
         city = _env("SCRAPE_CITY", "")
         target = _scrape_target()
-        log.info("Scheduled scrape starting keywords=%s target=%s", keywords or "(default roles)", target)
+        if not keywords:
+            _store_last_scrape(
+                ok=False,
+                error="SCRAPE_KEYWORDS is empty and the database has no skills or certifications.",
+                count=0,
+                db_total=mysql_job_count() if mysql_configured() else 0,
+            )
+            return
+        log.info("Scheduled scrape starting keywords=%s target=%s", keywords, target)
         run_spider(keywords, state, platform, city, target)
         count = _kept_scrape_count()
         db_total = mysql_job_count() if mysql_configured() else count
@@ -1325,7 +1337,16 @@ def scrape_jobs(
 
 def _scrape_background(keywords: str, state: str, platform: str, city: str, target: int = 0) -> None:
     try:
-        run_spider(_keywords_for_scrape(keywords), state, platform, city, target)
+        keywords = _keywords_for_scrape(keywords)
+        if not keywords:
+            _store_last_scrape(
+                ok=False,
+                error="SCRAPE_KEYWORDS is empty and the database has no skills or certifications.",
+                count=0,
+                db_total=mysql_job_count() if mysql_configured() else 0,
+            )
+            return
+        run_spider(keywords, state, platform, city, target)
         count = _kept_scrape_count()
         db_total = mysql_job_count() if mysql_configured() else count
         _store_last_scrape(ok=True, error=None, count=count, db_total=db_total)
