@@ -151,25 +151,30 @@ def _store_last_scrape(*, ok: bool, error: str | None, count: int, db_total: int
     _LAST_SCRAPE = {"ok": ok, "error": error, "count": count, "db_total": db_total}
 
 
+def _keywords_for_scrape(keywords: str) -> str:
+    """Use the caller's keywords, otherwise skills and certifications stored in MySQL."""
+    text = (keywords or "").strip()
+    if text:
+        return text
+    terms = catalog_search_terms(limit=40)
+    if terms:
+        log.info("Scrape using %s skills and certifications from the database", len(terms))
+        return ",".join(terms)
+    log.info("No skills or certifications stored; scrape will use the default role list")
+    return ""
+
+
 def scheduled_scrape() -> None:
     if not SCRAPE_LOCK.acquire(blocking=False):
         log.warning("Scheduled scrape skipped: another scrape is running")
         return
     try:
-        keywords = _env("SCRAPE_KEYWORDS", "")
+        keywords = _keywords_for_scrape(_env("SCRAPE_KEYWORDS", ""))
         state = _env("SCRAPE_STATE", "All") or "All"
         platform = _env("SCRAPE_PLATFORM", "All") or "All"
         city = _env("SCRAPE_CITY", "")
         target = _scrape_target()
-        if not keywords:
-            terms = catalog_search_terms(limit=40)
-            if terms:
-                keywords = ",".join(terms)
-        log.info(
-            "Scheduled scrape starting keywords=%s target=%s",
-            keywords or "(default roles, no skills or certifications stored)",
-            target,
-        )
+        log.info("Scheduled scrape starting keywords=%s target=%s", keywords or "(default roles)", target)
         run_spider(keywords, state, platform, city, target)
         count = _kept_scrape_count()
         db_total = mysql_job_count() if mysql_configured() else count
@@ -1309,7 +1314,7 @@ def scrape_jobs(
 
 def _scrape_background(keywords: str, state: str, platform: str, city: str, target: int = 0) -> None:
     try:
-        run_spider(keywords, state, platform, city, target)
+        run_spider(_keywords_for_scrape(keywords), state, platform, city, target)
         count = _kept_scrape_count()
         db_total = mysql_job_count() if mysql_configured() else count
         _store_last_scrape(ok=True, error=None, count=count, db_total=db_total)

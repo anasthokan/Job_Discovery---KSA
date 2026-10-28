@@ -320,7 +320,7 @@ ON DUPLICATE KEY UPDATE
   platform = new.platform,
   days_ago = new.days_ago,
   url = IF(
-    new.url LIKE '%example.com%' OR TRIM(new.url) = '',
+    new.url LIKE '%%example.com%%' OR TRIM(new.url) = '',
     {JOBS_TABLE}.url,
     new.url
   ),
@@ -2234,14 +2234,15 @@ def _catalog_columns(cur, skills: list[str], certs: list[str]) -> None:
         WHERE TABLE_SCHEMA = DATABASE()
           AND DATA_TYPE IN ('varchar', 'char', 'text', 'mediumtext', 'longtext', 'json')
           AND (
-            TABLE_NAME LIKE '%skill%' OR COLUMN_NAME LIKE '%skill%'
-            OR TABLE_NAME LIKE '%certif%' OR COLUMN_NAME LIKE '%certif%'
+            TABLE_NAME LIKE %s OR COLUMN_NAME LIKE %s
+            OR TABLE_NAME LIKE %s OR COLUMN_NAME LIKE %s
           )
           AND COLUMN_NAME NOT IN (
             'id', 'user_id', 'profile_id', 'skill_id', 'certification_id',
             'created_at', 'updated_at', 'password', 'email', 'url'
           )
-        """
+        """,
+        ("%skill%", "%skill%", "%certif%", "%certif%"),
     )
     for row in cur.fetchall() or []:
         table = str(row.get("table_name") or "")
