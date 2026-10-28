@@ -989,6 +989,18 @@ def _fill_short_dice_descriptions() -> tuple[int, int]:
     return filled, retryable
 
 
+def _posting_skills(job: dict, title: str, description: str) -> list[str]:
+    """Keep board skills and add skills named in the posting itself."""
+    from jobscraper.recommend import normalize_skills
+    from jobscraper.resume_parser import SKILL_CANONICAL, SKILL_PATTERN
+
+    found = list(job.get("skills") or [])
+    blob = f"{title}\n{description[:4000]}"
+    for match in SKILL_PATTERN.findall(blob):
+        found.append(SKILL_CANONICAL[match.lower()])
+    return normalize_skills(found)[:30]
+
+
 def _as_skills_json(value) -> str:
     if not value:
         items = []
@@ -1179,7 +1191,6 @@ def _row_from_item(job: dict) -> dict | None:
     company = _clip(job.get("company"), 255)
     if not source_id or not title or not company:
         return None
-    skills = _as_skills_json(job.get("skills"))
     url = _clip(job.get("url"), 1000)
     if _is_placeholder_url(url) or _is_placeholder_source(source_id):
         return None
@@ -1188,6 +1199,7 @@ def _row_from_item(job: dict) -> dict | None:
     # makes About the Role look filled when the posting was never loaded.
     if description and title and description.casefold() == title.casefold():
         description = ""
+    skills = _as_skills_json(_posting_skills(job, title, description))
     try:
         days_ago = int(job.get("daysAgo") or 0)
     except (TypeError, ValueError):
@@ -1609,9 +1621,14 @@ def load_app_user(candidate_id: str) -> dict | None:
                 return None
             user_id = int(user["id"])
             profile_row = _profile_row(cur, user_id)
-            skills = _user_skill_values(cur, user_id, profile_row.get("profile_id"))
-            skills.extend(_linked_names(cur, user_id, profile_row.get("profile_id")))
-            extra_text = _user_text(cur, user_id, profile_row.get("profile_id"))
+            profile_id = profile_row.get("profile_id")
+            skills = _user_skill_values(cur, user_id, profile_id)
+            skills.extend(_linked_names(cur, user_id, profile_id))
+            certifications = _user_labeled_values(cur, user_id, profile_id, "certif")
+            certifications.extend(_user_labeled_values(cur, user_id, profile_id, "license"))
+            certifications.extend(_linked_names(cur, user_id, profile_id, tokens=("certif", "license")))
+            work_history = _user_experience(cur, user_id, profile_id)
+            extra_text = _user_text(cur, user_id, profile_id)
             extra_text = "\n".join(
                 part for part in (extra_text, _resume_text_from_stored_files(cur, user_id, profile_row.get("profile_id"))) if part
             )
@@ -1636,6 +1653,8 @@ def load_app_user(candidate_id: str) -> dict | None:
         "city": profile_row.get("city") or "",
         "linkedin_url": profile_row.get("linkedin_url") or "",
         "skills": skills,
+        "certifications": certifications,
+        "work_history": work_history,
         "resume_text": summary,
     }
 
@@ -1654,6 +1673,11 @@ def _profile_row(cur, user_id: int) -> dict:
 
 
 def _user_skill_values(cur, user_id: int, profile_id) -> list[str]:
+    return _user_labeled_values(cur, user_id, profile_id, "skill")
+
+
+def _user_labeled_values(cur, user_id: int, profile_id, token: str) -> list[str]:
+    like = f"%{token}%"
     cur.execute(
         """
         SELECT c.TABLE_NAME AS table_name,
@@ -1669,7 +1693,7 @@ def _user_skill_values(cur, user_id: int, profile_id) -> list[str]:
           AND c.DATA_TYPE IN ('varchar', 'char', 'text', 'mediumtext', 'longtext', 'json')
           AND c.COLUMN_NAME NOT IN ('user_id', 'profile_id', 'id')
         """,
-        ("%skill%", "%skill%"),
+        (like, like),
     )
     found: list[str] = []
     for row in cur.fetchall() or []:
@@ -1695,10 +1719,16 @@ def _user_skill_values(cur, user_id: int, profile_id) -> list[str]:
             value = skill_row.get("skill")
             if isinstance(value, (bytes, bytearray)):
                 value = value.decode("utf-8", "ignore")
+            if isinstance(value, list):
+                found.extend(str(item) for item in value if item)
+                continue
             if isinstance(value, str) and value.strip().startswith("["):
-                parsed = _profile_from_cell(value)
+                try:
+                    parsed = json.loads(value)
+                except json.JSONDecodeError:
+                    parsed = None
                 if isinstance(parsed, list):
-                    found.extend(str(item) for item in parsed)
+                    found.extend(str(item) for item in parsed if item)
                     continue
             if value:
                 found.append(str(value))
@@ -1748,8 +1778,8 @@ def _rows_for_owner(cur, table: str, column: str, owner: str, key) -> list[dict]
         return []
 
 
-def _linked_names(cur, user_id: int, profile_id) -> list[str]:
-    """Resolve skill_id / target_role_id links to their display names."""
+def _linked_names(cur, user_id: int, profile_id, tokens: tuple[str, ...] = ("skill", "role")) -> list[str]:
+    """Resolve skill_id / certification_id / target_role_id links to display names."""
     catalogs = []
     try:
         cur.execute(
@@ -1763,17 +1793,32 @@ def _linked_names(cur, user_id: int, profile_id) -> list[str]:
             ("%skill%",),
         )
         catalogs.extend(cur.fetchall() or [])
-        cur.execute(
-            """
-            SELECT TABLE_NAME AS table_name, COLUMN_NAME AS name_column
-            FROM information_schema.COLUMNS
-            WHERE TABLE_SCHEMA = DATABASE()
-              AND TABLE_NAME LIKE %s
-              AND COLUMN_NAME IN ('name', 'title', 'label')
-            """,
-            ("%target_role%",),
-        )
-        catalogs.extend(cur.fetchall() or [])
+        for token in tokens:
+            if token == "skill":
+                continue
+            cur.execute(
+                """
+                SELECT TABLE_NAME AS table_name, COLUMN_NAME AS name_column
+                FROM information_schema.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE()
+                  AND TABLE_NAME LIKE %s
+                  AND COLUMN_NAME IN ('name', 'title', 'label', 'skill_name')
+                """,
+                (f"%{token}%",),
+            )
+            catalogs.extend(cur.fetchall() or [])
+        if "role" in tokens:
+            cur.execute(
+                """
+                SELECT TABLE_NAME AS table_name, COLUMN_NAME AS name_column
+                FROM information_schema.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE()
+                  AND TABLE_NAME LIKE %s
+                  AND COLUMN_NAME IN ('name', 'title', 'label')
+                """,
+                ("%target_role%",),
+            )
+            catalogs.extend(cur.fetchall() or [])
     except Exception:
         log.exception("catalog lookup failed")
         return []
@@ -1789,13 +1834,16 @@ def _linked_names(cur, user_id: int, profile_id) -> list[str]:
         if key is None or owner == "candidate_id":
             key = user_id if owner == "candidate_id" else key
         fk = str(link.get("value_column") or "")
-        if not any(token in fk for token in ("skill", "role")):
+        fk_tokens = [token for token in tokens if token in fk]
+        if not fk_tokens:
             continue
         table = str(link.get("table_name") or "")
         for catalog in catalogs:
             cat_table = str(catalog.get("table_name") or "")
             cat_name = str(catalog.get("name_column") or "")
             if cat_table == table or not _IDENT_RE.fullmatch(cat_table) or not _IDENT_RE.fullmatch(cat_name):
+                continue
+            if not any(token in cat_table.lower() for token in fk_tokens):
                 continue
             if not _IDENT_RE.fullmatch(table) or not _IDENT_RE.fullmatch(fk) or owner not in {"user_id", "profile_id", "candidate_id"}:
                 continue
@@ -1814,6 +1862,106 @@ def _linked_names(cur, user_id: int, profile_id) -> list[str]:
                         found.append(str(row["skill"]))
             except Exception:
                 continue
+    return found
+
+
+_EXPERIENCE_TABLE = re.compile(r"experience|employment|work_histor|position|career", re.I)
+_TITLE_COLUMNS = ("job_title", "role_title", "position", "title", "role")
+_COMPANY_COLUMNS = ("company", "employer", "organization")
+_START_COLUMNS = ("start_date", "started_at", "from_date", "start")
+_END_COLUMNS = ("end_date", "ended_at", "to_date", "end")
+
+
+def _first_named_column(columns: set[str], options: tuple[str, ...]) -> str | None:
+    for name in options:
+        if name in columns:
+            return name
+    return None
+
+
+def _user_experience(cur, user_id: int, profile_id) -> list[dict]:
+    """Job titles and dates from the user's experience rows, when that table exists."""
+    try:
+        cur.execute(
+            """
+            SELECT DISTINCT c.TABLE_NAME AS table_name, u.COLUMN_NAME AS owner_column
+            FROM information_schema.COLUMNS c
+            JOIN information_schema.COLUMNS u
+              ON u.TABLE_SCHEMA = c.TABLE_SCHEMA
+             AND u.TABLE_NAME = c.TABLE_NAME
+             AND u.COLUMN_NAME IN ('user_id', 'profile_id')
+            WHERE c.TABLE_SCHEMA = DATABASE()
+              AND c.COLUMN_NAME IN ('job_title', 'title', 'position', 'role', 'role_title')
+            """
+        )
+        links = list(cur.fetchall() or [])
+    except Exception:
+        log.exception("experience lookup failed")
+        return []
+    found: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for link in links:
+        table = str(link.get("table_name") or "")
+        owner = str(link.get("owner_column") or "")
+        if not _EXPERIENCE_TABLE.search(table) or (table, owner) in seen:
+            continue
+        seen.add((table, owner))
+        key = {"user_id": user_id, "profile_id": profile_id}.get(owner)
+        if key is None or not _IDENT_RE.fullmatch(table) or not _IDENT_RE.fullmatch(owner):
+            continue
+        try:
+            cur.execute(
+                """
+                SELECT COLUMN_NAME AS column_name
+                FROM information_schema.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s
+                """,
+                (table,),
+            )
+            columns = {str(row.get("column_name") or "") for row in cur.fetchall() or []}
+        except Exception:
+            continue
+        title_col = _first_named_column(columns, _TITLE_COLUMNS)
+        if not title_col:
+            continue
+        company_col = _first_named_column(columns, _COMPANY_COLUMNS)
+        start_col = _first_named_column(columns, _START_COLUMNS)
+        end_col = _first_named_column(columns, _END_COLUMNS)
+        desc_col = "description" if "description" in columns else None
+        selected = [f"{_quote_ident(title_col)} AS job_title"]
+        if company_col:
+            selected.append(f"{_quote_ident(company_col)} AS company")
+        if start_col:
+            selected.append(f"{_quote_ident(start_col)} AS start_date")
+        if end_col:
+            selected.append(f"{_quote_ident(end_col)} AS end_date")
+        if desc_col:
+            selected.append(f"LEFT({_quote_ident(desc_col)}, 2000) AS description")
+        try:
+            cur.execute(
+                f"SELECT {', '.join(selected)} FROM {_quote_ident(table)} "
+                f"WHERE {_quote_ident(owner)} = %s LIMIT 20",
+                (key,),
+            )
+            rows = cur.fetchall() or []
+        except Exception:
+            log.exception("experience read failed on %s", table)
+            continue
+        for row in rows:
+            title = str(row.get("job_title") or "").strip()
+            if not title:
+                continue
+            found.append(
+                {
+                    "company": str(row.get("company") or "").strip(),
+                    "job_title": title[:400],
+                    "start_date": str(row.get("start_date") or "")[:40],
+                    "end_date": str(row.get("end_date") or "")[:40],
+                    "description": str(row.get("description") or "").strip(),
+                }
+            )
+            if len(found) >= 20:
+                return found
     return found
 
 
@@ -1971,6 +2119,226 @@ def load_candidate(candidate_id: str) -> dict | None:
     if not row:
         return None
     return _profile_from_cell(row.get("profile"))
+
+
+_TERM_SKIP = {
+    "skill",
+    "skills",
+    "certification",
+    "certifications",
+    "certificate",
+    "certificates",
+    "license",
+    "licenses",
+    "n/a",
+    "na",
+    "none",
+    "null",
+    "other",
+    "others",
+    "true",
+    "false",
+    "unknown",
+    "yes",
+    "no",
+}
+_CATALOG_SKIP_TABLES = {
+    "jobs",
+    "companies",
+    "job_discovery_candidates",
+    "job_discovery_scrape_runs",
+    "job_discovery_everify_employers",
+    "job_discovery_h1b_sponsors",
+}
+
+
+def _clean_search_term(value) -> str | None:
+    text = str(value or "").strip(" \t\r\n,;|/")
+    if not text or len(text) < 2 or len(text) > 80 or len(text.split()) > 6:
+        return None
+    if text.lower() in _TERM_SKIP:
+        return None
+    return text
+
+
+def _collect_term_values(raw, bucket: list[str]) -> None:
+    if isinstance(raw, (bytes, bytearray)):
+        raw = raw.decode("utf-8", "ignore")
+    if isinstance(raw, str) and raw.strip().startswith(("{", "[")):
+        parsed = _profile_from_cell(raw) if raw.strip().startswith("{") else None
+        if parsed is None and raw.strip().startswith("["):
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                parsed = None
+        if parsed is not None:
+            _collect_term_values(parsed, bucket)
+            return
+    if isinstance(raw, list):
+        for item in raw:
+            _collect_term_values(item, bucket)
+        return
+    if isinstance(raw, dict):
+        for key in ("name", "title", "label", "skill", "skill_name", "certification"):
+            if raw.get(key):
+                _collect_term_values(raw.get(key), bucket)
+        return
+    term = _clean_search_term(raw)
+    if term:
+        bucket.append(term)
+
+
+def _unique_terms(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        key = value.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(value)
+    return out
+
+
+def _balance_terms(certs: list[str], skills: list[str], limit: int) -> list[str]:
+    certs = _unique_terms(certs)
+    used = {item.lower() for item in certs}
+    skills = [item for item in _unique_terms(skills) if item.lower() not in used]
+    chosen: list[str] = []
+    seen: set[str] = set()
+    cert_index = 0
+    skill_index = 0
+
+    def add(term: str) -> None:
+        key = term.lower()
+        if key in seen or len(chosen) >= limit:
+            return
+        seen.add(key)
+        chosen.append(term)
+
+    while len(chosen) < limit and (cert_index < len(certs) or skill_index < len(skills)):
+        if cert_index < len(certs):
+            add(certs[cert_index])
+            cert_index += 1
+        if skill_index < len(skills):
+            add(skills[skill_index])
+            skill_index += 1
+    return chosen
+
+
+def _catalog_columns(cur, skills: list[str], certs: list[str]) -> None:
+    cur.execute(
+        """
+        SELECT TABLE_NAME AS table_name, COLUMN_NAME AS column_name
+        FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND DATA_TYPE IN ('varchar', 'char', 'text', 'mediumtext', 'longtext', 'json')
+          AND (
+            TABLE_NAME LIKE '%skill%' OR COLUMN_NAME LIKE '%skill%'
+            OR TABLE_NAME LIKE '%certif%' OR COLUMN_NAME LIKE '%certif%'
+          )
+          AND COLUMN_NAME NOT IN (
+            'id', 'user_id', 'profile_id', 'skill_id', 'certification_id',
+            'created_at', 'updated_at', 'password', 'email', 'url'
+          )
+        """
+    )
+    for row in cur.fetchall() or []:
+        table = str(row.get("table_name") or "")
+        column = str(row.get("column_name") or "")
+        if table in _CATALOG_SKIP_TABLES or not _IDENT_RE.fullmatch(table) or not _IDENT_RE.fullmatch(column):
+            continue
+        bucket = certs if "certif" in table.lower() or "certif" in column.lower() else skills
+        try:
+            cur.execute(
+                f"SELECT DISTINCT {_quote_ident(column)} AS term FROM {_quote_ident(table)} "
+                f"WHERE {_quote_ident(column)} IS NOT NULL LIMIT 80"
+            )
+            for item in cur.fetchall() or []:
+                _collect_term_values(item.get("term"), bucket)
+        except Exception:
+            log.exception("catalog read failed on %s.%s", table, column)
+
+
+def _catalog_job_skills(cur, skills: list[str]) -> None:
+    try:
+        cur.execute(
+            f"SELECT skills FROM {JOBS_TABLE} "
+            "WHERE skills IS NOT NULL AND JSON_LENGTH(skills) > 0 LIMIT 2000"
+        )
+        rows = cur.fetchall() or []
+    except Exception:
+        log.exception("job skill catalog read failed")
+        return
+    for row in rows:
+        _collect_term_values(row.get("skills"), skills)
+
+
+def _catalog_candidate_profiles(cur, skills: list[str], certs: list[str]) -> None:
+    try:
+        cur.execute(f"SELECT profile FROM {CANDIDATES_TABLE} LIMIT 500")
+        rows = cur.fetchall() or []
+    except Exception:
+        log.exception("candidate catalog read failed")
+        return
+    for row in rows:
+        profile = _profile_from_cell(row.get("profile")) or {}
+        _collect_term_values(profile.get("skills"), skills)
+        _collect_term_values(profile.get("certifications"), certs)
+
+
+def _catalog_posting_terms(cur, skills: list[str], certs: list[str]) -> None:
+    """Read skills and certifications written inside stored postings."""
+    from jobscraper.candidates import certifications_from_profile
+    from jobscraper.resume_parser import SKILL_CANONICAL, SKILL_PATTERN
+
+    try:
+        cur.execute(
+            f"SELECT title, LEFT(description, 1500) AS description FROM {JOBS_TABLE} "
+            "WHERE CHAR_LENGTH(description) > 40 LIMIT 1500"
+        )
+        rows = cur.fetchall() or []
+    except Exception:
+        log.exception("posting catalog read failed")
+        return
+    for row in rows:
+        blob = f"{row.get('title') or ''}\n{row.get('description') or ''}"
+        for match in SKILL_PATTERN.findall(blob):
+            skills.append(SKILL_CANONICAL[match.lower()])
+        certs.extend(certifications_from_profile({"resume_text": blob}))
+
+
+def catalog_search_terms(limit: int = 40) -> list[str]:
+    """Skills and certifications already stored in this database.
+
+    The scheduled scrape searches these instead of a fixed skill list.
+    Experience is not a search term; recommend uses it only to rank.
+    """
+    if not mysql_configured():
+        return []
+    try:
+        cap = max(1, min(int(limit or 40), 80))
+    except (TypeError, ValueError):
+        cap = 40
+    skills: list[str] = []
+    certs: list[str] = []
+    try:
+        conn = get_conn()
+        if conn is None:
+            return []
+        with conn.cursor() as cur:
+            _catalog_columns(cur, skills, certs)
+            _catalog_job_skills(cur, skills)
+            _catalog_candidate_profiles(cur, skills, certs)
+            if len(_unique_terms(skills)) + len(_unique_terms(certs)) < 8:
+                _catalog_posting_terms(cur, skills, certs)
+    except Exception:
+        log.exception("catalog search terms failed")
+        close_conn()
+        return []
+    terms = _balance_terms(certs, skills, cap)
+    log.info("Database search terms skills=%s certifications=%s using=%s", len(set(skills)), len(set(certs)), len(terms))
+    return terms
 
 
 def start_scrape_run(keywords: str, state: str, platform: str) -> int | None:

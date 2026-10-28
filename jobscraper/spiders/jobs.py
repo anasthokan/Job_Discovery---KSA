@@ -249,7 +249,12 @@ class JobsSpider(scrapy.Spider):
             hours_old = 24 * 180
         else:
             single_board = self.platform != "All"
-            max_terms = 4 if single_board else 3
+            # A recommend refresh sends skills and certifications together.
+            # Searching only the first three dropped the rest of the profile.
+            if self.keywords:
+                max_terms = min(len(queries), 12)
+            else:
+                max_terms = 4 if single_board else 3
             results_wanted = 40 if single_board else 20
             hours_old = 720
         self.logger.info(

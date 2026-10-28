@@ -20,6 +20,36 @@ _YEAR_RE = re.compile(r"(?:19|20)\d{2}")
 _PRESENT_RE = re.compile(r"present|current", re.I)
 _YES = {"yes", "y", "true", "1"}
 _NO = {"no", "n", "false", "0"}
+# Names pulled out of resume text when the profile has no certifications list.
+_CERT_PATTERNS = (
+    (re.compile(r"\bPMP\b"), "PMP"),
+    (re.compile(r"\bCAPM\b"), "CAPM"),
+    (re.compile(r"\bPMI[\s-]?ACP\b", re.I), "PMI-ACP"),
+    (re.compile(r"\bCISSP\b"), "CISSP"),
+    (re.compile(r"\bCISM\b"), "CISM"),
+    (re.compile(r"\bCISA\b"), "CISA"),
+    (re.compile(r"\bCEH\b"), "CEH"),
+    (re.compile(r"\bOSCP\b"), "OSCP"),
+    (re.compile(r"\bCCNA\b"), "CCNA"),
+    (re.compile(r"\bCCNP\b"), "CCNP"),
+    (re.compile(r"\bAWS Certified [A-Za-z][A-Za-z0-9 .+/-]{2,40}", re.I), None),
+    (re.compile(r"\bAzure (?:Fundamentals|Administrator|Solutions Architect|Developer)\b", re.I), None),
+    (re.compile(r"\bAZ-900\b", re.I), "AZ-900"),
+    (re.compile(r"\bCKA\b"), "CKA"),
+    (re.compile(r"\bCKAD\b"), "CKAD"),
+    (re.compile(r"\bCompTIA (?:Security\+|Network\+|A\+)\b", re.I), None),
+    (re.compile(r"\b(?:Security|Network)\+\b"), None),
+    (re.compile(r"\bITIL\b"), "ITIL"),
+    (re.compile(r"\b(?:CSM|PSM)\b"), None),
+    (re.compile(r"\bScrum Master\b", re.I), "Scrum Master"),
+    (re.compile(r"\bSAFe\b"), "SAFe"),
+    (re.compile(r"\bSix Sigma\b", re.I), "Six Sigma"),
+    (re.compile(r"\b(?:CFA|CPA|CMA|ACCA|SOCPA)\b"), None),
+    (re.compile(r"\bNEBOSH\b", re.I), "NEBOSH"),
+    (re.compile(r"\bOSHA\b"), "OSHA"),
+    (re.compile(r"\b(?:SHRM(?:-CP|-SCP)?|PHR|CIPD)\b"), None),
+    (re.compile(r"\bSalesforce (?:Administrator|Developer|Consultant)\b", re.I), None),
+)
 
 
 class CandidateError(ValueError):
@@ -97,6 +127,7 @@ def normalize_profile(raw: dict | None) -> dict:
         ),
         "custom_answers": _items(source.get("custom_answers"), ("question", "answer"), 30),
         "skills": normalize_skills(source.get("skills") or []),
+        "certifications": normalize_skills(source.get("certifications") or []),
         "resume_text": _clip(source.get("resume_text"), 200_000),
         "cover_letter_text": _clip(source.get("cover_letter_text"), 50_000),
         "authorized_to_work": yn(source.get("authorized_to_work")),
@@ -129,6 +160,41 @@ def skills_from_profile(profile: dict) -> list[str]:
         for match in SKILL_PATTERN.findall(blob):
             found.append(SKILL_CANONICAL[match.lower()])
     return normalize_skills(found)
+
+
+def _cert_hits(text: str) -> list[str]:
+    found: list[str] = []
+    for pattern, label in _CERT_PATTERNS:
+        for match in pattern.findall(text or ""):
+            found.append(label or re.sub(r"\s+", " ", match).strip(" .,-"))
+    return found
+
+
+def certifications_from_profile(profile: dict) -> list[str]:
+    chunks = [
+        profile.get("resume_text") or "",
+        profile.get("cover_letter_text") or "",
+    ]
+    for job in profile.get("work_history") or []:
+        chunks.append(job.get("description") or "")
+    for answer in profile.get("custom_answers") or []:
+        chunks.append(answer.get("answer") or "")
+    found = list(profile.get("certifications") or [])
+    found.extend(_cert_hits("\n".join(chunks)))
+    return normalize_skills(found)
+
+
+def experience_titles_from_profile(profile: dict) -> list[str]:
+    titles: list[str] = []
+    seen: set[str] = set()
+    for job in profile.get("work_history") or []:
+        title = str(job.get("job_title") or job.get("title") or "").strip()
+        key = title.lower()
+        if len(title) < 2 or key in seen:
+            continue
+        seen.add(key)
+        titles.append(title)
+    return titles
 
 
 def _year(value: str) -> int | None:

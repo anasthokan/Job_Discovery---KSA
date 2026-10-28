@@ -27,6 +27,9 @@ from jobscraper.candidates import (
     load_candidate_file,
     normalize_profile,
     save_candidate_file,
+    career_years,
+    certifications_from_profile,
+    experience_titles_from_profile,
     skills_from_profile,
     applied_filters,
 )
@@ -71,6 +74,7 @@ from jobscraper.db import (
     init_db as init_mysql,
     job_count as mysql_job_count,
     last_scrape_meta,
+    catalog_search_terms,
     load_app_user,
     load_candidate as load_candidate_mysql,
     attach_descriptions,
@@ -157,7 +161,15 @@ def scheduled_scrape() -> None:
         platform = _env("SCRAPE_PLATFORM", "All") or "All"
         city = _env("SCRAPE_CITY", "")
         target = _scrape_target()
-        log.info("Scheduled scrape starting keywords=%s target=%s", keywords or "(all fields)", target)
+        if not keywords:
+            terms = catalog_search_terms(limit=40)
+            if terms:
+                keywords = ",".join(terms)
+        log.info(
+            "Scheduled scrape starting keywords=%s target=%s",
+            keywords or "(default roles, no skills or certifications stored)",
+            target,
+        )
         run_spider(keywords, state, platform, city, target)
         count = _kept_scrape_count()
         db_total = mysql_job_count() if mysql_configured() else count
@@ -450,6 +462,7 @@ class CandidateProfile(BaseModel):
     education: list[CandidateSchool] = Field(default_factory=list)
     custom_answers: list[CandidateAnswer] = Field(default_factory=list)
     skills: list[str] = Field(default_factory=list)
+    certifications: list[str] = Field(default_factory=list)
     resume_text: str = ""
     cover_letter_text: str = ""
     authorized_to_work: str = ""
@@ -468,6 +481,7 @@ class RecommendRequest(BaseModel):
         description="Candidate API id from registration. Loads the saved profile.",
     )
     skills: list[str] = Field(default_factory=list, description="Candidate skills, e.g. Python, FastAPI, AWS")
+    certifications: list[str] = Field(default_factory=list, description="Candidate certifications, e.g. PMP, AWS Certified")
     resume_text: str | None = Field(None, description="Optional raw resume text; skills are extracted from it")
     resume: ResumeInput | None = Field(None, description="Optional parsed resume JSON from /api/resume/parse")
     state: str = Field("All", description="US state filter, Remote, or All")
@@ -805,6 +819,52 @@ def _candidate_id_or_http(value: str) -> str:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
+def _years_from_resume_jobs(jobs: list[dict] | None) -> int | None:
+    history = []
+    for item in jobs or []:
+        if not isinstance(item, dict):
+            continue
+        end = str(item.get("end_date") or "")
+        if item.get("is_current") and not end:
+            end = "Present"
+        history.append({"start_date": item.get("start_date") or "", "end_date": end})
+    return career_years({"work_history": history})
+
+
+def _profile_match_inputs(
+    profile: dict | None,
+    skills: list[str],
+    certifications: list[str] | None = None,
+    experience_titles: list[str] | None = None,
+    years: int | None = None,
+) -> tuple[list[str], list[str], list[str], int | None]:
+    certs = list(certifications or [])
+    titles = list(experience_titles or [])
+    if profile is not None:
+        if not certs:
+            certs = certifications_from_profile(profile)
+        if not titles:
+            titles = experience_titles_from_profile(profile)
+        if years is None:
+            years = career_years(profile)
+    return skills, normalize_skills(certs), titles, years
+
+
+def _scrape_terms(skills: list[str], certifications: list[str]) -> list[str]:
+    terms: list[str] = []
+    seen: set[str] = set()
+    for term in [*certifications, *skills]:
+        text = str(term or "").strip()
+        key = text.lower()
+        if not text or key in seen:
+            continue
+        seen.add(key)
+        terms.append(text)
+        if len(terms) >= 12:
+            break
+    return terms
+
+
 def _recommend_payload(
     *,
     skills: list[str],
@@ -817,23 +877,38 @@ def _recommend_payload(
     page: int = 1,
     candidate_id: str | None = None,
     profile: dict | None = None,
+    certifications: list[str] | None = None,
+    experience_titles: list[str] | None = None,
+    years: int | None = None,
 ) -> dict:
+    skills, certifications, experience_titles, years = _profile_match_inputs(
+        profile, skills, certifications, experience_titles, years
+    )
     if refresh:
-        if not SCRAPE_LOCK.acquire(blocking=False):
-            raise HTTPException(status_code=409, detail="A scrape is already running. Try again in a moment.")
-        try:
-            run_spider(",".join(skills), state, platform, city)
-        except subprocess.TimeoutExpired as exc:
-            raise HTTPException(status_code=504, detail="Job scrape timed out.") from exc
-        finally:
-            SCRAPE_LOCK.release()
+        terms = _scrape_terms(skills, certifications)
+        if terms:
+            if not SCRAPE_LOCK.acquire(blocking=False):
+                raise HTTPException(status_code=409, detail="A scrape is already running. Try again in a moment.")
+            try:
+                run_spider(",".join(terms), state, platform, city)
+            except subprocess.TimeoutExpired as exc:
+                raise HTTPException(status_code=504, detail="Job scrape timed out.") from exc
+            finally:
+                SCRAPE_LOCK.release()
     list_state = "All" if profile is not None and (not state or state == "All") else state
     list_city = "" if profile is not None and not city else city
     pool = load_jobs()
     filtered = filter_jobs(pool, [], list_state, platform, days, list_city)
     if profile is not None:
         filtered = filter_jobs_for_candidate(filtered, profile, state=state, city=city)
-    ranked_all = recommend_jobs(filtered, skills, limit=MAX_LIMIT)
+    ranked_all = recommend_jobs(
+        filtered,
+        skills,
+        certifications=certifications,
+        experience_titles=experience_titles,
+        years=years,
+        limit=MAX_LIMIT,
+    )
     page_num = max(page, 1)
     start = (page_num - 1) * limit
     ranked = ranked_all[start : start + limit]
@@ -845,12 +920,18 @@ def _recommend_payload(
     elif not filtered:
         hint = _empty_cache_hint()
     elif not ranked_all:
-        hint = "Listings were found, but none overlapped these skills. Try refresh=true or broader skills."
+        hint = (
+            "Listings were found, but none matched these skills, certifications, or experience. "
+            "Try refresh=true."
+        )
     payload = {
         "ok": True,
         "count": len(ranked),
         "total": len(ranked_all),
         "skills": skills,
+        "certifications": certifications,
+        "experience_titles": experience_titles,
+        "years": years,
         "jobs": _with_time_ago(ranked),
         "pagination": _pagination(len(ranked_all), limit, start),
         "hint": hint,
@@ -1367,9 +1448,9 @@ def recommend_contract():
     }
 
 
-@app.get("/api/recommend/roles", summary="Recommended Roles tab: rank listings by skills")
+@app.get("/api/recommend/roles", summary="Recommended Roles: rank listings by skills, certifications, and experience")
 def recommend_roles(
-    skills: str = Query(..., description="Comma-separated skills, for example Python,FastAPI,AWS"),
+    skills: str = Query("", description="Comma-separated skills, for example Python,FastAPI,AWS"),
     state: str = Query("All"),
     platform: str = Query("All"),
     days: int = Query(30),
@@ -1381,14 +1462,18 @@ def recommend_roles(
     clearance_required: str = Query("", description="yes or no"),
     saudi_national_required: str = Query("", description="yes or no"),
     years: int | None = Query(None, ge=0, le=40),
+    certifications: str = Query("", description="Comma-separated certifications, for example PMP,AWS Certified"),
+    experience: str = Query("", description="Comma-separated past job titles"),
     limit: int = Query(DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
     page: int = Query(1, ge=1),
 ):
     found = parse_skill_query(skills)
-    if not found:
+    certs = parse_skill_query(certifications)
+    titles = [part.strip() for part in experience.split(",") if part.strip()]
+    if not found and not certs and not titles:
         raise HTTPException(
             status_code=400,
-            detail="Send skills as comma-separated text, for example Python,FastAPI,AWS.",
+            detail="Send skills, certifications, or experience titles. Example: skills=Python,FastAPI&certifications=PMP.",
         )
     pool = load_jobs()
     filtered = filter_jobs(pool, [], state, platform, days, city)
@@ -1402,7 +1487,14 @@ def recommend_roles(
         saudi_national_required=saudi_national_required,
         years=years,
     )
-    ranked_all = recommend_jobs(filtered, found, limit=MAX_LIMIT)
+    ranked_all = recommend_jobs(
+        filtered,
+        found,
+        certifications=certs,
+        experience_titles=titles,
+        years=years,
+        limit=MAX_LIMIT,
+    )
     start = (page - 1) * limit
     ranked = ranked_all[start : start + limit]
     hint = None
@@ -1411,10 +1503,13 @@ def recommend_roles(
     elif not filtered:
         hint = "No listings matched these filters."
     elif not ranked_all:
-        hint = "Listings were found, but none overlapped these skills."
+        hint = "Listings were found, but none matched these skills, certifications, or experience."
     return {
         "ok": True,
         "skills": found,
+        "certifications": certs,
+        "experience_titles": titles,
+        "years": years,
         "jobs": _with_time_ago(ranked),
         "count": len(ranked),
         "total": len(ranked_all),
@@ -1466,6 +1561,9 @@ def save_candidate_profile(candidate_id: str, body: CandidateProfile):
         "ok": True,
         "candidate_id": cid,
         "skills": skills_from_profile(saved),
+        "certifications": certifications_from_profile(saved),
+        "experience_titles": experience_titles_from_profile(saved),
+        "years": career_years(saved),
         "profile": saved,
     }
 
@@ -1477,6 +1575,9 @@ def get_candidate_profile(candidate_id: str):
         "ok": True,
         "candidate_id": cid,
         "skills": skills_from_profile(profile),
+        "certifications": certifications_from_profile(profile),
+        "experience_titles": experience_titles_from_profile(profile),
+        "years": career_years(profile),
         "profile": profile,
     }
 
@@ -1496,6 +1597,20 @@ async def upload_candidate_resume(
     merged = {
         **existing,
         "skills": normalize_skills((existing.get("skills") or []) + (parsed.get("skills") or [])),
+        "certifications": normalize_skills(
+            (existing.get("certifications") or []) + (parsed.get("certifications") or [])
+        ),
+        "work_history": existing.get("work_history")
+        or [
+            {
+                "company": item.get("company") or "",
+                "job_title": item.get("title") or "",
+                "start_date": item.get("start_date") or "",
+                "end_date": item.get("end_date") or "",
+                "description": " ".join(item.get("bullets") or []),
+            }
+            for item in parsed.get("experience") or []
+        ],
         "resume_text": parsed.get("raw_text") or existing.get("resume_text") or "",
     }
     saved = _store_candidate(cid, merged)
@@ -1516,7 +1631,9 @@ def recommend_for_candidate(
 ):
     cid, profile = _require_candidate(candidate_id)
     found = parse_skill_query(skills) or skills_from_profile(profile)
-    if found:
+    certs = certifications_from_profile(profile)
+    titles = experience_titles_from_profile(profile)
+    if found or certs or titles:
         return _recommend_payload(
             skills=found,
             state=state,
@@ -1563,9 +1680,21 @@ def recommend_for_candidate(
 def recommend_from_json(body: RecommendRequest):
     if body.candidate_id:
         cid, profile = _require_candidate(body.candidate_id)
-        skills = _candidate_skills_or_http(profile, body.skills)
+        skills = normalize_skills(body.skills) or skills_from_profile(profile)
+        certs = normalize_skills(body.certifications) or certifications_from_profile(profile)
+        titles = experience_titles_from_profile(profile)
+        if not skills and not certs and not titles:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "This candidate has no skills, certifications, or experience yet. "
+                    "Send skills or certifications, or POST /api/candidates/{candidate_id}/resume."
+                ),
+            )
         return _recommend_payload(
             skills=skills,
+            certifications=certs,
+            experience_titles=titles,
             state=body.state,
             platform=body.platform,
             days=body.days,
@@ -1576,9 +1705,32 @@ def recommend_from_json(body: RecommendRequest):
             profile=profile,
         )
     resume_payload = body.resume.model_dump() if body.resume else None
-    skills = _skills_from_inputs(body.skills, body.resume_text, resume_payload)
+    skills = normalize_skills(body.skills)
+    if not skills and resume_payload:
+        skills = normalize_skills(resume_payload.get("skills") or [])
+    parsed_text: dict = {}
+    if not skills and body.resume_text and body.resume_text.strip():
+        try:
+            parsed_text = parse_resume_text(body.resume_text)
+        except ResumeParseError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        skills = normalize_skills(parsed_text.get("skills") or [])
+    certs = normalize_skills(body.certifications)
+    source = resume_payload or parsed_text
+    if not certs and source:
+        certs = normalize_skills(source.get("certifications") or [])
+    resume_jobs = list(source.get("experience") or []) if source else []
+    titles = [str(item.get("title") or "").strip() for item in resume_jobs if str(item.get("title") or "").strip()]
+    if not skills and not certs and not titles:
+        raise HTTPException(
+            status_code=400,
+            detail="Send at least one skill, certification, or a resume that contains them.",
+        )
     return _recommend_payload(
         skills=skills,
+        certifications=certs,
+        experience_titles=titles,
+        years=_years_from_resume_jobs(resume_jobs),
         state=body.state,
         platform=body.platform,
         days=body.days,
@@ -1613,9 +1765,22 @@ async def recommend_from_file(
             status_code=400,
             detail="Upload a resume file or send skills as comma-separated text.",
         )
-    found = _skills_from_inputs(listed, None, resume_payload)
+    found = list(listed)
+    if resume_payload and not found:
+        found = normalize_skills(resume_payload.get("skills") or [])
+    certs = normalize_skills((resume_payload or {}).get("certifications") or [])
+    resume_jobs = list((resume_payload or {}).get("experience") or [])
+    titles = [str(item.get("title") or "").strip() for item in resume_jobs if str(item.get("title") or "").strip()]
+    if not found and not certs and not titles:
+        raise HTTPException(
+            status_code=400,
+            detail="The resume had no skills, certifications, or job titles to match.",
+        )
     return _recommend_payload(
         skills=found,
+        certifications=certs,
+        experience_titles=titles,
+        years=_years_from_resume_jobs(resume_jobs),
         state=state,
         platform=platform,
         days=days,
