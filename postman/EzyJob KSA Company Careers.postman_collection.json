@@ -1,0 +1,100 @@
+{
+  "info": {
+    "name": "EzyJob KSA Company Careers",
+    "description": "Open jobs on a company's own career portal.\n\nSend the company name. No auth.\n\nSet `base_url` to production `https://agentsksa.atozeesolutions.com` or local `http://127.0.0.1:9001`.\n\nThe first lookup can take 15 to 30 seconds. In Postman, set Settings → General → Request timeout to 60000 ms or turn the timeout off.\n\nRestart the API after pulling this change, then call Health and confirm `company_careers` is true.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "https://agentsksa.atozeesolutions.com",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{base_url}}/api/health",
+        "description": "Expect company_careers: true after the API restarts."
+      },
+      "response": []
+    },
+    {
+      "name": "Aramco jobs (GET)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/companies/careers?company=Aramco&limit=20",
+          "host": ["{{base_url}}"],
+          "path": ["api", "companies", "careers"],
+          "query": [
+            { "key": "company", "value": "Aramco", "description": "Company name from the user." },
+            { "key": "location", "value": "", "description": "Optional. Example: Riyadh", "disabled": true },
+            { "key": "limit", "value": "20", "description": "1 to 100. Default 50." },
+            { "key": "refresh", "value": "false", "description": "true skips the 15 minute cache.", "disabled": true }
+          ]
+        },
+        "description": "Reads https://www.aramco.jobs/hiring. Expect found true and a jobs array. The first call can take about 30 seconds."
+      },
+      "response": []
+    },
+    {
+      "name": "Stripe jobs in Dublin (GET)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/companies/careers?company=Stripe&location=Dublin&limit=10",
+          "host": ["{{base_url}}"],
+          "path": ["api", "companies", "careers"],
+          "query": [
+            { "key": "company", "value": "Stripe" },
+            { "key": "location", "value": "Dublin" },
+            { "key": "limit", "value": "10" }
+          ]
+        },
+        "description": "Greenhouse board. location keeps jobs whose location contains Dublin."
+      },
+      "response": []
+    },
+    {
+      "name": "Company jobs (POST)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"company\": \"Aramco\",\n  \"location\": \"\",\n  \"limit\": 20,\n  \"refresh\": false\n}",
+          "options": { "raw": { "language": "json" } }
+        },
+        "url": "{{base_url}}/api/companies/careers",
+        "description": "Same result as GET. Use this when the app sends a JSON body."
+      },
+      "response": []
+    },
+    {
+      "name": "Unknown company",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/companies/careers?company=zzznonecompany12345&limit=5",
+          "host": ["{{base_url}}"],
+          "path": ["api", "companies", "careers"],
+          "query": [
+            { "key": "company", "value": "zzznonecompany12345" },
+            { "key": "limit", "value": "5" }
+          ]
+        },
+        "description": "Expect HTTP 200, found false, jobs empty, and a message."
+      },
+      "response": []
+    }
+  ]
+}

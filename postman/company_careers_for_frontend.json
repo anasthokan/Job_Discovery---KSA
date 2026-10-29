@@ -1,0 +1,81 @@
+{
+  "title": "EzyJob KSA — Company career portal jobs (for frontend)",
+  "base_url": "https://agentsksa.atozeesolutions.com",
+  "local_base_url": "http://127.0.0.1:9001",
+  "note": "Send a company name. The API finds that company's public career page and returns the open jobs listed there. The first call for a company can take 15 to 30 seconds. The same company is then cached for 15 minutes. Set the HTTP client timeout to at least 60 seconds.",
+  "get": {
+    "method": "GET",
+    "path": "/api/companies/careers",
+    "example_request": "GET {{base_url}}/api/companies/careers?company=Aramco&limit=20",
+    "query": {
+      "company": "Required. The name the user typed, for example Aramco or Stripe.",
+      "location": "Optional. Keeps jobs whose location contains this text, for example Riyadh or Dublin.",
+      "limit": "Optional. Page size, 1 to 100. Default 50.",
+      "refresh": "Optional. true reads the career portal again and skips the cache."
+    }
+  },
+  "post": {
+    "method": "POST",
+    "path": "/api/companies/careers",
+    "content_type": "application/json",
+    "example_request": {
+      "company": "Aramco",
+      "location": "",
+      "limit": 20,
+      "refresh": false
+    }
+  },
+  "sample_response": {
+    "ok": true,
+    "company": "Aramco",
+    "portal_company": "Aramco",
+    "found": true,
+    "portal": "Career page",
+    "career_page": "https://www.aramco.jobs/hiring",
+    "count": 1,
+    "total": 27,
+    "limit": 20,
+    "message": null,
+    "jobs": [
+      {
+        "id": "career-page-850592023",
+        "title": "Digital Transformation Solution Engineer",
+        "company": "Aramco",
+        "location": "",
+        "department": "",
+        "url": "https://careers.aramco.com/expat_uk/job/Digital-Transformation-Solution-Engineer/850592023/",
+        "posted_at": "",
+        "daysAgo": "",
+        "platform": "Career page",
+        "description": "",
+        "job_type": "fulltime",
+        "work_model": "unknown",
+        "experience_level": "unknown",
+        "years_experience": null,
+        "visa_sponsorship": "unknown",
+        "clearance_required": "unknown",
+        "saudi_national_required": "no"
+      }
+    ]
+  },
+  "not_found_response": {
+    "ok": true,
+    "company": "zzznonecompany12345",
+    "portal_company": null,
+    "found": false,
+    "portal": null,
+    "career_page": null,
+    "count": 0,
+    "total": 0,
+    "limit": 20,
+    "jobs": [],
+    "message": "No public career portal was found for this company. Try the name used on their careers site."
+  },
+  "ui_mapping": {
+    "job_list": "jobs",
+    "job_title": "jobs[].title",
+    "apply_link": "jobs[].url",
+    "portal_link": "career_page",
+    "empty_state": "Show message when found is false, or when found is true and count is 0."
+  }
+}
