@@ -197,7 +197,9 @@ def scheduled_scrape() -> None:
         log.info("Scheduled scrape finished count=%s db_total=%s", count, db_total)
     except Exception as exc:
         detail = getattr(exc, "detail", None) or str(exc)
-        _store_last_scrape(ok=False, error=str(detail)[:500], count=0, db_total=None)
+        saved = read_scrape_progress()
+        db_total = mysql_job_count() if mysql_configured() else None
+        _store_last_scrape(ok=saved > 0, error=str(detail)[:500], count=saved, db_total=db_total)
         log.exception("Scheduled scrape failed")
     finally:
         SCRAPE_LOCK.release()
@@ -993,7 +995,10 @@ def _saved_before_stop() -> int:
 def run_spider(keywords: str, location: str, platform: str, city: str = "", target: int = 0) -> int:
     DATA_FILE.parent.mkdir(exist_ok=True)
     if DATA_FILE.exists():
-        DATA_FILE.unlink()
+        try:
+            DATA_FILE.unlink()
+        except OSError:
+            log.warning("jobs.json is open in another process. This scrape still saves each search to MySQL.")
     reset_scrape_progress()
     # The keyword list is long (every database skill and certification).
     # Passing it on the Windows command line gets cut, so the spider starts
@@ -1442,7 +1447,9 @@ def _scrape_background(keywords: str, state: str, platform: str, city: str, targ
         log.info("Scrape saved %s jobs (db_total=%s)", count, db_total)
     except Exception as exc:
         detail = getattr(exc, "detail", None) or str(exc)
-        _store_last_scrape(ok=False, error=str(detail)[:500], count=0, db_total=None)
+        saved = read_scrape_progress()
+        db_total = mysql_job_count() if mysql_configured() else None
+        _store_last_scrape(ok=saved > 0, error=str(detail)[:500], count=saved, db_total=db_total)
         log.exception("Background scrape failed")
     finally:
         SCRAPE_LOCK.release()
