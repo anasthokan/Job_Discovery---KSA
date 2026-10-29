@@ -778,6 +778,15 @@ def filter_jobs(
 DEFAULT_JOBS_PAGE_SIZE = 20
 
 
+def _page_size(limit: int) -> int:
+    """Page size for recommend. `limit` is not a cap on how many jobs can match."""
+    try:
+        value = int(limit)
+    except (TypeError, ValueError):
+        value = DEFAULT_LIMIT
+    return max(1, min(value, MAX_LIMIT))
+
+
 def _page(jobs: list[dict], limit: int | None, offset: int) -> list[dict]:
     start = max(offset, 0)
     if limit is None:
@@ -960,11 +969,12 @@ def _recommend_payload(
         certifications=certifications,
         experience_titles=experience_titles,
         years=years,
-        limit=MAX_LIMIT,
+        limit=None,
     )
     page_num = max(page, 1)
-    start = (page_num - 1) * limit
-    ranked = ranked_all[start : start + limit]
+    page_size = _page_size(limit)
+    start = (page_num - 1) * page_size
+    ranked = ranked_all[start : start + page_size]
     hint = None
     if not pool:
         hint = _empty_cache_hint()
@@ -986,7 +996,7 @@ def _recommend_payload(
         "experience_titles": experience_titles,
         "years": years,
         "jobs": _with_time_ago(ranked),
-        "pagination": _pagination(len(ranked_all), limit, start),
+        "pagination": _pagination(len(ranked_all), page_size, start),
         "hint": hint,
         **cache_meta(),
     }
@@ -1650,10 +1660,11 @@ def recommend_roles(
         certifications=certs,
         experience_titles=titles,
         years=years,
-        limit=MAX_LIMIT,
+        limit=None,
     )
-    start = (page - 1) * limit
-    ranked = ranked_all[start : start + limit]
+    page_size = _page_size(limit)
+    start = (page - 1) * page_size
+    ranked = ranked_all[start : start + page_size]
     hint = None
     if not pool:
         hint = _empty_cache_hint()
@@ -1670,9 +1681,9 @@ def recommend_roles(
         "jobs": _with_time_ago(ranked),
         "count": len(ranked),
         "total": len(ranked_all),
-        "limit": limit,
+        "limit": page_size,
         "offset": start,
-        "pagination": _pagination(len(ranked_all), limit, start),
+        "pagination": _pagination(len(ranked_all), page_size, start),
         "hint": hint,
         **cache_meta(),
     }

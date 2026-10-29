@@ -335,7 +335,7 @@ HTTP `200`:
 }
 ```
 
-Jobs are sorted by `match.score` (high first), then newest. `limit` max is **100**, default **25**.
+Jobs are sorted by `match.score` (high first), then newest. `limit` is the page size (max **100**, default **25**). `total` is every listing that scored above 0, so it can be higher than 100. Request the next `page` to walk the rest.
 
 `hint` is a string when the cache is empty or nothing overlapped the skills. Otherwise `null`.
 

@@ -69,14 +69,14 @@ def recommend_jobs(
     certifications: list[str] | None = None,
     experience_titles: list[str] | None = None,
     years: int | None = None,
-    limit: int = DEFAULT_LIMIT,
+    limit: int | None = DEFAULT_LIMIT,
 ) -> list[dict]:
+    """Rank every positive match. `limit=None` keeps the full set; an int keeps the top N (max 100)."""
     wanted = normalize_skills(skills)
     certs = normalize_skills(certifications)
     titles = _clean_titles(experience_titles)
     if not wanted and not certs and not titles:
         return []
-    capped = _clamp_limit(limit)
     ranked = []
     for job in jobs:
         match = score_job(
@@ -97,7 +97,9 @@ def recommend_jobs(
             row.get("title") or "",
         )
     )
-    return ranked[:capped]
+    if limit is None:
+        return ranked
+    return ranked[:_clamp_limit(limit)]
 
 
 def score_job(
