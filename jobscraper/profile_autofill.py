@@ -144,13 +144,23 @@ _DATE_RANGE = re.compile(
     rf"(?P<end>Present|Current|Now|(?:{_MONTH_WORD})\.?\s+(?:19|20)\d{{2}}|\d{{1,2}}[/-](?:19|20)\d{{2}}|(?:19|20)\d{{2}})",
     re.I,
 )
-_SECTION_HEADS = _SUMMARY_HEADS | _SKILL_HEADS | _EXPERIENCE_HEADS | {
+_CERT_HEADS = {
+    "certifications",
+    "certification",
+    "certificates",
+    "certificate",
+    "licenses",
+    "licenses & certifications",
+    "licenses and certifications",
+    "professional certifications",
+    "professional certificates",
+}
+_SECTION_HEADS = _SUMMARY_HEADS | _SKILL_HEADS | _EXPERIENCE_HEADS | _CERT_HEADS | {
     "key achievements",
     "achievements",
     "education",
     "academic background",
     "projects",
-    "certifications",
     "languages",
     "contact",
     "national address",
@@ -179,6 +189,7 @@ def autofill_from_parsed(parsed: dict[str, Any]) -> dict[str, Any]:
     online = _online(profile, raw)
     jobs = _jobs(parsed.get("experience") or [], raw)
     schools = _schools(parsed.get("education") or [], raw)
+    certificates = _certifications(parsed, raw)
     summary = _summary(profile, raw)
     skills = _skills_text(parsed, raw)
 
@@ -186,6 +197,7 @@ def autofill_from_parsed(parsed: dict[str, Any]) -> dict[str, Any]:
         "executive_summary": summary,
         "work_experience": jobs,
         "education": schools,
+        "certifications": certificates,
         "skills": skills,
         "personal": personal,
         "national_address": address,
@@ -207,6 +219,7 @@ def autofill_from_parsed(parsed: dict[str, Any]) -> dict[str, Any]:
         "executive_summary": filled["executive_summary"],
         "work_experience": filled["work_experience"],
         "education": filled["education"],
+        "certifications": filled["certifications"],
         "skills": filled["skills"],
         "personal": filled["personal"],
         "national_address": filled["national_address"],
@@ -806,6 +819,76 @@ def _jobs(rows: list[dict], raw: str = "") -> list[dict[str, str]]:
         })
     jobs.sort(key=_job_sort_key, reverse=True)
     return jobs[:20]
+
+
+_CERT_DATE = re.compile(
+    rf"(?:,|\(|\s)+(?:issued\s+)?((?:{_MONTH_WORD})\.?\s+(?:19|20)\d{{2}}|(?:19|20)\d{{2}})\)?\s*$",
+    re.I,
+)
+_CERT_ISSUER = re.compile(r"\s*(?:—|–|\|)\s*")
+
+
+def _certifications(parsed: dict, raw: str) -> list[dict[str, str]]:
+    lines = _join_cert_lines(_section_lines(raw, _CERT_HEADS))
+    rows = _cert_rows(lines)
+    if rows:
+        return rows
+    fallback = [_text(item) for item in (parsed.get("certifications") or []) if _text(item)]
+    return _cert_rows(fallback)
+
+
+def _join_cert_lines(lines: list[str]) -> list[str]:
+    joined: list[str] = []
+    for line in lines:
+        marker = line.strip()
+        if re.fullmatch(r"[\-–—*•.]+", marker):
+            continue
+        text = re.sub(r"^[\-–—*•]+\s*", "", marker).strip()
+        if not text:
+            continue
+        if joined and re.search(r"(?:—|–|\|)\s*$", joined[-1]):
+            issuer = re.sub(r"^[\-–—*•]+\s*", "", text).strip()
+            joined[-1] = f"{joined[-1].rstrip(' —–|')} — {issuer}"
+            continue
+        joined.append(text)
+    return joined
+
+
+def _cert_rows(lines: list[str]) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for line in lines:
+        name, issuer, issued = _split_cert(line)
+        if len(name) < 2:
+            continue
+        key = name.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append({
+            "name": _clip(name, 160),
+            "issuer": _clip(issuer, 160),
+            "issue_date": issued,
+        })
+    return rows[:20]
+
+
+def _split_cert(text: str) -> tuple[str, str, str]:
+    body = re.sub(r"^[\-–—*•]+\s*", "", _text(text)).strip(" .")
+    issued = ""
+    dated = _CERT_DATE.search(body)
+    if dated:
+        issued = _normalize_date(dated.group(1))
+        body = body[:dated.start()].strip(" ,.-")
+    parts = _CERT_ISSUER.split(body, maxsplit=1)
+    name = parts[0].strip(" .")
+    issuer = parts[1].strip(" .") if len(parts) > 1 else ""
+    if not issued and issuer:
+        dated = _CERT_DATE.search(issuer)
+        if dated and dated.start() > 0:
+            issued = _normalize_date(dated.group(1))
+            issuer = issuer[:dated.start()].strip(" ,.-")
+    return name, issuer, issued
 
 
 def _job_sort_key(job: dict[str, str]) -> str:

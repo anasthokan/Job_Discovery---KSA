@@ -232,6 +232,7 @@ def profile_from_linkedin_html(page: str, url: str) -> dict:
         "executive_summary": summary[:2000],
         "work_experience": jobs,
         "education": schools,
+        "certifications": [],
         "skills": ", ".join(skills),
         "personal": {
             "first_name": first[:80],

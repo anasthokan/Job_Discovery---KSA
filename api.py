@@ -2005,6 +2005,12 @@ class ProfileSchool(BaseModel):
     grade: str = ""
 
 
+class ProfileCertification(BaseModel):
+    name: str = ""
+    issuer: str = ""
+    issue_date: str = ""
+
+
 class ProfilePersonal(BaseModel):
     first_name: str = ""
     last_name: str = ""
@@ -2066,6 +2072,7 @@ class ProfileAutofillResponse(BaseModel):
     executive_summary: str = ""
     work_experience: list[ProfileJob] = Field(default_factory=list)
     education: list[ProfileSchool] = Field(default_factory=list)
+    certifications: list[ProfileCertification] = Field(default_factory=list)
     skills: str = ""
     personal: ProfilePersonal
     national_address: ProfileAddress

@@ -67,7 +67,16 @@ SECTION_ALIASES = {
         "expertise",
     ),
     "projects": ("projects", "personal projects", "selected projects", "key projects"),
-    "certifications": ("certifications", "certificates", "licenses", "licenses & certifications"),
+    "certifications": (
+        "certifications",
+        "certification",
+        "certificates",
+        "certificate",
+        "licenses",
+        "licenses & certifications",
+        "licenses and certifications",
+        "professional certifications",
+    ),
     "languages": ("languages", "language skills"),
 }
 
