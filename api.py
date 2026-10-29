@@ -508,7 +508,10 @@ class RecommendRequest(BaseModel):
     resume: ResumeInput | None = Field(None, description="Optional parsed resume JSON from /api/resume/parse")
     state: str = Field("All", description="US state filter, Remote, or All")
     platform: str = Field("All", description="Job board name, or All")
-    days: int = Field(30, description="Only listings posted within this many days")
+    days: int = Field(
+        0,
+        description="0 returns every job in the database. 1, 3, or 7 keep a shorter window.",
+    )
     city: str = ""
     limit: int = Field(DEFAULT_LIMIT, ge=1, le=MAX_LIMIT)
     refresh: bool = Field(False, description="If true, scrape boards with these skills before ranking")
@@ -714,6 +717,22 @@ def _with_time_ago(jobs: list[dict]) -> list[dict]:
     return presented
 
 
+def _listing_max_age(days: int) -> int | None:
+    """None keeps every stored job.
+
+    Explore Jobs calls /api/jobs?days=30. That window used to drop anything
+    older than 30 days, so the page showed ~6,000 jobs while ksajob.jobs held
+    9,000+. days=0 and days>=30 both return the full table. 1, 3, and 7 still limit it.
+    """
+    try:
+        window = int(days)
+    except (TypeError, ValueError):
+        return None
+    if window <= 0 or window >= 30:
+        return None
+    return window
+
+
 def filter_jobs(
     jobs: list[dict],
     keywords: list[str],
@@ -723,6 +742,7 @@ def filter_jobs(
     city: str = "",
     ksa_only: bool = True,
 ) -> list[dict]:
+    max_age = _listing_max_age(days)
     filtered = []
     for job in jobs:
         if ksa_only and not is_ksa_job(
@@ -733,7 +753,7 @@ def filter_jobs(
             continue
         if platform != "All" and job.get("platform") != platform:
             continue
-        if int(job.get("daysAgo") or 0) > days:
+        if max_age is not None and int(job.get("daysAgo") or 0) > max_age:
             continue
         if not matches_state_filter(job.get("state") or "", job.get("location") or "", state):
             continue
@@ -1273,7 +1293,7 @@ def filters():
             "Bayt",
             "Dev Global Jobs",
         ],
-        "days": [1, 3, 7, 30],
+        "days": [0, 1, 3, 7],
         "work_models": list(WORK_MODELS),
         "job_types": [
             {"value": "fulltime", "label": "Full-time"},
@@ -1293,7 +1313,10 @@ def get_jobs(
     keywords: str = Query("", description="Comma-separated title/company/skill keywords"),
     state: str = Query("All"),
     platform: str = Query("All"),
-    days: int = Query(30),
+    days: int = Query(
+        0,
+        description="0 returns every job in the database. 1, 3, or 7 keep a shorter window. 30 also returns every job.",
+    ),
     city: str = Query(""),
     work_model: str = Query("", description="Comma-separated: remote, hybrid, onsite"),
     job_type: str = Query("", description="Comma-separated: fulltime, contract, parttime, internship"),
@@ -1490,7 +1513,7 @@ def recommend_contract():
                     "keywords": "python,fastapi",
                     "state": "All",
                     "platform": "All",
-                    "days": 30,
+                    "days": 0,
                     "city": "",
                     "limit": 50,
                     "offset": 0,
@@ -1511,12 +1534,12 @@ def recommend_contract():
             "recommended_roles": {
                 "method": "GET",
                 "path": "/api/recommend/roles",
-                "example": "/api/recommend/roles?skills=Python,FastAPI,AWS&state=All&platform=All&days=30&limit=25&page=1",
+                "example": "/api/recommend/roles?skills=Python,FastAPI,AWS&state=All&platform=All&days=0&limit=25&page=1",
                 "query": {
                     "skills": "Python,FastAPI,AWS",
                     "state": "All",
                     "platform": "All",
-                    "days": 30,
+                    "days": 0,
                     "city": "",
                     "limit": 25,
                     "page": 1,
@@ -1558,7 +1581,7 @@ def recommend_contract():
                     "resume": "optional parsed resume JSON",
                     "state": "All",
                     "platform": "All",
-                    "days": 30,
+                    "days": 0,
                     "limit": 25,
                     "refresh": False,
                 },
@@ -1572,7 +1595,7 @@ def recommend_contract():
                     "skills": "optional comma-separated skills",
                     "state": "All",
                     "platform": "All",
-                    "days": 30,
+                    "days": 0,
                     "limit": 25,
                     "refresh": False,
                 },
@@ -1587,7 +1610,7 @@ def recommend_roles(
     skills: str = Query("", description="Comma-separated skills, for example Python,FastAPI,AWS"),
     state: str = Query("All"),
     platform: str = Query("All"),
-    days: int = Query(30),
+    days: int = Query(0, description="0 returns every job in the database. 1, 3, or 7 keep a shorter window."),
     city: str = Query(""),
     work_model: str = Query("", description="Comma-separated: remote, hybrid, onsite"),
     job_type: str = Query("", description="Comma-separated: fulltime, contract, parttime, internship"),
@@ -1756,7 +1779,7 @@ def recommend_for_candidate(
     candidate_id: str,
     state: str = Query("All"),
     platform: str = Query("All"),
-    days: int = Query(30),
+    days: int = Query(0, description="0 returns every job in the database. 1, 3, or 7 keep a shorter window."),
     city: str = Query(""),
     skills: str = Query("", description="Optional comma-separated skills. Used when the user profile has none."),
     limit: int = Query(DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
@@ -1883,7 +1906,7 @@ async def recommend_from_file(
     skills: str = Form("", description="Optional comma-separated skills"),
     state: str = Form("All"),
     platform: str = Form("All"),
-    days: int = Form(30),
+    days: int = Form(0),
     city: str = Form(""),
     limit: int = Form(DEFAULT_LIMIT),
     refresh: bool = Form(False),
