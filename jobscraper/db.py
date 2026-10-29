@@ -173,6 +173,28 @@ def _sql_default(data_type: str, column_type: str) -> str:
     return "''"
 
 
+# This MySQL server rejects defaults on these types (error 1101). The INSERT sends a literal instead.
+_NO_COLUMN_DEFAULT = {
+    "tinytext",
+    "text",
+    "mediumtext",
+    "longtext",
+    "tinyblob",
+    "blob",
+    "mediumblob",
+    "longblob",
+    "json",
+    "geometry",
+    "point",
+    "linestring",
+    "polygon",
+    "multipoint",
+    "multilinestring",
+    "multipolygon",
+    "geometrycollection",
+}
+
+
 def _default_omitted_columns(cur) -> None:
     """Shared jobs columns we do not insert must have a default, or strict mode rejects the row."""
     cur.execute(
@@ -193,7 +215,10 @@ def _default_omitted_columns(cur) -> None:
             continue
         if "auto_increment" in extra or "generated" in extra:
             continue
-        default = _sql_default(str(_row_value(column, "data_type") or ""), str(_row_value(column, "column_type") or ""))
+        kind = str(_row_value(column, "data_type") or "").lower()
+        if kind in _NO_COLUMN_DEFAULT:
+            continue
+        default = _sql_default(kind, str(_row_value(column, "column_type") or ""))
         try:
             cur.execute(f"ALTER TABLE {JOBS_TABLE} ALTER COLUMN {_quote_ident(name)} SET DEFAULT {default}")
         except Exception:
