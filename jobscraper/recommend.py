@@ -28,6 +28,53 @@ _TITLE_NOISE = {
     "iii",
     "iv",
 }
+# Seniority and structure words. "Senior" plus "Manager" is not a title match.
+_TITLE_GENERIC = _TITLE_NOISE | {
+    "acting",
+    "assistant",
+    "associate",
+    "chief",
+    "coordinator",
+    "director",
+    "executive",
+    "global",
+    "group",
+    "head",
+    "interim",
+    "intern",
+    "internship",
+    "jr",
+    "junior",
+    "lead",
+    "leader",
+    "leading",
+    "level",
+    "management",
+    "manager",
+    "mid",
+    "officer",
+    "president",
+    "principal",
+    "regional",
+    "senior",
+    "specialist",
+    "sr",
+    "staff",
+    "team",
+    "vice",
+    "vp",
+}
+_NOT_A_SKILL = {
+    "advanced",
+    "basic",
+    "beginner",
+    "expert",
+    "fluent",
+    "intermediate",
+    "native",
+    "professional",
+}
+_HEX_ID = re.compile(r"^[0-9a-f]{16,}$", re.I)
 _LEVEL_RANK = {
     "intern/new grad": 0,
     "entry level": 1,
@@ -72,8 +119,8 @@ def recommend_jobs(
     limit: int | None = DEFAULT_LIMIT,
 ) -> list[dict]:
     """Rank every positive match. `limit=None` keeps the full set; an int keeps the top N (max 100)."""
-    wanted = normalize_skills(skills)
-    certs = normalize_skills(certifications)
+    wanted = _usable_terms(skills)
+    certs = _usable_terms(certifications)
     titles = _clean_titles(experience_titles)
     if not wanted and not certs and not titles:
         return []
@@ -110,8 +157,8 @@ def score_job(
     experience_titles: list[str] | None = None,
     years: int | None = None,
 ) -> dict:
-    wanted = normalize_skills(skills)
-    certs = normalize_skills(certifications)
+    wanted = _usable_terms(skills)
+    certs = _usable_terms(certifications)
     titles = _clean_titles(experience_titles)
     job_skills = normalize_skills(job.get("skills") or [])
     description = str(job.get("description") or "")
@@ -132,27 +179,69 @@ def score_job(
     matched, missing, skill_points = _overlap(wanted, job_keys, title_l, blob, hit=2, soft=1)
     matched_certs, missing_certs, cert_points = _overlap(certs, job_keys, title_l, blob, hit=3, soft=2)
     matched_titles = [item for item in titles if _title_overlap(item, title)]
-    title_points = 4 if matched_titles else 0
     year_points, experience_fit = _experience_points(job, titles, years)
 
-    points = skill_points + cert_points + title_points + year_points
-    # A years-only overlap is not a job match. Require a skill, certification, or title hit.
+    # Years alone are not a match. A seniority-word title overlap is not one either.
     if not matched and not matched_certs and not matched_titles:
-        points = 0
-    max_points = max(
-        len(wanted) * 2 + len(certs) * 3 + (4 if titles else 0) + (5 if years is not None or titles else 0),
-        1,
+        skill_points = cert_points = year_points = 0
+        experience_fit = "none"
+    score = _blend_score(
+        skill_points=skill_points,
+        skill_max=len(wanted) * 2,
+        cert_points=cert_points,
+        cert_max=len(certs) * 3,
+        title_hit=bool(matched_titles),
+        has_titles=bool(titles),
+        year_points=year_points if matched_titles or skill_points >= 4 or cert_points else 0,
     )
-    score = int(round(100 * points / max_points)) if points else 0
     return {
-        "score": min(100, score),
+        "score": score,
         "matched_skills": matched,
         "missing_skills": missing,
         "matched_certifications": matched_certs,
         "missing_certifications": missing_certs,
         "matched_titles": matched_titles,
-        "experience_fit": experience_fit if points else "none",
+        "experience_fit": experience_fit if score else "none",
     }
+
+
+def _usable_terms(raw: list[str] | None) -> list[str]:
+    """Drop stored ids and proficiency labels so they cannot flatten every score."""
+    out: list[str] = []
+    for skill in normalize_skills(raw):
+        key = skill.lower().replace("-", "")
+        if key in _NOT_A_SKILL or _HEX_ID.match(key):
+            continue
+        out.append(skill)
+    return out
+
+
+def _blend_score(
+    *,
+    skill_points: int,
+    skill_max: int,
+    cert_points: int,
+    cert_max: int,
+    title_hit: bool,
+    has_titles: bool,
+    year_points: int,
+) -> int:
+    parts: list[tuple[float, float]] = []
+    if skill_max:
+        parts.append((skill_points / skill_max, 0.55))
+    if cert_max:
+        parts.append((cert_points / cert_max, 0.15))
+    if has_titles:
+        parts.append((1.0 if title_hit else 0.0, 0.20))
+    if year_points:
+        parts.append((min(year_points, 5) / 5, 0.10))
+    if not parts:
+        return 0
+    weight = sum(item[1] for item in parts)
+    covered = sum(item[0] * item[1] for item in parts)
+    if covered <= 0:
+        return 0
+    return min(100, int(round(100 * covered / weight)))
 
 
 def _overlap(wanted: list[str], job_keys: set[str], title: str, blob: str, *, hit: int, soft: int):
@@ -191,14 +280,13 @@ def _tokens(value: str) -> set[str]:
 
 
 def _title_overlap(candidate_title: str, job_title: str) -> bool:
-    left = _tokens(candidate_title)
-    right = _tokens(job_title)
+    left = _tokens(candidate_title) - _TITLE_GENERIC
+    right = _tokens(job_title) - _TITLE_GENERIC
     if not left or not right:
         return False
     if left <= right or right <= left:
         return True
-    shared = left & right
-    return len(shared) >= 2 or (len(shared) >= 1 and min(len(left), len(right)) == 1)
+    return len(left & right) >= 2
 
 
 def _candidate_level(titles: list[str], years: int | None) -> int | None:
