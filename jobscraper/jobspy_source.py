@@ -6,9 +6,12 @@ Searches are locked to Saudi Arabia (sa.indeed.com and Bayt).
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import date, datetime
 
 log = logging.getLogger("jobscraper.jobspy")
+# One board call must not sit for hours. The crawl saves after every finished search.
+_SEARCH_TIMEOUT_SECONDS = 150
 
 SITE_TO_PLATFORM = {
     "indeed": "Indeed",
@@ -147,7 +150,7 @@ def scrape(
             else:
                 kwargs["hours_old"] = hours_old
             try:
-                frame = scrape_jobs(**kwargs)
+                frame = _scrape_jobs_bounded(scrape_jobs, kwargs)
             except Exception:
                 log.exception("JobSpy failed for %r on %s", term, site)
                 continue
@@ -155,6 +158,32 @@ def scrape(
                 continue
             found.extend(rows_to_jobs(frame.to_dict("records")))
     return _fill_short_descriptions(found)
+
+
+def _scrape_jobs_bounded(scrape_jobs, kwargs: dict):
+    """Return the JobSpy frame, or None when this one board search does not finish."""
+    box: dict = {}
+
+    def run() -> None:
+        try:
+            box["frame"] = scrape_jobs(**kwargs)
+        except Exception as exc:
+            box["error"] = exc
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    thread.join(_SEARCH_TIMEOUT_SECONDS)
+    if thread.is_alive():
+        log.warning(
+            "JobSpy timed out after %ss for %r on %s",
+            _SEARCH_TIMEOUT_SECONDS,
+            kwargs.get("search_term"),
+            kwargs.get("site_name"),
+        )
+        return None
+    if "error" in box:
+        raise box["error"]
+    return box.get("frame")
 
 
 def _fill_short_descriptions(jobs: list[dict]) -> list[dict]:

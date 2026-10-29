@@ -20,6 +20,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 
 from jobscraper.ats_score import AtsScoreError, score_resume
+from jobscraper.career_portal import lookup_company_jobs
 from jobscraper.candidates import (
     CandidateError,
     clean_candidate_id,
@@ -82,6 +83,9 @@ from jobscraper.db import (
     load_jobs as load_jobs_mysql,
     mysql_configured,
     save_candidate as save_candidate_mysql,
+    note_scrape_progress,
+    read_scrape_progress,
+    reset_scrape_progress,
     start_scrape_run,
     start_dice_description_backfill,
     start_startup_maintenance,
@@ -187,8 +191,7 @@ def scheduled_scrape() -> None:
             )
             return
         log.info("Scheduled scrape starting keywords=%s target=%s", keywords, target)
-        run_spider(keywords, state, platform, city, target)
-        count = _kept_scrape_count()
+        count = run_spider(keywords, state, platform, city, target) or _kept_scrape_count()
         db_total = mysql_job_count() if mysql_configured() else count
         _store_last_scrape(ok=True, error=None, count=count, db_total=db_total)
         log.info("Scheduled scrape finished count=%s db_total=%s", count, db_total)
@@ -972,10 +975,26 @@ def _recommend_payload(
     return payload
 
 
-def run_spider(keywords: str, location: str, platform: str, city: str = "", target: int = 0) -> None:
+def _saved_before_stop() -> int:
+    """Jobs already written by the spider, plus any feed file left after a kill."""
+    saved = read_scrape_progress()
+    partial = load_jobs_json()
+    if not partial:
+        return saved
+    try:
+        upsert_jobs(partial)
+        saved = max(saved, len(partial))
+        note_scrape_progress(saved)
+    except Exception:
+        log.exception("Could not save the jobs collected before the scrape stopped")
+    return saved
+
+
+def run_spider(keywords: str, location: str, platform: str, city: str = "", target: int = 0) -> int:
     DATA_FILE.parent.mkdir(exist_ok=True)
     if DATA_FILE.exists():
         DATA_FILE.unlink()
+    reset_scrape_progress()
     # The keyword list is long (every database skill and certification).
     # Passing it on the Windows command line gets cut, so the spider starts
     # with no terms and exits in a couple of seconds with zero jobs.
@@ -1014,17 +1033,33 @@ def run_spider(keywords: str, location: str, platform: str, city: str = "", targ
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
         )
     except subprocess.TimeoutExpired:
+        saved = _saved_before_stop()
+        if saved:
+            finish_scrape_run(run_id, job_count_value=saved)
+            start_dice_description_backfill()
+            log.warning("Scrape hit the time limit after saving %s jobs", saved)
+            return saved
         finish_scrape_run(run_id, job_count_value=0, error="timeout")
         raise
     except Exception as exc:
         finish_scrape_run(run_id, job_count_value=0, error=str(exc)[:2000])
         raise
     if result.returncode != 0:
+        saved = _saved_before_stop()
+        if saved:
+            finish_scrape_run(run_id, job_count_value=saved)
+            start_dice_description_backfill()
+            return saved
         detail = (result.stderr or result.stdout or "Scrapy crawl failed").strip()
         finish_scrape_run(run_id, job_count_value=0, error=detail[-2000:])
         raise HTTPException(status_code=502, detail=detail[-2000:])
     this_run = load_jobs_json()
     if not this_run:
+        saved = read_scrape_progress()
+        if saved:
+            finish_scrape_run(run_id, job_count_value=saved)
+            start_dice_description_backfill()
+            return saved
         detail = "\n".join(part.strip() for part in (result.stderr, result.stdout) if part and part.strip())
         detail = (detail or "Scrape ended with 0 jobs. The boards were not searched.").strip()
         finish_scrape_run(run_id, job_count_value=0, error=detail[-2000:])
@@ -1032,13 +1067,20 @@ def run_spider(keywords: str, location: str, platform: str, city: str = "", targ
     try:
         saved = upsert_jobs(this_run)
     except Exception as exc:
+        saved_now = read_scrape_progress()
+        if saved_now:
+            finish_scrape_run(run_id, job_count_value=saved_now)
+            start_dice_description_backfill()
+            return saved_now
         detail = f"MySQL save failed: {exc}"
         finish_scrape_run(run_id, job_count_value=0, error=detail[:2000])
         raise HTTPException(status_code=502, detail=detail[:2000]) from exc
-    finish_scrape_run(run_id, job_count_value=len(this_run) or saved)
+    kept = len(this_run) or saved
+    finish_scrape_run(run_id, job_count_value=kept)
     # The startup refill has already finished by the time a scheduled scrape
     # saves new LinkedIn rows. Run it again for the rows that arrived with no body.
     start_dice_description_backfill()
+    return kept
 
 
 def _resume_response(parsed: dict, include_raw: bool) -> dict:
@@ -1181,6 +1223,7 @@ def health():
         "service": "job-discovery",
         "jobs_list": True,
         "jobs_recommend": True,
+        "company_careers": True,
         "country": "Saudi Arabia",
         "save_fix": 4,
         "resume_parse": True,
@@ -1308,6 +1351,37 @@ def get_jobs(
     return payload
 
 
+class CompanyCareersRequest(BaseModel):
+    company: str = Field(..., min_length=2, max_length=120, description="Company name, for example Aramco or Stripe")
+    location: str = Field("", max_length=80, description="Optional location text, for example Riyadh or Saudi Arabia")
+    limit: int = Field(50, ge=1, le=100)
+    refresh: bool = Field(False, description="Bypass the short cache and read the career portal again")
+
+
+def _company_careers(company: str, location: str, limit: int, refresh: bool) -> dict:
+    try:
+        return lookup_company_jobs(company, location=location, limit=limit, refresh=refresh)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/api/companies/careers", summary="Open jobs on a company's career portal")
+def company_careers(
+    company: str = Query(..., min_length=2, max_length=120, description="Company name, for example Aramco or Stripe"),
+    location: str = Query("", max_length=80, description="Keep jobs whose location contains this text"),
+    limit: int = Query(50, ge=1, le=100),
+    refresh: bool = Query(False, description="Bypass the short cache and read the career portal again"),
+):
+    """Find the company's public career page and return the jobs listed there."""
+    return _company_careers(company, location, limit, refresh)
+
+
+@app.post("/api/companies/careers", summary="Open jobs on a company's career portal")
+def company_careers_post(body: CompanyCareersRequest):
+    """Find the company's public career page and return the jobs listed there."""
+    return _company_careers(body.company, body.location, body.limit, body.refresh)
+
+
 @app.post("/api/scrape")
 def scrape_jobs(
     keywords: str = Query(""),
@@ -1332,7 +1406,7 @@ def scrape_jobs(
     if response_target >= 1000:
         message = (
             f"Large scrape started for about {response_target} jobs across database skills and certifications. "
-            "It can take one to two hours. Poll GET /api/scrape/status until running is false."
+            "Jobs are saved after each search. Poll GET /api/scrape/status and watch saved_so_far."
         )
     return JSONResponse(
         status_code=202,
@@ -1362,8 +1436,7 @@ def _scrape_background(keywords: str, state: str, platform: str, city: str, targ
         # the stored skills and certifications, not exit after an empty pass.
         if from_database and target <= 0:
             target = _scrape_target()
-        run_spider(keywords, state, platform, city, target)
-        count = _kept_scrape_count()
+        count = run_spider(keywords, state, platform, city, target) or _kept_scrape_count()
         db_total = mysql_job_count() if mysql_configured() else count
         _store_last_scrape(ok=True, error=None, count=count, db_total=db_total)
         log.info("Scrape saved %s jobs (db_total=%s)", count, db_total)
@@ -1380,6 +1453,7 @@ def scrape_status():
     return {
         "ok": True,
         "running": SCRAPE_LOCK.locked(),
+        "saved_so_far": read_scrape_progress(),
         "last_scrape": _LAST_SCRAPE,
         "mysql": mysql_health(),
         "schedule": {

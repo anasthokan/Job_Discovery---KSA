@@ -2375,6 +2375,30 @@ def catalog_search_terms(limit: int = 40) -> list[str]:
     return terms
 
 
+def _scrape_progress_path() -> Path:
+    return _ROOT / "data" / "scrape_progress.json"
+
+
+def reset_scrape_progress() -> None:
+    path = _scrape_progress_path()
+    path.parent.mkdir(exist_ok=True)
+    path.write_text('{"saved": 0}', encoding="utf-8")
+
+
+def note_scrape_progress(saved: int) -> None:
+    path = _scrape_progress_path()
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(json.dumps({"saved": int(saved)}), encoding="utf-8")
+
+
+def read_scrape_progress() -> int:
+    try:
+        payload = json.loads(_scrape_progress_path().read_text(encoding="utf-8"))
+        return max(0, int(payload.get("saved") or 0))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return 0
+
+
 def start_scrape_run(keywords: str, state: str, platform: str) -> int | None:
     if not mysql_configured():
         return None

@@ -203,43 +203,61 @@ class JobsSpider(scrapy.Spider):
             max_terms = len(queries)
             results_wanted = 40 if single_board else 20
             hours_old = 720
+        queries = queries[:max_terms]
         self.logger.info(
             "Searching %s roles on %s boards, %s listings each",
-            min(len(queries), max_terms),
+            len(queries),
             len(sites),
             results_wanted,
         )
-        try:
-            rows = await asyncio.to_thread(
-                scrape_jobspy,
-                queries,
-                where,
-                sites,
-                is_remote=remote,
-                results_wanted=results_wanted,
-                max_terms=max_terms,
-                hours_old=hours_old,
-            )
-        except Exception:
-            self.logger.exception("JobSpy scrape failed")
-            return
-        self.logger.info("JobSpy returned %s jobs from %s in %s", len(rows), ", ".join(sites), where)
-        for row in rows:
-            location = row.get("location") or ""
-            for item in self._emit(
-                id=row["id"],
-                title=row["title"],
-                company=row["company"],
-                skills=row.get("skills") or [],
-                state=parse_state(location),
-                location=location,
-                platform=row["platform"],
-                daysAgo=days_ago(row.get("platform_posted_at") or row.get("posted_at")),
-                url=row["url"],
-                posted_at=row.get("posted_at") or "",
-                platform_posted_at=row.get("platform_posted_at") or row.get("posted_at") or "",
-                job_type=row.get("job_type"),
-                search_text=row.get("search_text") or "",
-                raw=row.get("raw"),
-            ):
+        saved = 0
+        for index, term in enumerate(queries, start=1):
+            self.logger.info("Search %s/%s: %s", index, len(queries), term)
+            try:
+                rows = await asyncio.to_thread(
+                    scrape_jobspy,
+                    [term],
+                    where,
+                    sites,
+                    is_remote=remote,
+                    results_wanted=results_wanted,
+                    max_terms=1,
+                    hours_old=hours_old,
+                )
+            except Exception:
+                self.logger.exception("JobSpy scrape failed for %s", term)
+                continue
+            batch = []
+            for row in rows:
+                location = row.get("location") or ""
+                for item in self._emit(
+                    id=row["id"],
+                    title=row["title"],
+                    company=row["company"],
+                    skills=row.get("skills") or [],
+                    state=parse_state(location),
+                    location=location,
+                    platform=row["platform"],
+                    daysAgo=days_ago(row.get("platform_posted_at") or row.get("posted_at")),
+                    url=row["url"],
+                    posted_at=row.get("posted_at") or "",
+                    platform_posted_at=row.get("platform_posted_at") or row.get("posted_at") or "",
+                    job_type=row.get("job_type"),
+                    search_text=row.get("search_text") or "",
+                    raw=row.get("raw"),
+                ):
+                    batch.append(dict(item))
+            if not batch:
+                self.logger.info("No kept jobs for %s", term)
+                continue
+            try:
+                from jobscraper.db import note_scrape_progress, upsert_jobs
+
+                upsert_jobs(batch)
+                saved += len(batch)
+                note_scrape_progress(saved)
+                self.logger.info("Saved %s jobs for %s (running total %s)", len(batch), term, saved)
+            except Exception:
+                self.logger.exception("MySQL save failed for %s", term)
+            for item in batch:
                 yield item
