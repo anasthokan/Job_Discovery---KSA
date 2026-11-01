@@ -1565,23 +1565,30 @@ def _raw_descriptions_by_id(ids: list[int]) -> dict[int, object]:
         return found
 
 
-def load_jobs() -> list[dict]:
+def load_jobs(description_chars: int = 800) -> list[dict]:
     load_jobs.last_error = None
     if not mysql_configured():
         return []
+    try:
+        preview = int(description_chars)
+    except (TypeError, ValueError):
+        preview = 800
+    preview = max(200, min(preview, 8000))
     try:
         conn = get_conn()
         if conn is None:
             return []
         with conn.cursor() as cur:
             # raw_description stays off this query. It is a LONGTEXT, and loading it
-            # for every row stalls MySQL. Description here is only a short preview;
+            # for every row stalls MySQL. Description here is a bounded preview;
             # the jobs API replaces it with the full column for the rows it returns.
+            # Recommend asks for a longer slice so a skill past the first 800
+            # characters can still match.
             cur.execute(
                 f"SELECT id AS api_id, "
                 f"COALESCE(NULLIF(source_id, ''), public_id, CAST(id AS CHAR)) AS id, "
                 f"title, company, skills, state, location, platform, "
-                f"days_ago, url, LEFT(description, 800) AS description, "
+                f"days_ago, url, LEFT(description, %s) AS description, "
                 f"job_type, work_model, experience_level, "
                 f"years_experience, visa_sponsorship, clearance_required, saudi_national_required, "
                 f"posted_at, platform_posted_at, first_seen_at, created_at "
@@ -1589,7 +1596,7 @@ def load_jobs() -> list[dict]:
                 f"WHERE url NOT LIKE %s AND url NOT LIKE %s "
                 f"AND (source_id IS NULL OR source_id NOT LIKE %s) "
                 f"ORDER BY last_seen_at DESC",
-                ("%://jobs.example.com/%", "%://example.com/%", "seed-%"),
+                (preview, "%://jobs.example.com/%", "%://example.com/%", "seed-%"),
             )
             rows = cur.fetchall() or []
         load_jobs.last_error = None
@@ -2258,14 +2265,46 @@ def _unique_terms(values: list[str]) -> list[str]:
     return out
 
 
-def _balance_terms(certs: list[str], skills: list[str], limit: int) -> list[str]:
-    certs = _unique_terms(certs)
-    used = {item.lower() for item in certs}
+def _title_search_term(value) -> str | None:
+    from jobscraper.recommend import search_phrase
+
+    return search_phrase(value)
+
+
+def _append_related(chosen: list[str], limit: int) -> list[str]:
+    """Add stored related-skill names when the list still has room."""
+    from jobscraper.jd_to_cv import SKILL_RELATED
+
+    seen = {item.lower() for item in chosen}
+    extra: list[str] = []
+    for term in chosen:
+        for related in sorted(SKILL_RELATED.get(term.lower(), ())):
+            phrase = _title_search_term(related)
+            if not phrase or phrase.lower() in seen:
+                continue
+            seen.add(phrase.lower())
+            extra.append(phrase)
+            if len(chosen) + len(extra) >= limit:
+                return chosen + extra
+    return chosen + extra
+
+
+def _balance_terms(
+    certs: list[str],
+    skills: list[str],
+    limit: int,
+    titles: list[str] | None = None,
+) -> list[str]:
+    titles = [item for item in (_title_search_term(value) for value in (titles or [])) if item]
+    titles = _unique_terms(titles)
+    used = {item.lower() for item in titles}
+    certs = [item for item in _unique_terms(certs) if item.lower() not in used]
+    used.update(item.lower() for item in certs)
     skills = [item for item in _unique_terms(skills) if item.lower() not in used]
     chosen: list[str] = []
     seen: set[str] = set()
-    cert_index = 0
-    skill_index = 0
+    buckets = (titles, certs, skills)
+    indexes = [0, 0, 0]
 
     def add(term: str) -> None:
         key = term.lower()
@@ -2274,14 +2313,12 @@ def _balance_terms(certs: list[str], skills: list[str], limit: int) -> list[str]
         seen.add(key)
         chosen.append(term)
 
-    while len(chosen) < limit and (cert_index < len(certs) or skill_index < len(skills)):
-        if cert_index < len(certs):
-            add(certs[cert_index])
-            cert_index += 1
-        if skill_index < len(skills):
-            add(skills[skill_index])
-            skill_index += 1
-    return chosen
+    while len(chosen) < limit and any(indexes[i] < len(buckets[i]) for i in range(3)):
+        for index, bucket in enumerate(buckets):
+            if indexes[index] < len(bucket):
+                add(bucket[indexes[index]])
+                indexes[index] += 1
+    return _append_related(chosen, limit)
 
 
 def _catalog_columns(cur, skills: list[str], certs: list[str]) -> None:
@@ -2333,7 +2370,7 @@ def _catalog_job_skills(cur, skills: list[str]) -> None:
         _collect_term_values(row.get("skills"), skills)
 
 
-def _catalog_candidate_profiles(cur, skills: list[str], certs: list[str]) -> None:
+def _catalog_candidate_profiles(cur, skills: list[str], certs: list[str], titles: list[str]) -> None:
     try:
         cur.execute(f"SELECT profile FROM {CANDIDATES_TABLE} LIMIT 500")
         rows = cur.fetchall() or []
@@ -2344,6 +2381,48 @@ def _catalog_candidate_profiles(cur, skills: list[str], certs: list[str]) -> Non
         profile = _profile_from_cell(row.get("profile")) or {}
         _collect_term_values(profile.get("skills"), skills)
         _collect_term_values(profile.get("certifications"), certs)
+        for job in profile.get("work_history") or []:
+            if isinstance(job, dict):
+                title = _title_search_term(job.get("job_title") or job.get("title"))
+                if title:
+                    titles.append(title)
+
+
+def _catalog_experience_titles(cur, titles: list[str]) -> None:
+    """Past job titles from every user's experience rows."""
+    try:
+        cur.execute(
+            """
+            SELECT DISTINCT c.TABLE_NAME AS table_name, c.COLUMN_NAME AS title_column
+            FROM information_schema.COLUMNS c
+            WHERE c.TABLE_SCHEMA = DATABASE()
+              AND c.COLUMN_NAME IN ('job_title', 'title', 'position', 'role', 'role_title')
+            """
+        )
+        columns = list(cur.fetchall() or [])
+    except Exception:
+        log.exception("experience title catalog failed")
+        return
+    seen: set[str] = set()
+    for column in columns:
+        table = str(column.get("table_name") or "")
+        title_col = str(column.get("title_column") or "")
+        if not _EXPERIENCE_TABLE.search(table) or table in seen:
+            continue
+        if not _IDENT_RE.fullmatch(table) or not _IDENT_RE.fullmatch(title_col):
+            continue
+        seen.add(table)
+        try:
+            cur.execute(
+                f"SELECT DISTINCT {_quote_ident(title_col)} AS title FROM {_quote_ident(table)} "
+                f"WHERE {_quote_ident(title_col)} IS NOT NULL LIMIT 40"
+            )
+            for row in cur.fetchall() or []:
+                title = _title_search_term(row.get("title"))
+                if title:
+                    titles.append(title)
+        except Exception:
+            log.exception("experience title read failed on %s", table)
 
 
 def _catalog_posting_terms(cur, skills: list[str], certs: list[str]) -> None:
@@ -2368,10 +2447,10 @@ def _catalog_posting_terms(cur, skills: list[str], certs: list[str]) -> None:
 
 
 def catalog_search_terms(limit: int = 40) -> list[str]:
-    """Skills and certifications already stored in this database.
+    """Skills, certifications, and past job titles already stored in this database.
 
     The scheduled scrape searches these instead of a fixed skill list.
-    Experience is not a search term; recommend uses it only to rank.
+    Titles are included so a role such as Product Manager is searched on the boards.
     """
     if not mysql_configured():
         return []
@@ -2381,6 +2460,7 @@ def catalog_search_terms(limit: int = 40) -> list[str]:
         cap = 40
     skills: list[str] = []
     certs: list[str] = []
+    titles: list[str] = []
     try:
         conn = get_conn()
         if conn is None:
@@ -2388,15 +2468,22 @@ def catalog_search_terms(limit: int = 40) -> list[str]:
         with conn.cursor() as cur:
             _catalog_columns(cur, skills, certs)
             _catalog_job_skills(cur, skills)
-            _catalog_candidate_profiles(cur, skills, certs)
-            if len(_unique_terms(skills)) + len(_unique_terms(certs)) < 8:
+            _catalog_candidate_profiles(cur, skills, certs, titles)
+            _catalog_experience_titles(cur, titles)
+            if len(_unique_terms(skills)) + len(_unique_terms(certs)) + len(_unique_terms(titles)) < 8:
                 _catalog_posting_terms(cur, skills, certs)
     except Exception:
         log.exception("catalog search terms failed")
         close_conn()
         return []
-    terms = _balance_terms(certs, skills, cap)
-    log.info("Database search terms skills=%s certifications=%s using=%s", len(set(skills)), len(set(certs)), len(terms))
+    terms = _balance_terms(certs, skills, cap, titles)
+    log.info(
+        "Database search terms skills=%s certifications=%s titles=%s using=%s",
+        len(set(skills)),
+        len(set(certs)),
+        len(set(titles)),
+        len(terms),
+    )
     return terms
 
 

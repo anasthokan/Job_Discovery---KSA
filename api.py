@@ -64,6 +64,7 @@ from jobscraper.recommend import (
     normalize_skills,
     parse_skill_query,
     recommend_jobs,
+    search_phrase,
 )
 from jobscraper.linkedin_profile import LinkedInProfileError, autofill_from_linkedin
 from jobscraper.profile_autofill import autofill_from_parsed
@@ -159,17 +160,17 @@ def _store_last_scrape(*, ok: bool, error: str | None, count: int, db_total: int
 def _keywords_for_scrape(keywords: str) -> str:
     """Ignore an empty SCRAPE_KEYWORDS value and search the database instead.
 
-    Experience is not a search term. Only skills and certifications already
-    stored in MySQL are used. The old fixed role list is not a fallback.
+    Skills, certifications, and past job titles already stored in MySQL are used.
+    The old fixed role list is not a fallback.
     """
     text = (keywords or "").strip()
     if text:
         return text
     terms = catalog_search_terms(limit=80)
     if terms:
-        log.info("SCRAPE_KEYWORDS is empty. Searching %s skills and certifications from the database", len(terms))
+        log.info("SCRAPE_KEYWORDS is empty. Searching %s skills, certifications, and titles from the database", len(terms))
         return ",".join(terms)
-    log.warning("SCRAPE_KEYWORDS is empty and the database has no skills or certifications. Scrape skipped.")
+    log.warning("SCRAPE_KEYWORDS is empty and the database has no skills, certifications, or job titles. Scrape skipped.")
     return ""
 
 
@@ -186,7 +187,7 @@ def scheduled_scrape() -> None:
         if not keywords:
             _store_last_scrape(
                 ok=False,
-                error="SCRAPE_KEYWORDS is empty and the database has no skills or certifications.",
+                error="SCRAPE_KEYWORDS is empty and the database has no skills, certifications, or job titles.",
                 count=0,
                 db_total=mysql_job_count() if mysql_configured() else 0,
             )
@@ -591,9 +592,9 @@ def load_jobs_json() -> list[dict]:
     return payload if isinstance(payload, list) else []
 
 
-def load_jobs() -> list[dict]:
+def load_jobs(description_chars: int = 800) -> list[dict]:
     if mysql_configured():
-        rows = load_jobs_mysql()
+        rows = load_jobs_mysql(description_chars=description_chars)
         if rows:
             return rows
     annotated = []
@@ -913,18 +914,29 @@ def _profile_match_inputs(
     return skills, normalize_skills(certs), titles, years
 
 
-def _scrape_terms(skills: list[str], certifications: list[str]) -> list[str]:
+def _scrape_terms(
+    skills: list[str],
+    certifications: list[str],
+    experience_titles: list[str] | None = None,
+) -> list[str]:
+    """Titles first, then certifications and skills. Related names fill leftover slots."""
+    from jobscraper.jd_to_cv import SKILL_RELATED
+
     terms: list[str] = []
     seen: set[str] = set()
-    for term in [*certifications, *skills]:
-        text = str(term or "").strip()
-        key = text.lower()
-        if not text or key in seen:
-            continue
-        seen.add(key)
+
+    def add(raw) -> None:
+        text = search_phrase(str(raw or ""))
+        if not text or text.lower() in seen or len(terms) >= 40:
+            return
+        seen.add(text.lower())
         terms.append(text)
-        if len(terms) >= 12:
-            break
+
+    for term in [*(experience_titles or []), *certifications, *skills]:
+        add(term)
+    for term in list(terms):
+        for related in SKILL_RELATED.get(term.lower(), ()):
+            add(related)
     return terms
 
 
@@ -948,19 +960,19 @@ def _recommend_payload(
         profile, skills, certifications, experience_titles, years
     )
     if refresh:
-        terms = _scrape_terms(skills, certifications)
+        terms = _scrape_terms(skills, certifications, experience_titles)
         if terms:
             if not SCRAPE_LOCK.acquire(blocking=False):
                 raise HTTPException(status_code=409, detail="A scrape is already running. Try again in a moment.")
             try:
-                run_spider(",".join(terms), state, platform, city)
+                run_spider(",".join(terms), state, platform, city, _scrape_target())
             except subprocess.TimeoutExpired as exc:
                 raise HTTPException(status_code=504, detail="Job scrape timed out.") from exc
             finally:
                 SCRAPE_LOCK.release()
     list_state = "All" if profile is not None and (not state or state == "All") else state
     list_city = "" if profile is not None and not city else city
-    pool = load_jobs()
+    pool = load_jobs(description_chars=4000)
     filtered = filter_jobs(pool, [], list_state, platform, days, list_city)
     if profile is not None:
         filtered = filter_jobs_for_candidate(filtered, profile, state=state, city=city)
@@ -1056,8 +1068,9 @@ def run_spider(keywords: str, location: str, platform: str, city: str = "", targ
         "-s",
         "LOG_LEVEL=INFO",
     ]
-    # A 5,000-job run searches about 40 roles on 4 boards and can take one to two hours.
-    timeout = 10800 if target >= 1000 else SCRAPE_TIMEOUT
+    # Each term now reads three pages and four cities. A full run can take a few hours.
+    # Jobs are saved after every page, so a timeout still keeps what was found.
+    timeout = 14400 if target >= 1000 else SCRAPE_TIMEOUT
     try:
         result = subprocess.run(
             cmd,
@@ -1466,7 +1479,7 @@ def _scrape_background(keywords: str, state: str, platform: str, city: str, targ
         if not keywords:
             _store_last_scrape(
                 ok=False,
-                error="SCRAPE_KEYWORDS is empty and the database has no skills or certifications.",
+                error="SCRAPE_KEYWORDS is empty and the database has no skills, certifications, or job titles.",
                 count=0,
                 db_total=mysql_job_count() if mysql_configured() else 0,
             )
@@ -1643,7 +1656,7 @@ def recommend_roles(
             status_code=400,
             detail="Send skills, certifications, or experience titles. Example: skills=Python,FastAPI&certifications=PMP.",
         )
-    pool = load_jobs()
+    pool = load_jobs(description_chars=4000)
     filtered = filter_jobs(pool, [], state, platform, days, city)
     filtered = apply_listing_filters(
         filtered,

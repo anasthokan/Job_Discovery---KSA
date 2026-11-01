@@ -14,6 +14,12 @@ from jobscraper.locations import muse_location, normalize_scraped_location, pars
 
 HTML_RE = re.compile(r"<[^>]+>")
 NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
+# The first page is about 20 listings and was already saved yesterday.
+# Read two further pages, then the same search in the cities with the most roles.
+_PAGE_OFFSETS = (0, 100, 200)
+_EXTRA_CITIES = ("Riyadh", "Jeddah", "Dammam", "Khobar")
+_RESULTS_WANTED = 100
+_HOURS_OLD = 24 * 180
 SYNONYMS = {
     "developer": ("developer", "engineer", "dev"),
     "engineer": ("engineer", "developer", "dev"),
@@ -130,6 +136,24 @@ class JobsSpider(scrapy.Spider):
             return hint
         return f"{hint}, Saudi Arabia"
 
+    def _search_places(self) -> list[str]:
+        """One city when the caller named one. Otherwise the country, then the main cities."""
+        if self.city:
+            hint = muse_location(self.city, self.location)
+            if hint and hint != "Remote":
+                if "saudi" in hint.lower():
+                    return [hint]
+                return [f"{hint}, Saudi Arabia"]
+        primary = self._search_location()
+        if self.location not in ("All", "", None):
+            return [primary]
+        places = [primary]
+        for city in _EXTRA_CITIES:
+            place = f"{city}, Saudi Arabia"
+            if place.casefold() not in {item.casefold() for item in places}:
+                places.append(place)
+        return places
+
     def errback(self, failure):
         self.logger.warning("Source request failed: %s", failure.value)
 
@@ -188,76 +212,96 @@ class JobsSpider(scrapy.Spider):
             return
         if not self.keywords:
             self.logger.warning(
-                "No search terms. An empty keyword list is ignored, and the database has no skills or certifications."
+                "No search terms. An empty keyword list is ignored, and the database has no skills, certifications, or job titles."
             )
             return
         queries = self._search_queries()
-        where = self._search_location()
+        places = self._search_places()
         remote = self.location == "Remote"
-        if self.target >= 1000:
-            max_terms = len(queries)
-            results_wanted = 100
-            hours_old = 24 * 180
-        else:
-            single_board = self.platform != "All"
-            max_terms = len(queries)
-            results_wanted = 40 if single_board else 20
-            hours_old = 720
-        queries = queries[:max_terms]
         self.logger.info(
-            "Searching %s roles on %s boards, %s listings each",
+            "Searching %s terms in %s places on %s boards, %s listings per page (target %s)",
             len(queries),
+            len(places),
             len(sites),
-            results_wanted,
+            _RESULTS_WANTED,
+            self.target,
         )
         saved = 0
+        seen: set[str] = set()
         for index, term in enumerate(queries, start=1):
-            self.logger.info("Search %s/%s: %s", index, len(queries), term)
-            try:
-                rows = await asyncio.to_thread(
-                    scrape_jobspy,
-                    [term],
-                    where,
-                    sites,
-                    is_remote=remote,
-                    results_wanted=results_wanted,
-                    max_terms=1,
-                    hours_old=hours_old,
-                )
-            except Exception:
-                self.logger.exception("JobSpy scrape failed for %s", term)
-                continue
-            batch = []
-            for row in rows:
-                location = row.get("location") or ""
-                for item in self._emit(
-                    id=row["id"],
-                    title=row["title"],
-                    company=row["company"],
-                    skills=row.get("skills") or [],
-                    state=parse_state(location),
-                    location=location,
-                    platform=row["platform"],
-                    daysAgo=days_ago(row.get("platform_posted_at") or row.get("posted_at")),
-                    url=row["url"],
-                    posted_at=row.get("posted_at") or "",
-                    platform_posted_at=row.get("platform_posted_at") or row.get("posted_at") or "",
-                    job_type=row.get("job_type"),
-                    search_text=row.get("search_text") or "",
-                    raw=row.get("raw"),
-                ):
-                    batch.append(dict(item))
-            if not batch:
-                self.logger.info("No kept jobs for %s", term)
-                continue
-            try:
-                from jobscraper.db import note_scrape_progress, upsert_jobs
+            for place_index, where in enumerate(places):
+                # Deeper pages for the country search. Cities add a different first page.
+                offsets = _PAGE_OFFSETS if place_index == 0 else (0,)
+                for page_offset in offsets:
+                    self.logger.info(
+                        "Search %s/%s %r at %s offset %s",
+                        index,
+                        len(queries),
+                        term,
+                        where,
+                        page_offset,
+                    )
+                    try:
+                        rows = await asyncio.to_thread(
+                            scrape_jobspy,
+                            [term],
+                            where,
+                            sites,
+                            is_remote=remote,
+                            results_wanted=_RESULTS_WANTED,
+                            max_terms=1,
+                            hours_old=_HOURS_OLD,
+                            offset=page_offset,
+                        )
+                    except Exception:
+                        self.logger.exception("JobSpy scrape failed for %s", term)
+                        continue
+                    if not rows:
+                        self.logger.info("No jobs returned for %s at %s offset %s", term, where, page_offset)
+                        if place_index == 0:
+                            break
+                        continue
+                    batch = []
+                    for row in rows:
+                        row_id = str(row.get("id") or "")
+                        if not row_id or row_id in seen:
+                            continue
+                        seen.add(row_id)
+                        location = row.get("location") or ""
+                        for item in self._emit(
+                            id=row["id"],
+                            title=row["title"],
+                            company=row["company"],
+                            skills=row.get("skills") or [],
+                            state=parse_state(location),
+                            location=location,
+                            platform=row["platform"],
+                            daysAgo=days_ago(row.get("platform_posted_at") or row.get("posted_at")),
+                            url=row["url"],
+                            posted_at=row.get("posted_at") or "",
+                            platform_posted_at=row.get("platform_posted_at") or row.get("posted_at") or "",
+                            job_type=row.get("job_type"),
+                            search_text=row.get("search_text") or "",
+                            raw=row.get("raw"),
+                        ):
+                            batch.append(dict(item))
+                    if not batch:
+                        self.logger.info("No kept jobs for %s at %s offset %s", term, where, page_offset)
+                        continue
+                    try:
+                        from jobscraper.db import note_scrape_progress, upsert_jobs
 
-                upsert_jobs(batch)
-                saved += len(batch)
-                note_scrape_progress(saved)
-                self.logger.info("Saved %s jobs for %s (running total %s)", len(batch), term, saved)
-            except Exception:
-                self.logger.exception("MySQL save failed for %s", term)
-            for item in batch:
-                yield item
+                        upsert_jobs(batch)
+                        saved += len(batch)
+                        note_scrape_progress(saved)
+                        self.logger.info(
+                            "Saved %s jobs for %s at %s (running total %s)",
+                            len(batch),
+                            term,
+                            where,
+                            saved,
+                        )
+                    except Exception:
+                        self.logger.exception("MySQL save failed for %s", term)
+                    for item in batch:
+                        yield item

@@ -91,6 +91,24 @@ _LEAD = re.compile(r"\b(lead|principal|staff)\b", re.I)
 _SENIOR = re.compile(r"\b(senior|sr\.?)\b", re.I)
 
 
+def search_phrase(value: str, *, max_words: int = 8) -> str | None:
+    """A board query. Generic seniority words alone are not a search."""
+    text = " ".join(str(value or "").replace(",", " ").split()).strip(" ,;|/-")
+    words = text.split()
+    if len(words) > max_words:
+        text = " ".join(words[:max_words])
+    if len(text) < 2 or len(text) > 80:
+        return None
+    tokens = [
+        part
+        for part in re.findall(r"[a-z0-9+#]+", text.lower())
+        if part not in _TITLE_GENERIC and len(part) > 1
+    ]
+    if not tokens:
+        return None
+    return text
+
+
 def normalize_skills(raw: list[str] | None) -> list[str]:
     seen: set[str] = set()
     out: list[str] = []

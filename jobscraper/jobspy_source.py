@@ -112,16 +112,25 @@ def scrape(
     sites: list[str],
     *,
     is_remote: bool = False,
-    results_wanted: int = 20,
+    results_wanted: int = 100,
     max_terms: int = 4,
     hours_old: int = 720,
+    offset: int = 0,
 ) -> list[dict]:
-    """Return Saudi job dicts. Empty list if JobSpy is missing or every site fails."""
+    """Return Saudi job dicts. Empty list if JobSpy is missing or every site fails.
+
+    `offset` skips that many listings so the caller can read the next page.
+    Bayt ignores offset, so a later page is not requested there again.
+    """
     if not sites:
         return []
     terms = [term.strip() for term in search_terms if term and term.strip()][:max_terms]
     if not terms:
         return []
+    try:
+        page_offset = max(0, int(offset or 0))
+    except (TypeError, ValueError):
+        page_offset = 0
     try:
         from jobspy import scrape_jobs
     except ImportError:
@@ -129,16 +138,20 @@ def scrape(
         return []
 
     found: list[dict] = []
+    seen: set[str] = set()
     where = location or "Saudi Arabia"
     # One site per call. JobSpy cancels the whole search when one board throws,
     # and Glassdoor has no Saudi Arabia domain.
     for site in sites:
+        if site == "bayt" and page_offset:
+            continue
         for term in terms:
             kwargs = {
                 "site_name": [site],
                 "search_term": term,
                 "location": where,
                 "results_wanted": results_wanted,
+                "offset": page_offset,
                 "country_indeed": "saudi arabia",
                 "verbose": 0,
                 "description_format": "markdown",
@@ -156,7 +169,12 @@ def scrape(
                 continue
             if frame is None or getattr(frame, "empty", True):
                 continue
-            found.extend(rows_to_jobs(frame.to_dict("records")))
+            for job in rows_to_jobs(frame.to_dict("records")):
+                job_id = str(job.get("id") or "")
+                if not job_id or job_id in seen:
+                    continue
+                seen.add(job_id)
+                found.append(job)
     return _fill_short_descriptions(found)
 
 
