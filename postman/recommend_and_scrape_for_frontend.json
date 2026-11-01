@@ -1,7 +1,7 @@
 {
   "title": "EzyJob KSA — Recommend and scrape (for frontend)",
   "base_url": "https://agentsksa.atozeesolutions.com",
-  "note": "Same endpoints as before. No new path. Recommend still requires a skill, certification, or experience match, but page 1 is the latest post first (platform time). Match score only breaks ties. If SCRAPE_KEYWORDS in .env is empty, that setting is ignored. The scrape searches skills and certifications stored in MySQL, not a fixed role list. Experience is used only to rank, not to search boards.",
+  "note": "Same endpoints as before. No new path. Most relevant is the best skill match posted hours ago or 1 day ago. A 3-day-old role stays in the list but comes after those. If SCRAPE_KEYWORDS in .env is empty, that setting is ignored. The scrape searches skills and certifications stored in MySQL, not a fixed role list. Experience is used only to rank, not to search boards.",
   "scrape": {
     "start": {
       "method": "POST",

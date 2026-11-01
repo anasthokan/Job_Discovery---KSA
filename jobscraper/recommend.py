@@ -10,6 +10,8 @@ from jobscraper.resume_parser import SKILL_CANONICAL
 
 DEFAULT_LIMIT = 25
 MAX_LIMIT = 100
+# "6 hours ago" and "1 day ago" stay in the Most relevant band. "2 days ago" starts here.
+FRESH_SECONDS = 2 * 86400
 
 _TITLE_NOISE = {
     "a",
@@ -119,8 +121,10 @@ def recommend_jobs(
     years: int | None = None,
     limit: int | None = DEFAULT_LIMIT,
 ) -> list[dict]:
-    """Rank every positive match. Newest platform post time is page 1; score breaks ties.
+    """Rank every positive match. Most relevant is the best match from the last day.
 
+    Jobs posted hours ago or 1 day ago come before a 3-day-old role, even when the
+    older role scores higher. Inside that day, match score decides the order.
     `limit=None` keeps the full set; an int keeps the top N (max 100).
     """
     wanted = _usable_terms(skills)
@@ -140,14 +144,19 @@ def recommend_jobs(
         if match["score"] <= 0:
             continue
         ranked.append({**job, "match": match})
+    for row in ranked:
+        row["_age"] = _posted_age_seconds(row)
     ranked.sort(
         key=lambda row: (
-            _posted_age_seconds(row),
+            0 if row["_age"] < FRESH_SECONDS else 1,
             -row["match"]["score"],
             -(1 if row["match"].get("experience_fit") == "match" else 0),
+            row["_age"],
             row.get("title") or "",
         )
     )
+    for row in ranked:
+        row.pop("_age", None)
     if limit is None:
         return ranked
     return ranked[:_clamp_limit(limit)]
@@ -331,10 +340,9 @@ def _experience_points(job: dict, titles: list[str], years: int | None) -> tuple
 
 
 def _posted_age_seconds(job: dict) -> float:
-    """Seconds since the platform post. Smaller is newer, so page 1 is the latest job.
+    """Seconds since the platform post. Smaller is newer.
 
-    Whole-day `daysAgo` is only a fallback. A job posted 21 hours ago and a job
-    posted 3 days ago can both look "recent" if we sort on match score first.
+    Whole-day `daysAgo` is only a fallback when the platform time is missing.
     """
     raw = job.get("platform_posted_at") or job.get("platformPostedAt") or job.get("posted_at")
     stamp = _parse_posted(raw)
