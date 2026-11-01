@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 
 from jobscraper.jd_to_cv import SKILL_RELATED
 from jobscraper.resume_parser import SKILL_CANONICAL
@@ -118,7 +119,10 @@ def recommend_jobs(
     years: int | None = None,
     limit: int | None = DEFAULT_LIMIT,
 ) -> list[dict]:
-    """Rank every positive match. `limit=None` keeps the full set; an int keeps the top N (max 100)."""
+    """Rank every positive match. Newest platform post time is page 1; score breaks ties.
+
+    `limit=None` keeps the full set; an int keeps the top N (max 100).
+    """
     wanted = _usable_terms(skills)
     certs = _usable_terms(certifications)
     titles = _clean_titles(experience_titles)
@@ -138,9 +142,9 @@ def recommend_jobs(
         ranked.append({**job, "match": match})
     ranked.sort(
         key=lambda row: (
+            _posted_age_seconds(row),
             -row["match"]["score"],
             -(1 if row["match"].get("experience_fit") == "match" else 0),
-            row.get("daysAgo") or 0,
             row.get("title") or "",
         )
     )
@@ -324,6 +328,41 @@ def _experience_points(job: dict, titles: list[str], years: int | None) -> tuple
         if fit == "unknown":
             fit = "match"
     return points, fit
+
+
+def _posted_age_seconds(job: dict) -> float:
+    """Seconds since the platform post. Smaller is newer, so page 1 is the latest job.
+
+    Whole-day `daysAgo` is only a fallback. A job posted 21 hours ago and a job
+    posted 3 days ago can both look "recent" if we sort on match score first.
+    """
+    raw = job.get("platform_posted_at") or job.get("platformPostedAt") or job.get("posted_at")
+    stamp = _parse_posted(raw)
+    if stamp is not None:
+        return max(0.0, (datetime.now(timezone.utc) - stamp).total_seconds())
+    raw_days = job.get("daysAgo")
+    if isinstance(raw_days, str):
+        return float("inf")
+    try:
+        return max(int(raw_days or 0), 0) * 86400.0
+    except (TypeError, ValueError):
+        return float("inf")
+
+
+def _parse_posted(value) -> datetime | None:
+    if isinstance(value, datetime):
+        posted = value
+    elif value:
+        cleaned = str(value).strip().replace("Z", "+00:00")
+        try:
+            posted = datetime.fromisoformat(cleaned)
+        except ValueError:
+            return None
+    else:
+        return None
+    if posted.tzinfo is None:
+        posted = posted.replace(tzinfo=timezone.utc)
+    return posted
 
 
 def _clamp_limit(limit: int) -> int:

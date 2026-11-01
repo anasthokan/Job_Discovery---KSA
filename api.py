@@ -60,6 +60,7 @@ from jobscraper.locations import (
 from jobscraper.recommend import (
     DEFAULT_LIMIT,
     MAX_LIMIT,
+    _posted_age_seconds,
     normalize_skills,
     parse_skill_query,
     recommend_jobs,
@@ -1818,6 +1819,7 @@ def recommend_for_candidate(
     filtered = filter_jobs(pool, [], "All" if not state or state == "All" else state, platform, days, "" if not city else city)
     if profile is not None:
         filtered = filter_jobs_for_candidate(filtered, profile, state=state, city=city)
+    filtered.sort(key=lambda row: (_posted_age_seconds(row), row.get("title") or ""))
     start = (page - 1) * limit
     rows = filtered[start : start + limit]
     hint = "No skills are stored for this user, so these are the latest listings."
