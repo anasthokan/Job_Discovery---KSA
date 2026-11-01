@@ -15,6 +15,13 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+from urllib.parse import urlparse
+
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 from jobscraper.candidates import (
     career_years,
@@ -214,24 +221,76 @@ def message_for(job: dict, match: dict) -> str:
     return "\n".join(lines)
 
 
+def _auth_headers() -> dict[str, str]:
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    key = _env("WHATSAPP_API_KEY")
+    if not key:
+        return headers
+    header = _env("WHATSAPP_API_KEY_HEADER", "X-API-Key") or "X-API-Key"
+    if header.lower() == "authorization" and not key.lower().startswith("bearer "):
+        key = "Bearer " + key
+    headers[header] = key
+    return headers
+
+
+def _note_failure(detail: str) -> None:
+    log.warning("%s", detail)
+    try:
+        path = Path(__file__).resolve().parent.parent / "data" / "whatsapp-alerts.log"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(f"{stamp} {detail}\n")
+    except Exception:
+        log.exception("Could not write WhatsApp alert log")
+
+
+def _send_url() -> str:
+    """Prefer the names already in the server .env: WHATSAPP_API_URL, then WHATSAPP_SEND_URL."""
+    raw = _env("WHATSAPP_API_URL") or _env("WHATSAPP_SEND_URL") or DEFAULT_SEND_URL
+    raw = raw.strip().rstrip("/")
+    path = urlparse(raw).path
+    if path and path not in {"/"}:
+        return raw
+    return raw + "/sessions/Intellirestro/send-message"
+
+
+def _send_body(number: str, message: str, url: str) -> dict:
+    if url.rstrip("/").endswith("/send-text"):
+        chat = number if "@" in number else f"{number}@c.us"
+        return {"chatId": chat, "text": message}
+    return {"number": number, "message": message}
+
+
 def send_whatsapp(number: str, message: str) -> bool:
-    url = _env("WHATSAPP_SEND_URL", DEFAULT_SEND_URL)
-    body = json.dumps({"number": number, "message": message}, ensure_ascii=False).encode("utf-8")
-    request = urllib.request.Request(
-        url,
-        data=body,
-        headers={"Content-Type": "application/json", "Accept": "application/json"},
-        method="POST",
-    )
+    url = _send_url()
+    if not _env("WHATSAPP_API_KEY"):
+        _note_failure("WhatsApp send skipped: WHATSAPP_API_KEY is empty and the gateway returns 401")
+        return False
+    body = json.dumps(_send_body(number, message, url), ensure_ascii=False).encode("utf-8")
+    request = urllib.request.Request(url, data=body, headers=_auth_headers(), method="POST")
     try:
         with urllib.request.urlopen(request, timeout=15) as response:
-            return 200 <= int(response.status) < 300
+            raw = response.read()[:500]
+            if not (200 <= int(response.status) < 300):
+                _note_failure(f"WhatsApp send failed status={response.status} body={raw!r}")
+                return False
+            if raw:
+                try:
+                    payload = json.loads(raw.decode("utf-8", "ignore"))
+                except json.JSONDecodeError:
+                    payload = None
+                if isinstance(payload, dict) and payload.get("success") is False:
+                    _note_failure(f"WhatsApp gateway rejected the message: {payload}")
+                    return False
+            return True
     except urllib.error.HTTPError as exc:
         detail = exc.read()[:300]
-        log.warning("WhatsApp send failed status=%s body=%s", exc.code, detail)
+        _note_failure(f"WhatsApp send failed status={exc.code} body={detail!r}")
         return False
     except Exception:
         log.exception("WhatsApp send failed for %s", number)
+        _note_failure(f"WhatsApp send failed for {number}")
         return False
 
 
