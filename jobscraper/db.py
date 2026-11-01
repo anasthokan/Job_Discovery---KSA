@@ -594,6 +594,9 @@ def init_db() -> bool:
             cur.execute(CREATE_RUNS_SQL)
             cur.execute(CREATE_COMPANIES_SQL)
             cur.execute(CREATE_CANDIDATES_SQL)
+            from jobscraper.whatsapp_alerts import CREATE_ALERTS_SQL
+
+            cur.execute(CREATE_ALERTS_SQL)
             _ensure_job_columns(cur)
         log.info("MySQL ready (%s/%s)", cfg["host"], cfg["database"])
         return True
@@ -1322,7 +1325,39 @@ def _company_ids(cur, names: dict[str, str]) -> dict[str, int]:
     return found
 
 
-def upsert_jobs(jobs: list[dict]) -> int:
+def _chunks(values: list[str], size: int):
+    for start in range(0, len(values), size):
+        yield values[start : start + size]
+
+
+def _known_listings(cur, rows: list[dict]) -> tuple[set[str], set[str]]:
+    """Source ids and URLs already stored. A repeat scrape must not alert again."""
+    known_ids: set[str] = set()
+    known_urls: set[str] = set()
+    source_ids = [row["source_id"] for row in rows if row.get("source_id")]
+    urls = [row["url"] for row in rows if row.get("url")]
+    for chunk in _chunks(source_ids, 200):
+        marks = ", ".join(["%s"] * len(chunk))
+        cur.execute(
+            f"SELECT source_id FROM {JOBS_TABLE} WHERE source_id IN ({marks})",
+            chunk,
+        )
+        for hit in cur.fetchall() or []:
+            if hit.get("source_id"):
+                known_ids.add(str(hit["source_id"]))
+    for chunk in _chunks(urls, 100):
+        marks = ", ".join(["%s"] * len(chunk))
+        cur.execute(
+            f"SELECT url FROM {JOBS_TABLE} WHERE url IN ({marks})",
+            chunk,
+        )
+        for hit in cur.fetchall() or []:
+            if hit.get("url"):
+                known_urls.add(str(hit["url"]))
+    return known_ids, known_urls
+
+
+def upsert_jobs(jobs: list[dict], *, notify: bool = True) -> int:
     if not jobs or not mysql_configured():
         return 0
     rows = [row for row in (_row_from_item(job) for job in jobs) if row]
@@ -1338,9 +1373,21 @@ def upsert_jobs(jobs: list[dict]) -> int:
     conn = get_conn()
     if conn is None:
         return 0
+    fresh: list[dict] = []
     try:
         with _LOCK:
             with conn.cursor() as cur:
+                if notify:
+                    try:
+                        known_ids, known_urls = _known_listings(cur, rows)
+                        fresh = [
+                            row
+                            for row in rows
+                            if row["source_id"] not in known_ids and row["url"] not in known_urls
+                        ]
+                    except Exception:
+                        log.exception("Could not detect new jobs for WhatsApp alerts")
+                        fresh = []
                 _default_omitted_columns(cur)
                 company_ids = _company_ids(
                     cur,
@@ -1374,11 +1421,18 @@ def upsert_jobs(jobs: list[dict]) -> int:
                     for row in rows
                 ]
                 _write_row(cur, _upsert_sql(cur), payload, table=JOBS_TABLE, many=True)
-        return len(rows)
     except Exception:
         close_conn()
         log.exception("MySQL upsert failed")
         raise
+    if fresh:
+        try:
+            from jobscraper.whatsapp_alerts import queue_job_alerts
+
+            queue_job_alerts(fresh)
+        except Exception:
+            log.exception("Could not queue WhatsApp alerts")
+    return len(rows)
 
 
 def _parse_skills(value) -> list[str]:
@@ -2214,6 +2268,7 @@ _CATALOG_SKIP_TABLES = {
     "job_discovery_scrape_runs",
     "job_discovery_everify_employers",
     "job_discovery_h1b_sponsors",
+    "job_whatsapp_alerts",
 }
 
 
@@ -2628,7 +2683,7 @@ def import_json_if_empty(path: Path) -> int:
     except (OSError, json.JSONDecodeError):
         return 0
     jobs = payload if isinstance(payload, list) else []
-    saved = upsert_jobs(jobs)
+    saved = upsert_jobs(jobs, notify=False)
     if saved:
         log.info("Imported %s jobs from %s", saved, path)
     return saved
