@@ -874,6 +874,12 @@ def _startup_maintenance() -> None:
     except Exception:
         log.exception("Startup maintenance failed")
     start_dice_description_backfill()
+    try:
+        from jobscraper.whatsapp_alerts import queue_recent_unsent
+
+        queue_recent_unsent()
+    except Exception:
+        log.exception("WhatsApp catch-up failed")
 
 
 def start_startup_maintenance() -> None:
@@ -1379,12 +1385,8 @@ def upsert_jobs(jobs: list[dict], *, notify: bool = True) -> int:
             with conn.cursor() as cur:
                 if notify:
                     try:
-                        known_ids, known_urls = _known_listings(cur, rows)
-                        fresh = [
-                            row
-                            for row in rows
-                            if row["source_id"] not in known_ids and row["url"] not in known_urls
-                        ]
+                        known_ids, _known_urls = _known_listings(cur, rows)
+                        fresh = [row for row in rows if row["source_id"] not in known_ids]
                     except Exception:
                         log.exception("Could not detect new jobs for WhatsApp alerts")
                         fresh = []

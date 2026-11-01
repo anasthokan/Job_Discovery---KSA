@@ -167,6 +167,45 @@ def queue_job_alerts(rows: list[dict]) -> None:
         _ensure_timer()
 
 
+def queue_recent_unsent(hours: int = 2) -> None:
+    """Send matches for jobs touched since the last restart, once each.
+
+    A description fill can put an older row into recommend without a new insert.
+    Those rows were saved before this alert existed, so the insert hook never saw them.
+    """
+    if not alerts_enabled():
+        return
+    from jobscraper.db import JOBS_TABLE, get_conn
+
+    conn = get_conn()
+    if conn is None:
+        return
+    try:
+        with conn.cursor() as cur:
+            ensure_alert_table(cur)
+            cur.execute(
+                f"""
+                SELECT source_id, title, company, skills, state, location, platform, url,
+                       description, job_type, work_model, experience_level, years_experience,
+                       visa_sponsorship, saudi_national_required, posted_at, platform_posted_at
+                FROM {JOBS_TABLE}
+                WHERE updated_at >= UTC_TIMESTAMP() - INTERVAL %s HOUR
+                   OR first_seen_at >= UTC_TIMESTAMP() - INTERVAL %s HOUR
+                ORDER BY updated_at DESC
+                LIMIT 100
+                """,
+                (hours, hours),
+            )
+            rows = list(cur.fetchall() or [])
+    except Exception:
+        log.exception("WhatsApp catch-up query failed")
+        _note("WhatsApp catch-up query failed")
+        return
+    _note(f"WhatsApp catch-up found {len(rows)} recent jobs")
+    if rows:
+        queue_job_alerts(rows)
+
+
 def _ensure_timer() -> None:
     global _timer
     if _timer is not None and _timer.is_alive():
@@ -226,14 +265,26 @@ def _auth_headers() -> dict[str, str]:
     key = _env("WHATSAPP_API_KEY")
     if not key:
         return headers
-    header = _env("WHATSAPP_API_KEY_HEADER", "X-API-Key") or "X-API-Key"
+    header = _env("WHATSAPP_API_KEY_HEADER", "x-api-key") or "x-api-key"
     if header.lower() == "authorization" and not key.lower().startswith("bearer "):
         key = "Bearer " + key
     headers[header] = key
     return headers
 
 
-def _note_failure(detail: str) -> None:
+_PHONE_COLUMNS = (
+    "whatsapp",
+    "whatsapp_number",
+    "phone",
+    "phone_number",
+    "mobile",
+    "mobile_number",
+    "contact_number",
+)
+_CODE_COLUMNS = ("phone_country_code", "phone_code", "country_code", "dial_code")
+
+
+def _note(detail: str) -> None:
     log.warning("%s", detail)
     try:
         path = Path(__file__).resolve().parent.parent / "data" / "whatsapp-alerts.log"
@@ -265,7 +316,7 @@ def _send_body(number: str, message: str, url: str) -> dict:
 def send_whatsapp(number: str, message: str) -> bool:
     url = _send_url()
     if not _env("WHATSAPP_API_KEY"):
-        _note_failure("WhatsApp send skipped: WHATSAPP_API_KEY is empty and the gateway returns 401")
+        _note("WhatsApp send skipped: WHATSAPP_API_KEY is empty and the gateway returns 401")
         return False
     body = json.dumps(_send_body(number, message, url), ensure_ascii=False).encode("utf-8")
     request = urllib.request.Request(url, data=body, headers=_auth_headers(), method="POST")
@@ -273,7 +324,7 @@ def send_whatsapp(number: str, message: str) -> bool:
         with urllib.request.urlopen(request, timeout=15) as response:
             raw = response.read()[:500]
             if not (200 <= int(response.status) < 300):
-                _note_failure(f"WhatsApp send failed status={response.status} body={raw!r}")
+                _note(f"WhatsApp send failed status={response.status} body={raw!r}")
                 return False
             if raw:
                 try:
@@ -281,16 +332,16 @@ def send_whatsapp(number: str, message: str) -> bool:
                 except json.JSONDecodeError:
                     payload = None
                 if isinstance(payload, dict) and payload.get("success") is False:
-                    _note_failure(f"WhatsApp gateway rejected the message: {payload}")
+                    _note(f"WhatsApp gateway rejected the message: {payload}")
                     return False
             return True
     except urllib.error.HTTPError as exc:
         detail = exc.read()[:300]
-        _note_failure(f"WhatsApp send failed status={exc.code} body={detail!r}")
+        _note(f"WhatsApp send failed status={exc.code} body={detail!r}")
         return False
     except Exception:
         log.exception("WhatsApp send failed for %s", number)
-        _note_failure(f"WhatsApp send failed for {number}")
+        _note(f"WhatsApp send failed for {number}")
         return False
 
 
@@ -320,6 +371,25 @@ def _recipient_from_profile(profile: dict, phone: str) -> dict | None:
     }
 
 
+def _named_column(names: set[str], choices: tuple[str, ...]) -> str:
+    for name in choices:
+        if name in names:
+            return name
+    return ""
+
+
+def _table_columns(cur, table: str) -> set[str]:
+    cur.execute(
+        """
+        SELECT COLUMN_NAME AS name
+        FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s
+        """,
+        (table,),
+    )
+    return {str(row.get("name") or "") for row in cur.fetchall() or []}
+
+
 def _load_recipients() -> list[dict]:
     from jobscraper.db import CANDIDATES_TABLE, get_conn, load_app_user
 
@@ -336,20 +406,15 @@ def _load_recipients() -> list[dict]:
             cur.execute("SHOW TABLES LIKE 'profiles'")
             has_profiles = bool(cur.fetchone())
             if has_users and has_profiles:
-                cur.execute("SHOW COLUMNS FROM profiles LIKE 'phone'")
-                if cur.fetchone():
-                    code_col = ""
-                    for name in ("phone_country_code", "phone_code", "country_code"):
-                        cur.execute("SHOW COLUMNS FROM profiles LIKE %s", (name,))
-                        if cur.fetchone():
-                            code_col = name
-                            break
+                columns = _table_columns(cur, "profiles")
+                number_col = _named_column(columns, _PHONE_COLUMNS)
+                code_col = _named_column(columns, _CODE_COLUMNS)
+                if number_col:
                     code_sql = f", p.`{code_col}` AS phone_code" if code_col else ", '' AS phone_code"
                     cur.execute(
-                        "SELECT u.id AS user_id, p.phone AS phone"
-                        f"{code_sql} FROM users u "
-                        "JOIN profiles p ON p.user_id = u.id "
-                        "WHERE p.phone IS NOT NULL AND TRIM(p.phone) <> ''"
+                        f"SELECT u.id AS user_id, p.`{number_col}` AS phone {code_sql} "
+                        "FROM users u JOIN profiles p ON p.user_id = u.id "
+                        f"WHERE p.`{number_col}` IS NOT NULL AND TRIM(p.`{number_col}`) <> ''"
                     )
                     user_rows = list(cur.fetchall() or [])
             cur.execute(f"SHOW TABLES LIKE '{CANDIDATES_TABLE}'")
@@ -358,6 +423,7 @@ def _load_recipients() -> list[dict]:
                 candidate_rows = list(cur.fetchall() or [])
     except Exception:
         log.exception("Could not list WhatsApp alert recipients")
+        _note("WhatsApp alerts skipped: could not read user phones")
         return []
 
     recipients: list[dict] = []
@@ -454,7 +520,7 @@ def deliver_job_alerts(jobs: list[dict]) -> int:
         return 0
     recipients = _cached_recipients()
     if not recipients:
-        log.info("WhatsApp alerts skipped: no users with a phone and a matchable profile")
+        _note(f"WhatsApp alerts skipped for {len(jobs)} jobs: no user with a phone and skills")
         return 0
 
     from jobscraper.db import get_conn
@@ -513,6 +579,5 @@ def deliver_job_alerts(jobs: list[dict]) -> int:
         return sent
     if failed:
         queue_job_alerts(failed)
-    if sent:
-        log.info("WhatsApp alerts sent %s message(s) for %s new job(s)", sent, len(jobs))
+    _note(f"WhatsApp alerts sent {sent} message(s) for {len(jobs)} job(s) to {len(recipients)} user(s)")
     return sent
