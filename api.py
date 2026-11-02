@@ -44,6 +44,7 @@ from jobscraper.document_convert import (
 )
 from jobscraper.jd_to_cv import JobToCvError, build_cv_from_job
 from jobscraper.globaljobs import globaljobs_status, interval_minutes as globaljobs_interval, sync_global_jobs
+from jobscraper.headcount import headcount_status, interval_minutes as headcount_interval, scheduled as headcount_scheduled, sync_headcount
 from jobscraper.job_fields import (
     EXPERIENCE_LEVELS,
     WORK_MODELS,
@@ -252,6 +253,18 @@ def _start_scheduler() -> BackgroundScheduler | None:
             max_instances=1,
             coalesce=True,
             misfire_grace_time=60,
+            next_run_time=datetime.now(tz),
+        )
+    if headcount_scheduled():
+        scheduler.add_job(
+            sync_headcount,
+            "interval",
+            minutes=headcount_interval(),
+            id="headcount-labs",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=300,
             next_run_time=datetime.now(tz),
         )
     scheduler.start()
@@ -1290,6 +1303,7 @@ def health():
             "target": _scrape_target(),
         },
         "globaljobs": globaljobs_status(),
+        "headcount": headcount_status(),
     }
 
 
@@ -1316,6 +1330,7 @@ def filters():
             "Google Jobs",
             "Bayt",
             "Dev Global Jobs",
+            "Headcount Labs",
         ],
         "days": [0, 1, 3, 7],
         "work_models": list(WORK_MODELS),
@@ -1520,6 +1535,7 @@ def scrape_status():
             "platform": _env("SCRAPE_PLATFORM", "All") or "All",
         },
         "globaljobs": globaljobs_status(),
+        "headcount": headcount_status(),
         **cache_meta(),
     }
 

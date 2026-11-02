@@ -110,6 +110,8 @@ Use this when the cache is empty or stale. Then call `/api/jobs` or `/api/recomm
 
 A second feed, Dev Global Jobs, runs every minute (`GLOBALJOBS_INTERVAL_MINUTES`) for `country=sa`. Each listing is loaded by id so the full description is stored. The job URL stays on devglobaljobs.com. Their limit is 120 requests per minute per IP. This feed uses at most 100. Show a visible "Powered by Dev Global Jobs" link wherever those rows are displayed.
 
+Headcount Labs is a third feed (`platform` = `Headcount Labs`) for current Saudi jobs from company career pages. It runs only when `HEADCOUNT_API_KEY` is set, on the free allowance: 100,000 records per UTC month, stopping at 95,000. The first run loads the Saudi catalog. Later runs load only jobs changed since the last watermark. The global changes feed is not used. Apply links are the employer posting URLs. `GET /api/health` and `GET /api/scrape/status` include a `headcount` object with this month's usage.
+
 ## Visa and Saudization
 
 Each listing includes `visa_sponsorship` (`yes`, `no`, or `unknown`) and `saudi_national_required` (`yes` or `no`). These are read from the posting. There is no E-Verify or H-1B field.
