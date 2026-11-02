@@ -167,7 +167,7 @@ def queue_job_alerts(rows: list[dict]) -> None:
         _ensure_timer()
 
 
-def queue_recent_unsent(hours: int = 2) -> None:
+def queue_recent_unsent(hours: int = 24) -> None:
     """Send matches for jobs touched since the last restart, once each.
 
     A description fill can put an older row into recommend without a new insert.
@@ -189,10 +189,10 @@ def queue_recent_unsent(hours: int = 2) -> None:
                        description, job_type, work_model, experience_level, years_experience,
                        visa_sponsorship, saudi_national_required, posted_at, platform_posted_at
                 FROM {JOBS_TABLE}
-                WHERE updated_at >= UTC_TIMESTAMP() - INTERVAL %s HOUR
-                   OR first_seen_at >= UTC_TIMESTAMP() - INTERVAL %s HOUR
-                ORDER BY updated_at DESC
-                LIMIT 100
+                WHERE first_seen_at >= UTC_TIMESTAMP() - INTERVAL %s HOUR
+                   OR updated_at >= UTC_TIMESTAMP() - INTERVAL %s HOUR
+                ORDER BY first_seen_at DESC
+                LIMIT 400
                 """,
                 (hours, hours),
             )
@@ -529,18 +529,20 @@ def deliver_job_alerts(jobs: list[dict]) -> int:
     if conn is None:
         return 0
     minimum = max(1, _int_env("WHATSAPP_MIN_SCORE", 1))
-    per_flush = max(1, _int_env("WHATSAPP_MAX_PER_FLUSH", 5))
-    per_day = max(1, _int_env("WHATSAPP_MAX_PER_DAY", 15))
+    per_flush = max(1, _int_env("WHATSAPP_MAX_PER_FLUSH", 30))
+    # 0 means every matching job is sent. A positive number is a daily cap.
+    per_day = _int_env("WHATSAPP_MAX_PER_DAY", 0)
     sent = 0
     failed: list[dict] = []
+    waiting: list[dict] = []
     try:
         with conn.cursor() as cur:
             ensure_alert_table(cur)
             for person in recipients:
                 phone = person["phone"]
                 already = _sent_ids(cur, phone, [job["source_id"] for job in jobs])
-                room = per_day - _sent_today(cur, phone)
-                if room <= 0:
+                room = None if per_day <= 0 else per_day - _sent_today(cur, phone)
+                if room is not None and room <= 0:
                     continue
                 matched: list[tuple[int, dict, dict]] = []
                 for job in jobs:
@@ -559,7 +561,10 @@ def deliver_job_alerts(jobs: list[dict]) -> int:
                         continue
                     matched.append((int(match["score"]), job, match))
                 matched.sort(key=lambda item: (-item[0], item[1].get("title") or ""))
-                for _score, job, match in matched[: min(per_flush, room)]:
+                take = per_flush if room is None else min(per_flush, room)
+                for _score, job, _match in matched[take:]:
+                    waiting.append(job)
+                for _score, job, match in matched[:take]:
                     if send_whatsapp(phone, message_for(job, match)):
                         try:
                             _mark_sent(cur, phone, job["source_id"])
@@ -579,5 +584,10 @@ def deliver_job_alerts(jobs: list[dict]) -> int:
         return sent
     if failed:
         queue_job_alerts(failed)
-    _note(f"WhatsApp alerts sent {sent} message(s) for {len(jobs)} job(s) to {len(recipients)} user(s)")
+    if waiting:
+        queue_job_alerts(waiting)
+    _note(
+        f"WhatsApp alerts sent {sent} message(s) for {len(jobs)} job(s) "
+        f"to {len(recipients)} user(s); {len(waiting)} still queued"
+    )
     return sent
