@@ -1002,7 +1002,7 @@ def _fill_short_dice_descriptions() -> tuple[int, int]:
                 f"OR (platform = 'LinkedIn' AND TIME(platform_posted_at) = '00:00:00')"
                 f")"
                 f") OR ("
-                f"platform = 'Headcount Labs' "
+                f"platform IN ('Headcount Labs', 'Greenhouse', 'Lever', 'SmartRecruiters', 'Workday') "
                 f"AND (CHAR_LENGTH(description) < 400 OR description = title)"
                 f")"
                 f") "
@@ -1052,7 +1052,7 @@ def _fill_short_dice_descriptions() -> tuple[int, int]:
                 break
         if gone:
             continue
-        if platform == "Headcount Labs" and details.get("supported") is False:
+        if platform in {"Headcount Labs", "Greenhouse", "Lever", "SmartRecruiters", "Workday"} and details.get("supported") is False:
             try:
                 with conn.cursor() as cur:
                     _mark_description_unavailable(cur, int(row["id"]))

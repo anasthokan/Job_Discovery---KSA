@@ -43,6 +43,7 @@ from jobscraper.document_convert import (
     preview_text_from_docx,
 )
 from jobscraper.jd_to_cv import JobToCvError, build_cv_from_job
+from jobscraper.ats_boards import ats_boards_status, interval_minutes as ats_boards_interval, sync_ats_boards
 from jobscraper.globaljobs import globaljobs_status, interval_minutes as globaljobs_interval, sync_global_jobs
 from jobscraper.headcount import headcount_status, interval_minutes as headcount_interval, scheduled as headcount_scheduled, sync_headcount
 from jobscraper.job_fields import (
@@ -265,6 +266,18 @@ def _start_scheduler() -> BackgroundScheduler | None:
             max_instances=1,
             coalesce=True,
             misfire_grace_time=300,
+            next_run_time=datetime.now(tz),
+        )
+    if _truthy("ATS_BOARDS_ENABLED", "true"):
+        scheduler.add_job(
+            sync_ats_boards,
+            "interval",
+            minutes=ats_boards_interval(),
+            id="ats-boards",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=600,
             next_run_time=datetime.now(tz),
         )
     scheduler.start()
@@ -1304,6 +1317,7 @@ def health():
         },
         "globaljobs": globaljobs_status(),
         "headcount": headcount_status(),
+        "ats_boards": ats_boards_status(),
     }
 
 
@@ -1331,6 +1345,10 @@ def filters():
             "Bayt",
             "Dev Global Jobs",
             "Headcount Labs",
+            "Greenhouse",
+            "Lever",
+            "SmartRecruiters",
+            "Workday",
         ],
         "days": [0, 1, 3, 7],
         "work_models": list(WORK_MODELS),
@@ -1536,6 +1554,7 @@ def scrape_status():
         },
         "globaljobs": globaljobs_status(),
         "headcount": headcount_status(),
+        "ats_boards": ats_boards_status(),
         **cache_meta(),
     }
 

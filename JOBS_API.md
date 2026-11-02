@@ -112,6 +112,8 @@ A second feed, Dev Global Jobs, runs every minute (`GLOBALJOBS_INTERVAL_MINUTES`
 
 Headcount Labs is a third feed (`platform` = `Headcount Labs`) for current Saudi jobs from company career pages. It runs only when `HEADCOUNT_API_KEY` is set, on the free allowance: 100,000 records per UTC month, stopping at 95,000. The first run loads the Saudi catalog. Later runs load only jobs changed since the last watermark. The global changes feed is not used. Apply links are the employer posting URLs. `GET /api/health` and `GET /api/scrape/status` include a `headcount` object with this month's usage.
 
+Greenhouse, Lever, SmartRecruiters, and Workday are a fourth feed. Each site is a company career board, not a Saudi-wide search, so the sync reads a fixed list of employer boards and keeps postings located in Saudi Arabia. Apply links are the employer posting URLs. Platform values are `Greenhouse`, `Lever`, `SmartRecruiters`, and `Workday`. The sync runs every six hours (`ATS_BOARDS_INTERVAL_MINUTES`). `GET /api/health` and `GET /api/scrape/status` include an `ats_boards` object.
+
 ## Visa and Saudization
 
 Each listing includes `visa_sponsorship` (`yes`, `no`, or `unknown`) and `saudi_national_required` (`yes` or `no`). These are read from the posting. There is no E-Verify or H-1B field.

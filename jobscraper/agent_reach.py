@@ -710,7 +710,7 @@ def fetch_posting_details(platform: str, url: str) -> dict:
         return empty
     name = platform or ""
     headers = dict(DICE_HEADERS)
-    if name == "Headcount Labs":
+    if name in {"Headcount Labs", "Greenhouse", "Lever", "SmartRecruiters", "Workday"}:
         try:
             text, supported = career_description(target)
         except Exception:
