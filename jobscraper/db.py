@@ -949,6 +949,19 @@ def _wait_before_next_fill(seconds: int) -> None:
         time.sleep(2)
 
 
+def _mark_description_unavailable(cur, row_id: int) -> None:
+    """Stop retrying a Headcount row whose employer page has no readable description."""
+    marker = '{"description_unavailable":true}'
+    cur.execute(
+        f"UPDATE {JOBS_TABLE} SET raw_description = IF("
+        f"JSON_VALID(raw_description) AND CHAR_LENGTH(raw_description) > 2 "
+        f"AND CAST(raw_description AS CHAR) NOT LIKE %s, "
+        f"JSON_MERGE_PATCH(raw_description, %s), %s) "
+        f"WHERE id = %s",
+        ('%"api_id"%', marker, marker, row_id),
+    )
+
+
 def _mark_posting_missing(cur, row_id: int) -> None:
     """Remember a removed posting so the refill does not request it every pass."""
     marker = '{"posting_missing":true}'
@@ -976,17 +989,25 @@ def _fill_short_dice_descriptions() -> tuple[int, int]:
             cur.execute(
                 f"SELECT id, url, title, platform, location, state, job_type, platform_posted_at "
                 f"FROM {JOBS_TABLE} "
-                f"WHERE platform IN ('LinkedIn', 'Bayt', 'Indeed') "
-                f"AND TRIM(url) <> '' "
+                f"WHERE TRIM(url) <> '' "
                 f"AND url NOT LIKE %s "
+                f"AND CAST(raw_description AS CHAR) NOT LIKE %s "
+                f"AND CAST(raw_description AS CHAR) NOT LIKE %s "
+                f"AND ("
+                f"("
+                f"platform IN ('LinkedIn', 'Bayt', 'Indeed') "
                 f"AND ("
                 f"CHAR_LENGTH(description) < 400 OR description = title "
                 f"OR platform_posted_at IS NULL "
                 f"OR (platform = 'LinkedIn' AND TIME(platform_posted_at) = '00:00:00')"
+                f")"
+                f") OR ("
+                f"platform = 'Headcount Labs' "
+                f"AND (CHAR_LENGTH(description) < 400 OR description = title)"
+                f")"
                 f") "
-                f"AND CAST(raw_description AS CHAR) NOT LIKE %s "
                 f"ORDER BY id DESC",
-                ("%example.com%", "%posting_missing%"),
+                ("%example.com%", "%posting_missing%", "%description_unavailable%"),
             )
             rows = list(cur.fetchall() or [])
     except Exception:
@@ -1030,6 +1051,13 @@ def _fill_short_dice_descriptions() -> tuple[int, int]:
                 details = {"description": "", "platform_posted_at": ""}
                 break
         if gone:
+            continue
+        if platform == "Headcount Labs" and details.get("supported") is False:
+            try:
+                with conn.cursor() as cur:
+                    _mark_description_unavailable(cur, int(row["id"]))
+            except Exception:
+                log.exception("Could not skip description for %s", url)
             continue
         text = str(details.get("description") or "")
         platform_posted = str(details.get("platform_posted_at") or "")

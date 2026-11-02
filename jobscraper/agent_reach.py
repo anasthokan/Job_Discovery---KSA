@@ -637,6 +637,69 @@ def smartrecruiters_description(payload: dict) -> str:
     return posting_paragraph(" ".join(parts))
 
 
+_WORKDAY_JOB_RE = re.compile(
+    r"https?://(?P<tenant>[a-z0-9-]+)\.(?P<cluster>wd\d+)\.myworkdayjobs\.com/"
+    r"(?:(?P<locale>[a-z]{2}(?:-[a-zA-Z]{2})?)/)?(?P<site>[A-Za-z0-9_]+)(?P<path>/[^?#]*)",
+    re.I,
+)
+_GREENHOUSE_JOB_RE = re.compile(r"greenhouse\.io/([^/?#]+)/jobs/(\d+)", re.I)
+_LEVER_JOB_RE = re.compile(r"jobs\.lever\.co/([^/?#]+)/([0-9a-f-]{36})", re.I)
+_SMARTRECRUITERS_JOB_RE = re.compile(r"smartrecruiters\.com/([^/?#]+)/([^/?#]+)", re.I)
+
+
+def _read_json(url: str) -> dict | None:
+    import urllib.request
+
+    request = urllib.request.Request(
+        url,
+        headers={"Accept": "application/json", "User-Agent": DICE_HEADERS["User-Agent"]},
+    )
+    with urllib.request.urlopen(request, timeout=25) as response:
+        payload = json.loads(response.read().decode("utf-8", "ignore"))
+    return payload if isinstance(payload, dict) else None
+
+
+def career_description(url: str) -> tuple[str, bool]:
+    """Plain posting text from the employer page. The bool is false when the host is unknown."""
+    target = (url or "").strip()
+    workday = _WORKDAY_JOB_RE.search(target)
+    if workday:
+        path = workday.group("path").rstrip("/")
+        endpoint = (
+            f"https://{workday.group('tenant')}.{workday.group('cluster')}.myworkdayjobs.com"
+            f"/wday/cxs/{workday.group('tenant')}/{workday.group('site')}{path}"
+        )
+        payload = _read_json(endpoint) or {}
+        html_body = str((payload.get("jobPostingInfo") or {}).get("jobDescription") or "")
+        return _html_to_text(html_body), True
+    greenhouse = _GREENHOUSE_JOB_RE.search(target)
+    if greenhouse:
+        endpoint = (
+            "https://boards-api.greenhouse.io/v1/boards/"
+            f"{greenhouse.group(1)}/jobs/{greenhouse.group(2)}"
+        )
+        payload = _read_json(endpoint) or {}
+        return _html_to_text(str(payload.get("content") or "")), True
+    lever = _LEVER_JOB_RE.search(target)
+    if lever:
+        endpoint = f"https://api.lever.co/v0/postings/{lever.group(1)}/{lever.group(2)}"
+        payload = _read_json(endpoint) or {}
+        parts = [str(payload.get("descriptionPlain") or payload.get("description") or "")]
+        for item in payload.get("lists") or []:
+            if isinstance(item, dict):
+                parts.append(str(item.get("text") or ""))
+                parts.append(str(item.get("content") or ""))
+        return _html_to_text("\n".join(parts)), True
+    smart = _SMARTRECRUITERS_JOB_RE.search(target)
+    if smart:
+        endpoint = (
+            "https://api.smartrecruiters.com/v1/companies/"
+            f"{smart.group(1)}/postings/{smart.group(2)}"
+        )
+        return smartrecruiters_description(_read_json(endpoint) or {}), True
+    return "", False
+
+
 def fetch_posting_details(platform: str, url: str) -> dict:
     """Load the source posting. Returns description plus platform_posted_at when found."""
     import urllib.request
@@ -647,6 +710,12 @@ def fetch_posting_details(platform: str, url: str) -> dict:
         return empty
     name = platform or ""
     headers = dict(DICE_HEADERS)
+    if name == "Headcount Labs":
+        try:
+            text, supported = career_description(target)
+        except Exception:
+            return {"description": "", "platform_posted_at": "", "supported": True}
+        return {"description": text, "platform_posted_at": "", "supported": supported}
     if name == "Dice":
         target = dice_detail_url(target)
     if name == "LinkedIn":
