@@ -11,7 +11,7 @@ from jobscraper.resume_parser import SKILL_CANONICAL
 DEFAULT_LIMIT = 25
 MAX_LIMIT = 100
 # All Matches only returns a job when the blend score is at least this.
-MIN_MATCH_SCORE = 50
+MIN_MATCH_SCORE = 35
 # "6 hours ago" and "1 day ago" stay in the Most relevant band. "2 days ago" starts here.
 FRESH_SECONDS = 2 * 86400
 
@@ -141,9 +141,9 @@ def recommend_jobs(
     years: int | None = None,
     limit: int | None = DEFAULT_LIMIT,
 ) -> list[dict]:
-    """Rank matches of 50 or higher. Most relevant is the best match from the last day.
+    """Rank matches of 35 or higher. Most relevant is the best match from the last day.
 
-    A score below 50 is left out of the list. Jobs posted hours ago or 1 day ago
+    A score below 35 is left out of the list. Jobs posted hours ago or 1 day ago
     come before a 3-day-old role, even when the older role scores higher. Inside
     that day, match score decides the order. `limit=None` keeps the full set;
     an int keeps the top N (max 100).
@@ -228,12 +228,6 @@ def score_job(
         has_titles=bool(titles),
         year_points=year_points if matched_titles or skill_points >= 4 or cert_points else 0,
     )
-    # Phrase skills such as "Go-to-Market Strategy" rarely appear word for word.
-    # A job whose role matches the user's title, such as Product Manager with
-    # Product Manager, still clears 50. One shared word, such as Product
-    # Specialist against Product Manager, does not.
-    if matched_titles:
-        score = max(score, MIN_MATCH_SCORE)
     return {
         "score": score,
         "matched_skills": matched,
@@ -319,39 +313,10 @@ def _tokens(value: str) -> set[str]:
     return {part for part in re.findall(r"[a-z0-9+#]+", value.lower()) if part not in _TITLE_NOISE and len(part) > 1}
 
 
-# Seniority only. Manager, specialist, director, and consultant stay, so
-# "Product Specialist" is not treated as the same role as "Product Manager".
-_TITLE_SENIORITY = _TITLE_NOISE | {
-    "acting",
-    "associate",
-    "executive",
-    "global",
-    "group",
-    "interim",
-    "intern",
-    "internship",
-    "jr",
-    "junior",
-    "lead",
-    "leader",
-    "leading",
-    "level",
-    "mid",
-    "principal",
-    "regional",
-    "senior",
-    "sr",
-    "staff",
-    "team",
-    "vice",
-    "vp",
-}
-
-
 def _title_overlap(candidate_title: str, job_title: str) -> bool:
-    left = _tokens(candidate_title) - _TITLE_SENIORITY
-    right = _tokens(job_title) - _TITLE_SENIORITY
-    if len(left) < 2 or len(right) < 2:
+    left = _tokens(candidate_title) - _TITLE_GENERIC
+    right = _tokens(job_title) - _TITLE_GENERIC
+    if not left or not right:
         return False
     if left <= right or right <= left:
         return True
