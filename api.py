@@ -1050,8 +1050,8 @@ def _recommend_payload(
         hint = _empty_cache_hint()
     elif not ranked_all:
         hint = (
-            "Listings were found, but none matched these skills, certifications, or experience. "
-            "Try refresh=true."
+            "Listings were found, but none scored 50 or higher against these skills, "
+            "certifications, or experience. Try refresh=true."
         )
     payload = {
         "ok": True,
@@ -1819,7 +1819,10 @@ def recommend_roles(
     elif not filtered:
         hint = "No listings matched these filters."
     elif not ranked_all:
-        hint = "Listings were found, but none matched these skills, certifications, or experience."
+        hint = (
+            "Listings were found, but none scored 50 or higher against these skills, "
+            "certifications, or experience."
+        )
     return {
         "ok": True,
         "skills": found,

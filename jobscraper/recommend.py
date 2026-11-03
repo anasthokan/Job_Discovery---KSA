@@ -10,6 +10,8 @@ from jobscraper.resume_parser import SKILL_CANONICAL
 
 DEFAULT_LIMIT = 25
 MAX_LIMIT = 100
+# All Matches only returns a job when the blend score is at least this.
+MIN_MATCH_SCORE = 50
 # "6 hours ago" and "1 day ago" stay in the Most relevant band. "2 days ago" starts here.
 FRESH_SECONDS = 2 * 86400
 
@@ -139,11 +141,12 @@ def recommend_jobs(
     years: int | None = None,
     limit: int | None = DEFAULT_LIMIT,
 ) -> list[dict]:
-    """Rank every positive match. Most relevant is the best match from the last day.
+    """Rank matches of 50 or higher. Most relevant is the best match from the last day.
 
-    Jobs posted hours ago or 1 day ago come before a 3-day-old role, even when the
-    older role scores higher. Inside that day, match score decides the order.
-    `limit=None` keeps the full set; an int keeps the top N (max 100).
+    A score below 50 is left out of the list. Jobs posted hours ago or 1 day ago
+    come before a 3-day-old role, even when the older role scores higher. Inside
+    that day, match score decides the order. `limit=None` keeps the full set;
+    an int keeps the top N (max 100).
     """
     wanted = _usable_terms(skills)
     certs = _usable_terms(certifications)
@@ -159,7 +162,7 @@ def recommend_jobs(
             experience_titles=titles,
             years=years,
         )
-        if match["score"] <= 0:
+        if match["score"] < MIN_MATCH_SCORE:
             continue
         ranked.append({**job, "match": match})
     for row in ranked:
