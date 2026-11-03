@@ -228,6 +228,10 @@ def score_job(
         has_titles=bool(titles),
         year_points=year_points if matched_titles or skill_points >= 4 or cert_points else 0,
     )
+    # A long skill list used to keep a real role under 50. The user's own title
+    # plus three of their skills is enough to show in All Matches.
+    if matched_titles and len(matched) >= 3:
+        score = max(score, MIN_MATCH_SCORE)
     return {
         "score": score,
         "matched_skills": matched,

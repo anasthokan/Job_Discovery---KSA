@@ -177,7 +177,7 @@ def _keywords_for_scrape(keywords: str) -> str:
     text = (keywords or "").strip()
     if text:
         return text
-    terms = catalog_search_terms(limit=80)
+    terms = catalog_search_terms(limit=120)
     if terms:
         log.info("SCRAPE_KEYWORDS is empty. Searching %s skills, certifications, and titles from the database", len(terms))
         return ",".join(terms)

@@ -187,13 +187,18 @@ def certifications_from_profile(profile: dict) -> list[str]:
 def experience_titles_from_profile(profile: dict) -> list[str]:
     titles: list[str] = []
     seen: set[str] = set()
-    for job in profile.get("work_history") or []:
-        title = str(job.get("job_title") or job.get("title") or "").strip()
+
+    def add(raw) -> None:
+        title = str(raw or "").strip()
         key = title.lower()
-        if len(title) < 2 or key in seen:
-            continue
+        if len(title) < 2 or len(title.split()) > 8 or key in seen:
+            return
         seen.add(key)
         titles.append(title)
+
+    add(profile.get("headline") or profile.get("desired_title") or "")
+    for job in profile.get("work_history") or []:
+        add(job.get("job_title") or job.get("title"))
     return titles
 
 

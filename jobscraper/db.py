@@ -2642,25 +2642,104 @@ def _catalog_posting_terms(cur, skills: list[str], certs: list[str]) -> None:
         certs.extend(certifications_from_profile({"resume_text": blob}))
 
 
+def _recommendation_profile_terms() -> tuple[list[str], list[str], list[str]]:
+    """Titles, skills, and certifications each user is actually scored against.
+
+    These are searched before the general job-skill catalog, so a user with no
+    50+ match still gets their own roles scraped.
+    """
+    from jobscraper.candidates import (
+        certifications_from_profile,
+        experience_titles_from_profile,
+        skills_from_profile,
+    )
+    from jobscraper.recommend import search_phrase
+
+    titles: list[str] = []
+    skills: list[str] = []
+    certs: list[str] = []
+    if not mysql_configured():
+        return titles, skills, certs
+    user_ids: list[str] = []
+    profiles: list[dict] = []
+    try:
+        conn = get_conn()
+        if conn is None:
+            return titles, skills, certs
+        with conn.cursor() as cur:
+            cur.execute("SHOW TABLES LIKE 'users'")
+            if cur.fetchone():
+                cur.execute("SELECT id FROM users")
+                user_ids = [str(row["id"]) for row in cur.fetchall() or [] if row.get("id") is not None]
+            cur.execute(f"SHOW TABLES LIKE '{CANDIDATES_TABLE}'")
+            if cur.fetchone():
+                cur.execute(f"SELECT profile FROM {CANDIDATES_TABLE} LIMIT 500")
+                for row in cur.fetchall() or []:
+                    profile = _profile_from_cell(row.get("profile"))
+                    if profile:
+                        profiles.append(profile)
+    except Exception:
+        log.exception("recommendation profile terms failed")
+        close_conn()
+        return titles, skills, certs
+    for user_id in user_ids:
+        try:
+            profile = load_app_user(user_id)
+        except Exception:
+            log.exception("recommendation terms skipped user %s", user_id)
+            continue
+        if profile:
+            profiles.append(profile)
+    for profile in profiles:
+        role_titles = experience_titles_from_profile(profile)
+        role_skills = skills_from_profile(profile)
+        titles.extend(role_titles)
+        skills.extend(role_skills)
+        certs.extend(certifications_from_profile(profile))
+        if role_titles and role_skills:
+            focused = search_phrase(f"{role_titles[0]} {' '.join(role_skills[:3])}")
+            if focused:
+                titles.append(focused)
+    return titles, skills, certs
+
+
+def _merge_search_terms(*groups: list[str], limit: int) -> list[str]:
+    chosen: list[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        for term in group:
+            key = term.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            chosen.append(term)
+            if len(chosen) >= limit:
+                return chosen
+    return chosen
+
+
 def catalog_search_terms(limit: int = 40) -> list[str]:
     """Skills, certifications, and past job titles already stored in this database.
 
-    The scheduled scrape searches these instead of a fixed skill list.
-    Titles are included so a role such as Product Manager is searched on the boards.
+    Each user's own titles and skills are searched first, so the boards are asked
+    for roles that can clear the recommendation score. The general catalog fills
+    any slots that are left.
     """
     if not mysql_configured():
         return []
     try:
-        cap = max(1, min(int(limit or 40), 80))
+        cap = max(1, min(int(limit or 40), 120))
     except (TypeError, ValueError):
         cap = 40
+    user_titles, user_skills, user_certs = _recommendation_profile_terms()
+    priority = _balance_terms(user_certs, user_skills, cap, user_titles)
     skills: list[str] = []
     certs: list[str] = []
     titles: list[str] = []
     try:
         conn = get_conn()
         if conn is None:
-            return []
+            return priority
         with conn.cursor() as cur:
             _catalog_columns(cur, skills, certs)
             _catalog_job_skills(cur, skills)
@@ -2671,10 +2750,13 @@ def catalog_search_terms(limit: int = 40) -> list[str]:
     except Exception:
         log.exception("catalog search terms failed")
         close_conn()
-        return []
-    terms = _balance_terms(certs, skills, cap, titles)
+        return priority
+    filler = _balance_terms(certs, skills, cap, titles) if len(priority) < cap else []
+    terms = _merge_search_terms(priority, filler, limit=cap)
     log.info(
-        "Database search terms skills=%s certifications=%s titles=%s using=%s",
+        "Database search terms user_titles=%s user_skills=%s skills=%s certifications=%s titles=%s using=%s",
+        len(set(user_titles)),
+        len(set(user_skills)),
         len(set(skills)),
         len(set(certs)),
         len(set(titles)),
