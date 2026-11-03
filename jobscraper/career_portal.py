@@ -22,7 +22,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed, w
 from datetime import datetime, timezone
 from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlparse
 
-from jobscraper.job_fields import infer_listing_fields
+from jobscraper.job_fields import compensation_text, infer_listing_fields
 
 log = logging.getLogger("jobscraper.career")
 
@@ -424,6 +424,7 @@ def _jobs_from_jsonld(page: str, page_url: str, company: str) -> list[dict]:
                 job_type=_employment(node.get("employmentType")),
                 posted_at=str(node.get("datePosted") or ""),
                 description=str(node.get("description") or ""),
+                salary=node.get("baseSalary"),
             )
             if job:
                 jobs.append(job)
@@ -510,7 +511,11 @@ def _slug_hit(company: str) -> dict | None:
 
 
 def _load_ats(info: dict, company: str, *, require_name: bool) -> dict | None:
+    from jobscraper.sources import is_active
+
     provider = info.get("provider") or ""
+    if provider in {"greenhouse", "lever", "smartrecruiters", "workday"} and not is_active(provider):
+        return None
     if provider == "workday":
         return _load_workday(info, company)
     token = str(info.get("token") or "").strip(" /")
@@ -1071,12 +1076,14 @@ def _make_job(
     posted_at: str = "",
     description: str = "",
     days_ago: str = "",
+    salary: object = None,
 ) -> dict | None:
     title = _plain(title, 180)
     url = _clean_url(url)
     if not title or not url:
         return None
     full_description = _plain(description, 2000)
+    salary_text = _plain(description, 12000)
     fields = infer_listing_fields(
         title=title,
         location=location or "",
@@ -1098,6 +1105,7 @@ def _make_job(
         "platform": source,
         "description": _plain(description, 500),
         **fields,
+        "compensation": compensation_text({"baseSalary": salary}, salary_text or full_description),
     }
 
 

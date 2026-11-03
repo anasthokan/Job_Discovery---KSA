@@ -376,6 +376,9 @@ def _load_greenhouse(token: str) -> list[dict]:
             description=content,
         )
         if job:
+            pay = row.get("pay_input_ranges") or row.get("pay_ranges")
+            if pay:
+                job.setdefault("raw", {})["pay_input_ranges"] = pay
             jobs.append(job)
     return jobs
 
@@ -409,6 +412,8 @@ def _load_lever(token: str) -> list[dict]:
             job_type=job_type,
         )
         if job:
+            if isinstance(row.get("salaryRange"), dict):
+                job.setdefault("raw", {})["salaryRange"] = row["salaryRange"]
             jobs.append(job)
     return jobs
 
@@ -580,19 +585,32 @@ def _load_workday(board: dict) -> list[dict]:
 
 
 def collect_jobs() -> list[dict]:
-    """Read every configured board and return Saudi listings."""
+    """Read every active board and return Saudi listings."""
+    from jobscraper.sources import is_active, touch_last_sync
+
     tasks = []
+    ran: list[str] = []
     found: list[dict] = []
     seen: set[str] = set()
     with ThreadPoolExecutor(max_workers=6) as pool:
-        for token in GREENHOUSE:
-            tasks.append(pool.submit(_load_greenhouse, token))
-        for token in LEVER:
-            tasks.append(pool.submit(_load_lever, token))
-        for token, company in SMARTRECRUITERS:
-            tasks.append(pool.submit(_load_smartrecruiters, token, company))
-        for board in WORKDAY:
-            tasks.append(pool.submit(_load_workday, board))
+        if is_active("greenhouse"):
+            ran.append("greenhouse")
+            for token in GREENHOUSE:
+                tasks.append(pool.submit(_load_greenhouse, token))
+        if is_active("lever"):
+            ran.append("lever")
+            for token in LEVER:
+                tasks.append(pool.submit(_load_lever, token))
+        if is_active("smartrecruiters"):
+            ran.append("smartrecruiters")
+            for token, company in SMARTRECRUITERS:
+                tasks.append(pool.submit(_load_smartrecruiters, token, company))
+        if is_active("workday"):
+            ran.append("workday")
+            for board in WORKDAY:
+                tasks.append(pool.submit(_load_workday, board))
+        if not tasks:
+            return []
         for future in as_completed(tasks):
             try:
                 rows = future.result()
@@ -605,12 +623,19 @@ def collect_jobs() -> list[dict]:
                     continue
                 seen.add(key)
                 found.append(job)
+    for source_id in ran:
+        touch_last_sync(source_id)
     return found
 
 
 def sync_ats_boards() -> dict:
     """Pull Saudi jobs from the four ATS boards and upsert them."""
+    from jobscraper.sources import is_active
+
     if not _enabled():
+        return {"ok": True, "saved": 0, "fetched": 0, "skipped": True}
+    if not any(is_active(source_id) for source_id in ("greenhouse", "lever", "smartrecruiters", "workday")):
+        log.info("ATS board sync skipped: greenhouse, lever, smartrecruiters, and workday are inactive")
         return {"ok": True, "saved": 0, "fetched": 0, "skipped": True}
     if not _LOCK.acquire(blocking=False):
         log.info("ATS board sync already running")

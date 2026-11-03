@@ -32,6 +32,8 @@ CREATE TABLE IF NOT EXISTS jobs (
   visa_sponsorship VARCHAR(16) NOT NULL DEFAULT 'unknown',
   clearance_required VARCHAR(16) NOT NULL DEFAULT 'unknown',
   saudi_national_required VARCHAR(16) NOT NULL DEFAULT 'no',
+  compensation VARCHAR(255) NOT NULL DEFAULT 'salary not disclosed',
+  compensation_checked TINYINT(1) NOT NULL DEFAULT 0,
   listing_inferred TINYINT(1) NOT NULL DEFAULT 0,
   PRIMARY KEY (id),
   UNIQUE KEY uk_jobs_public_id (public_id),
@@ -73,4 +75,12 @@ CREATE TABLE IF NOT EXISTS job_discovery_scrape_runs (
   error TEXT NULL,
   PRIMARY KEY (id),
   KEY idx_scrape_runs_started (started_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS job_discovery_sources (
+  id VARCHAR(64) NOT NULL,
+  status VARCHAR(16) NOT NULL DEFAULT 'active',
+  last_sync_at DATETIME(6) NULL,
+  updated_at DATETIME(6) NOT NULL,
+  PRIMARY KEY (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

@@ -561,6 +561,11 @@ def _finish(result: dict) -> dict:
 
 def sync_headcount() -> dict:
     """Pull Saudi Headcount jobs and upsert them. Safe to run from the scheduler."""
+    from jobscraper.sources import is_active, touch_last_sync
+
+    if not is_active("headcount"):
+        log.info("Headcount sync skipped: source is inactive")
+        return _finish({"ok": True, "saved": 0, "fetched": 0, "charged": 0, "mode": None, "error": None, "skipped": "inactive", "at": _utc_now().isoformat()})
     if not _enabled():
         return _finish({"ok": True, "saved": 0, "fetched": 0, "charged": 0, "mode": None, "error": None, "skipped": "disabled", "at": _utc_now().isoformat()})
     if not _api_key():
@@ -613,6 +618,7 @@ def sync_headcount() -> dict:
                 "at": _utc_now().isoformat(),
             })
 
+        touch_last_sync("headcount")
         country = _country()
         base = {"country": country, "currentness": "current"}
         full_count, full_watermark = _count(base, state)

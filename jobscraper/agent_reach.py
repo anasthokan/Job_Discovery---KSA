@@ -704,11 +704,15 @@ def fetch_posting_details(platform: str, url: str) -> dict:
     """Load the source posting. Returns description plus platform_posted_at when found."""
     import urllib.request
 
+    from jobscraper.sources import is_platform_active
+
     empty = {"description": "", "platform_posted_at": ""}
     target = (url or "").strip()
     if not target:
         return empty
     name = platform or ""
+    if not is_platform_active(name):
+        return empty
     headers = dict(DICE_HEADERS)
     if name in {"Headcount Labs", "Greenhouse", "Lever", "SmartRecruiters", "Workday"}:
         try:

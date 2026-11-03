@@ -46,10 +46,19 @@ from jobscraper.jd_to_cv import JobToCvError, build_cv_from_job
 from jobscraper.ats_boards import ats_boards_status, interval_minutes as ats_boards_interval, sync_ats_boards
 from jobscraper.globaljobs import globaljobs_status, interval_minutes as globaljobs_interval, sync_global_jobs
 from jobscraper.headcount import headcount_status, interval_minutes as headcount_interval, scheduled as headcount_scheduled, sync_headcount
+from jobscraper.jobspy_source import board_scrape_block
+from jobscraper.sources import (
+    envelope as source_envelope,
+    get_source,
+    inactive_source_ids,
+    list_sources,
+    set_source_status,
+)
 from jobscraper.job_fields import (
     EXPERIENCE_LEVELS,
     WORK_MODELS,
     apply_listing_filters,
+    compensation_text,
     infer_listing_fields,
 )
 from jobscraper.locations import (
@@ -190,6 +199,16 @@ def scheduled_scrape() -> None:
             _store_last_scrape(
                 ok=False,
                 error="SCRAPE_KEYWORDS is empty and the database has no skills, certifications, or job titles.",
+                count=0,
+                db_total=mysql_job_count() if mysql_configured() else 0,
+            )
+            return
+        blocked = board_scrape_block(platform)
+        if blocked:
+            log.info("Scheduled board scrape skipped: %s", blocked)
+            _store_last_scrape(
+                ok=True,
+                error=None,
                 count=0,
                 db_total=mysql_job_count() if mysql_configured() else 0,
             )
@@ -525,6 +544,10 @@ class CandidateProfile(BaseModel):
     how_heard: str = ""
 
 
+class SourceStatusBody(BaseModel):
+    status: str = Field(..., description="active keeps scraping this source. inactive stops it.")
+
+
 class RecommendRequest(BaseModel):
     candidate_id: str | None = Field(
         None,
@@ -634,6 +657,10 @@ def load_jobs(description_chars: int = 800) -> list[dict]:
         )
         row = dict(job)
         row.update(fields)
+        row["compensation"] = compensation_text(
+            row,
+            row.get("description") or row.get("search_text") or "",
+        )
         annotated.append(row)
     return annotated
 
@@ -1318,6 +1345,7 @@ def health():
         "globaljobs": globaljobs_status(),
         "headcount": headcount_status(),
         "ats_boards": ats_boards_status(),
+        "inactive_sources": inactive_source_ids(),
     }
 
 
@@ -1363,6 +1391,73 @@ def filters():
         "clearance_required": ["yes", "no"],
         "saudi_national_required": ["yes", "no"],
     }
+
+
+@app.get("/api/v1/sources", summary="List job sources and whether each one is scraped")
+def job_sources():
+    """Public source list. status inactive means the scraper skips that source."""
+    return source_envelope("Job sources retrieved.", list_sources())
+
+
+@app.get("/api/v1/sources/{source_id}", summary="One job source")
+def job_source(source_id: str):
+    row = get_source(source_id)
+    if row is None:
+        return JSONResponse(
+            status_code=404,
+            content=source_envelope(
+                "Job source not found.",
+                None,
+                success=False,
+                errors={"id": "Unknown source."},
+            ),
+        )
+    return source_envelope("Job source retrieved.", row)
+
+
+@app.patch("/api/v1/sources/{source_id}", summary="Turn a job source on or off")
+@app.put("/api/v1/sources/{source_id}", summary="Turn a job source on or off")
+def update_job_source(source_id: str, body: SourceStatusBody):
+    """Set status to inactive and the next scrape skips this source. active turns it back on."""
+    cleaned = str(body.status or "").strip().lower()
+    if cleaned not in {"active", "inactive"}:
+        return JSONResponse(
+            status_code=422,
+            content=source_envelope(
+                "Status must be active or inactive.",
+                None,
+                success=False,
+                errors={"status": "Use active or inactive."},
+            ),
+        )
+    try:
+        row = set_source_status(source_id, cleaned)
+    except Exception:
+        log.exception("Could not update job source %s", source_id)
+        return JSONResponse(
+            status_code=500,
+            content=source_envelope(
+                "Could not update the job source.",
+                None,
+                success=False,
+                errors={"status": "Save failed."},
+            ),
+        )
+    if row is None:
+        return JSONResponse(
+            status_code=404,
+            content=source_envelope(
+                "Job source not found.",
+                None,
+                success=False,
+                errors={"id": "Unknown source."},
+            ),
+        )
+    if cleaned == "inactive":
+        message = "Job source is inactive. Jobs are no longer scraped from this source."
+    else:
+        message = "Job source is active. Jobs will be scraped from this source again."
+    return source_envelope(message, row)
 
 
 @app.get("/api/jobs")
@@ -1477,6 +1572,9 @@ def scrape_jobs(
     target: int = Query(0, ge=0, le=20000, description="How many jobs to aim for. 5000 searches many fields and takes one to two hours."),
 ):
     """Start a scrape and return immediately. IIS closes long requests with 502."""
+    blocked = board_scrape_block(platform)
+    if blocked:
+        raise HTTPException(status_code=400, detail=blocked)
     if not SCRAPE_LOCK.acquire(blocking=False):
         raise HTTPException(status_code=409, detail="A scrape is already running. Try again in a moment.")
     thread = threading.Thread(
@@ -1555,6 +1653,7 @@ def scrape_status():
         "globaljobs": globaljobs_status(),
         "headcount": headcount_status(),
         "ats_boards": ats_boards_status(),
+        "inactive_sources": inactive_source_ids(),
         **cache_meta(),
     }
 

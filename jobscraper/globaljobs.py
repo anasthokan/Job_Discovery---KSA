@@ -172,7 +172,12 @@ def pull_records() -> list[dict]:
 
 def sync_global_jobs() -> dict:
     """Pull the feed and upsert it. Safe to run every minute from the scheduler."""
+    from jobscraper.sources import is_active, touch_last_sync
+
     if not _enabled():
+        return {"ok": True, "saved": 0, "fetched": 0, "skipped": True}
+    if not is_active("globaljobs"):
+        log.info("Dev Global Jobs sync skipped: source is inactive")
         return {"ok": True, "saved": 0, "fetched": 0, "skipped": True}
     if not _LOCK.acquire(blocking=False):
         log.info("Dev Global Jobs sync already running")
@@ -180,6 +185,7 @@ def sync_global_jobs() -> dict:
     saved = 0
     fetched = 0
     try:
+        touch_last_sync("globaljobs")
         records = pull_records()
         jobs = [job for job in (_to_job(record) for record in records) if job]
         fetched = len(jobs)

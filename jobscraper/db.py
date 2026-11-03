@@ -65,6 +65,8 @@ CREATE TABLE IF NOT EXISTS {JOBS_TABLE} (
   visa_sponsorship VARCHAR(16) NOT NULL DEFAULT 'unknown',
   clearance_required VARCHAR(16) NOT NULL DEFAULT 'unknown',
   saudi_national_required VARCHAR(16) NOT NULL DEFAULT 'no',
+  compensation VARCHAR(255) NOT NULL DEFAULT 'salary not disclosed',
+  compensation_checked TINYINT(1) NOT NULL DEFAULT 0,
   listing_inferred TINYINT(1) NOT NULL DEFAULT 0,
   PRIMARY KEY (id),
   UNIQUE KEY uk_jobs_public_id (public_id),
@@ -141,6 +143,8 @@ _UPSERT_COLUMNS = {
     "visa_sponsorship",
     "clearance_required",
     "saudi_national_required",
+    "compensation",
+    "compensation_checked",
     "listing_inferred",
     "first_seen_at",
     "last_seen_at",
@@ -328,12 +332,12 @@ INSERT INTO {JOBS_TABLE} (
   public_id, source_id, title, company, company_ref_id, skills, state, location,
   platform, days_ago, url, description, raw_description, posted_at, platform_posted_at, is_active,
   job_type, work_model, experience_level, years_experience, visa_sponsorship, clearance_required,
-  saudi_national_required, listing_inferred, first_seen_at, last_seen_at, created_at, updated_at
+  saudi_national_required, compensation, compensation_checked, listing_inferred, first_seen_at, last_seen_at, created_at, updated_at
 ) VALUES (
   %s, %s, %s, %s, %s, %s, %s, %s,
   %s, %s, %s, %s, %s, %s, %s, 1,
   %s, %s, %s, %s, %s, %s,
-  %s, 1, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), UTC_TIMESTAMP(6)
+  %s, %s, 1, 1, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), UTC_TIMESTAMP(6)
 ) AS new
 ON DUPLICATE KEY UPDATE
   title = new.title,
@@ -393,6 +397,18 @@ ON DUPLICATE KEY UPDATE
   ),
   clearance_required = new.clearance_required,
   saudi_national_required = new.saudi_national_required,
+  compensation = IF(
+    new.compensation <> 'salary not disclosed',
+    new.compensation,
+    IF(
+      {JOBS_TABLE}.compensation IS NULL
+        OR {JOBS_TABLE}.compensation = ''
+        OR {JOBS_TABLE}.compensation = 'salary not disclosed',
+      'salary not disclosed',
+      {JOBS_TABLE}.compensation
+    )
+  ),
+  compensation_checked = 1,
   listing_inferred = 1,
   is_active = 1,
   last_seen_at = UTC_TIMESTAMP(6),
@@ -518,6 +534,8 @@ def _ensure_job_columns(cur) -> None:
         ("years_experience", "SMALLINT NULL"),
         ("visa_sponsorship", "VARCHAR(16) NOT NULL DEFAULT 'unknown'"),
         ("clearance_required", "VARCHAR(16) NOT NULL DEFAULT 'unknown'"),
+        ("compensation", "VARCHAR(255) NOT NULL DEFAULT 'salary not disclosed'"),
+        ("compensation_checked", "TINYINT(1) NOT NULL DEFAULT 0"),
         ("listing_inferred", "TINYINT(1) NOT NULL DEFAULT 0"),
         ("platform_posted_at", "DATETIME(6) NULL"),
     ):
@@ -594,8 +612,10 @@ def init_db() -> bool:
             cur.execute(CREATE_RUNS_SQL)
             cur.execute(CREATE_COMPANIES_SQL)
             cur.execute(CREATE_CANDIDATES_SQL)
+            from jobscraper.sources import CREATE_SOURCES_SQL
             from jobscraper.whatsapp_alerts import CREATE_ALERTS_SQL
 
+            cur.execute(CREATE_SOURCES_SQL)
             cur.execute(CREATE_ALERTS_SQL)
             _ensure_job_columns(cur)
         log.info("MySQL ready (%s/%s)", cfg["host"], cfg["database"])
@@ -781,6 +801,7 @@ def _store_full_description(cur, row: dict, text: str, platform_posted_at: str =
         description=body,
         job_type=row.get("job_type") or "",
     )
+    compensation = _compensation_text({"description": body}, body)
     payload = json.dumps({"jobDescription": body}, ensure_ascii=False)
     cur.execute(
         f"UPDATE {JOBS_TABLE} SET description = %s, "
@@ -792,7 +813,9 @@ def _store_full_description(cur, row: dict, text: str, platform_posted_at: str =
         f"raw_description, %s)), "
         f"work_model = %s, experience_level = %s, years_experience = %s, "
         f"visa_sponsorship = %s, clearance_required = %s, saudi_national_required = %s, "
-        f"job_type = %s, listing_inferred = 1, "
+        f"job_type = %s, "
+        f"compensation = IF(%s <> 'salary not disclosed', %s, compensation), "
+        f"listing_inferred = 1, "
         f"platform_posted_at = IF("
         f"%s IS NULL, platform_posted_at, "
         f"IF(platform_posted_at IS NULL OR TIME(platform_posted_at) = '00:00:00' "
@@ -816,6 +839,8 @@ def _store_full_description(cur, row: dict, text: str, platform_posted_at: str =
             str(fields["clearance_required"] or "unknown")[:16],
             str(fields["saudi_national_required"] or "no")[:16],
             fields["job_type"],
+            compensation,
+            compensation,
             posted,
             posted,
             posted,
@@ -863,6 +888,76 @@ def fill_descriptions_from_raw() -> int:
         return 0
 
 
+def backfill_compensation() -> int:
+    """Read salary from postings saved before compensation existed."""
+    if not mysql_configured():
+        return 0
+    conn = get_conn()
+    if conn is None:
+        return 0
+    updated = 0
+    try:
+        with conn.cursor() as cur:
+            while updated < 8000:
+                cur.execute(
+                    f"""
+                    SELECT id,
+                           LEFT(description, 12000) AS description,
+                           IF(JSON_VALID(raw_description), JSON_UNQUOTE(JSON_EXTRACT(raw_description, '$.min_amount')), NULL) AS min_amount,
+                           IF(JSON_VALID(raw_description), JSON_UNQUOTE(JSON_EXTRACT(raw_description, '$.max_amount')), NULL) AS max_amount,
+                           IF(JSON_VALID(raw_description), JSON_UNQUOTE(JSON_EXTRACT(raw_description, '$.currency')), NULL) AS currency,
+                           IF(JSON_VALID(raw_description), JSON_UNQUOTE(JSON_EXTRACT(raw_description, '$.interval')), NULL) AS salary_interval,
+                           IF(JSON_VALID(raw_description), JSON_EXTRACT(raw_description, '$.pay'), NULL) AS pay,
+                           IF(JSON_VALID(raw_description), JSON_EXTRACT(raw_description, '$.salary'), NULL) AS salary,
+                           IF(JSON_VALID(raw_description), JSON_EXTRACT(raw_description, '$.salaryRange'), NULL) AS salary_range,
+                           IF(JSON_VALID(raw_description), JSON_EXTRACT(raw_description, '$.baseSalary'), NULL) AS base_salary,
+                           IF(JSON_VALID(raw_description), JSON_EXTRACT(raw_description, '$.pay_input_ranges'), NULL) AS pay_input_ranges,
+                           LEFT(IF(JSON_VALID(raw_description), JSON_UNQUOTE(JSON_EXTRACT(raw_description, '$.jobDescription')), ''), 12000) AS job_description
+                    FROM {JOBS_TABLE}
+                    WHERE compensation_checked = 0
+                    ORDER BY id
+                    LIMIT 200
+                    """
+                )
+                rows = list(cur.fetchall() or [])
+                if not rows:
+                    break
+                payload = []
+                for row in rows:
+                    raw = {
+                        "min_amount": row.get("min_amount"),
+                        "max_amount": row.get("max_amount"),
+                        "currency": row.get("currency"),
+                        "interval": row.get("salary_interval"),
+                        "pay": row.get("pay"),
+                        "salary": row.get("salary"),
+                        "salaryRange": row.get("salary_range"),
+                        "baseSalary": row.get("base_salary"),
+                        "pay_input_ranges": row.get("pay_input_ranges"),
+                    }
+                    body = str(row.get("description") or "")
+                    extra = str(row.get("job_description") or "")
+                    text = _compensation_text({"raw": raw, "description": body}, body)
+                    if text == "salary not disclosed" and extra and extra != body:
+                        text = _compensation_text({"raw": raw, "description": extra}, extra)
+                    payload.append((text, row["id"]))
+                cur.executemany(
+                    f"UPDATE {JOBS_TABLE} SET compensation = %s, compensation_checked = 1 "
+                    f"WHERE id = %s AND compensation_checked = 0",
+                    payload,
+                )
+                updated += len(payload)
+                if len(rows) < 200:
+                    break
+        if updated:
+            log.info("Backfilled compensation on %s jobs", updated)
+        return updated
+    except Exception:
+        close_conn()
+        log.exception("Compensation backfill failed")
+        return updated
+
+
 def _startup_maintenance() -> None:
     """Backfill and cleanup after uvicorn is already listening."""
     try:
@@ -870,6 +965,7 @@ def _startup_maintenance() -> None:
         delete_placeholder_jobs()
         fill_descriptions_from_raw()
         backfill_listing_fields()
+        backfill_compensation()
         clear_copied_api_raw_descriptions()
     except Exception:
         log.exception("Startup maintenance failed")
@@ -1020,10 +1116,14 @@ def _fill_short_dice_descriptions() -> tuple[int, int]:
     filled = 0
     retryable = 0
     consecutive_failures = 0
+    from jobscraper.sources import is_platform_active
+
     for row in rows:
+        platform = str(row.get("platform") or "")
+        if not is_platform_active(platform):
+            continue
         time.sleep(1.0)
         url = str(row.get("url") or "").strip()
-        platform = str(row.get("platform") or "")
         if not url or _is_placeholder_url(url):
             continue
         details = {"description": "", "platform_posted_at": ""}
@@ -1127,6 +1227,13 @@ def _posted_mysql(value) -> str | None:
     return stamp or None
 
 
+def _compensation_text(job: dict, description: str) -> str:
+    from jobscraper.job_fields import SALARY_NOT_DISCLOSED, compensation_text
+
+    text = compensation_text(job, description).strip() or SALARY_NOT_DISCLOSED
+    return text[:255]
+
+
 def _listing_fields(job: dict, description: str) -> dict:
     from jobscraper.job_fields import infer_listing_fields
 
@@ -1191,6 +1298,7 @@ _API_JOB_KEYS = {
     "visa_sponsorship",
     "clearance_required",
     "saudi_national_required",
+    "compensation",
     "posted_at",
     "platform_posted_at",
     "platformPostedAt",
@@ -1320,6 +1428,7 @@ def _row_from_item(job: dict) -> dict | None:
             job.get("platform_posted_at") or job.get("platformPostedAt") or job.get("posted_at")
         ),
         **_listing_fields(job, description),
+        "compensation": _compensation_text(job, description),
     }
 
 
@@ -1447,6 +1556,7 @@ def upsert_jobs(jobs: list[dict], *, notify: bool = True) -> int:
                         row["visa_sponsorship"],
                         row["clearance_required"],
                         row["saudi_national_required"],
+                        row["compensation"],
                     )
                     for row in rows
                 ]
@@ -1536,6 +1646,7 @@ def _job_payload(row: dict, *, include_raw: bool) -> dict:
         "visa_sponsorship": row.get("visa_sponsorship") or "unknown",
         "clearance_required": row.get("clearance_required") or "unknown",
         "saudi_national_required": "yes" if row.get("saudi_national_required") == "yes" else "no",
+        "compensation": str(row.get("compensation") or "").strip() or "salary not disclosed",
         "posted_at": posted,
         "platform_posted_at": platform_posted,
         "platformPostedAt": platform_posted,
@@ -1675,7 +1786,7 @@ def load_jobs(description_chars: int = 800) -> list[dict]:
                 f"days_ago, url, LEFT(description, %s) AS description, "
                 f"job_type, work_model, experience_level, "
                 f"years_experience, visa_sponsorship, clearance_required, saudi_national_required, "
-                f"posted_at, platform_posted_at, first_seen_at, created_at "
+                f"compensation, posted_at, platform_posted_at, first_seen_at, created_at "
                 f"FROM {JOBS_TABLE} "
                 f"WHERE url NOT LIKE %s AND url NOT LIKE %s "
                 f"AND (source_id IS NULL OR source_id NOT LIKE %s) "

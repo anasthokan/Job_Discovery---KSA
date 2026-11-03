@@ -24,11 +24,30 @@ PLATFORM_TO_SITE = {name: site for site, name in SITE_TO_PLATFORM.items()}
 
 
 def sites_for_platform(platform: str) -> list[str]:
+    from jobscraper.sources import filter_sites
+
     selected = platform or "All"
     if selected == "All":
-        return list(SITE_TO_PLATFORM)
+        sites = list(SITE_TO_PLATFORM)
+    else:
+        site = PLATFORM_TO_SITE.get(selected)
+        sites = [site] if site else []
+    return filter_sites(sites)
+
+
+def board_scrape_block(platform: str) -> str | None:
+    """Why a board scrape must not start, or None when at least one board is on."""
+    from jobscraper.sources import active_site_ids, is_active
+
+    selected = platform or "All"
+    if selected == "All":
+        if active_site_ids(list(SITE_TO_PLATFORM)):
+            return None
+        return "Every job board is inactive. Set a source back to active before scraping."
     site = PLATFORM_TO_SITE.get(selected)
-    return [site] if site else []
+    if site and not is_active(site):
+        return f"{selected} is inactive, so jobs are not scraped from this source."
+    return None
 
 
 def _blank(value):
@@ -122,6 +141,9 @@ def scrape(
     `offset` skips that many listings so the caller can read the next page.
     Bayt ignores offset, so a later page is not requested there again.
     """
+    from jobscraper.sources import filter_sites, touch_last_sync
+
+    sites = filter_sites(list(sites or []))
     if not sites:
         return []
     terms = [term.strip() for term in search_terms if term and term.strip()][:max_terms]
@@ -175,6 +197,7 @@ def scrape(
                     continue
                 seen.add(job_id)
                 found.append(job)
+        touch_last_sync(site)
     return _fill_short_descriptions(found)
 
 
