@@ -228,9 +228,11 @@ def score_job(
         has_titles=bool(titles),
         year_points=year_points if matched_titles or skill_points >= 4 or cert_points else 0,
     )
-    # A long skill list used to keep a real role under 50. The user's own title
-    # plus three of their skills is enough to show in All Matches.
-    if matched_titles and len(matched) >= 3:
+    # A long skill list of phrases such as "Go-to-Market Strategy" rarely appears
+    # word for word, so a real role stayed under 50. The user's own job title
+    # is enough to show that role in All Matches. A different title stays on
+    # the skill score, so a weak overlap remains hidden.
+    if matched_titles:
         score = max(score, MIN_MATCH_SCORE)
     return {
         "score": score,
