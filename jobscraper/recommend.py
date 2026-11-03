@@ -11,7 +11,7 @@ from jobscraper.resume_parser import SKILL_CANONICAL
 DEFAULT_LIMIT = 25
 MAX_LIMIT = 100
 # All Matches only returns a job when the blend score is at least this.
-MIN_MATCH_SCORE = 35
+MIN_MATCH_SCORE = 25
 # "6 hours ago" and "1 day ago" stay in the Most relevant band. "2 days ago" starts here.
 FRESH_SECONDS = 2 * 86400
 
@@ -141,9 +141,9 @@ def recommend_jobs(
     years: int | None = None,
     limit: int | None = DEFAULT_LIMIT,
 ) -> list[dict]:
-    """Rank matches of 35 or higher. Most relevant is the best match from the last day.
+    """Rank matches of 25 or higher. Most relevant is the best match from the last day.
 
-    A score below 35 is left out of the list. Jobs posted hours ago or 1 day ago
+    A score below 25 is left out of the list. Jobs posted hours ago or 1 day ago
     come before a 3-day-old role, even when the older role scores higher. Inside
     that day, match score decides the order. `limit=None` keeps the full set;
     an int keeps the top N (max 100).
