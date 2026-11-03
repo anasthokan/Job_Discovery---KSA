@@ -1,0 +1,271 @@
+{
+  "info": {
+    "name": "EzyJob KSA Source Status",
+    "description": "Turn a job source off so the scraper skips it, then turn it back on.\n\nNo auth. Import this collection and set `base_url`.\n\nProduction: https://agentsksa.atozeesolutions.com\nServer local: http://127.0.0.1:9002\n\n`source_id` is `indeed` by default. Other ids: greenhouse, lever, linkedin, workday, yc, google, bayt, smartrecruiters, globaljobs, headcount.\n\nRun the folder from top to bottom. Inactive means the next scrape does not read that source. Jobs already saved stay in the database.\n\nRestart the API after pulling this change, then call List job sources and confirm `success` is true.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "https://agentsksa.atozeesolutions.com"
+    },
+    {
+      "key": "source_id",
+      "value": "indeed"
+    }
+  ],
+  "item": [
+    {
+      "name": "1. List job sources",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Accept",
+            "value": "application/json"
+          }
+        ],
+        "url": "{{base_url}}/api/v1/sources",
+        "description": "Every source. status active is scraped. status inactive is skipped."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('sources listed', function () {",
+              "    pm.response.to.have.status(200);",
+              "    const body = pm.response.json();",
+              "    pm.expect(body.success).to.eql(true);",
+              "    pm.expect(body.data).to.be.an('array').that.is.not.empty;",
+              "    const ids = body.data.map((row) => row.id);",
+              "    pm.expect(ids).to.include(pm.collectionVariables.get('source_id'));",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. Get one source",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Accept",
+            "value": "application/json"
+          }
+        ],
+        "url": "{{base_url}}/api/v1/sources/{{source_id}}",
+        "description": "One source. Change the collection variable source_id to test another board."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('one source', function () {",
+              "    pm.response.to.have.status(200);",
+              "    const body = pm.response.json();",
+              "    pm.expect(body.success).to.eql(true);",
+              "    pm.expect(body.data.id).to.eql(pm.collectionVariables.get('source_id'));",
+              "    pm.expect(body.data.status).to.be.oneOf(['active', 'inactive']);",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. Set source inactive",
+      "request": {
+        "method": "PATCH",
+        "header": [
+          {
+            "key": "Accept",
+            "value": "application/json"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"status\": \"inactive\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": "{{base_url}}/api/v1/sources/{{source_id}}",
+        "description": "Stops the next scrape of this source. PUT works with the same body."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('source is inactive', function () {",
+              "    pm.response.to.have.status(200);",
+              "    const body = pm.response.json();",
+              "    pm.expect(body.success).to.eql(true);",
+              "    pm.expect(body.data.id).to.eql(pm.collectionVariables.get('source_id'));",
+              "    pm.expect(body.data.status).to.eql('inactive');",
+              "    pm.expect(body.message).to.include('no longer scraped');",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Confirm it stayed inactive",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Accept",
+            "value": "application/json"
+          }
+        ],
+        "url": "{{base_url}}/api/v1/sources/{{source_id}}",
+        "description": "Read the source again. status must still be inactive."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('still inactive', function () {",
+              "    pm.response.to.have.status(200);",
+              "    const body = pm.response.json();",
+              "    pm.expect(body.data.status).to.eql('inactive');",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "5. Set source active",
+      "request": {
+        "method": "PATCH",
+        "header": [
+          {
+            "key": "Accept",
+            "value": "application/json"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"status\": \"active\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": "{{base_url}}/api/v1/sources/{{source_id}}",
+        "description": "Turns scraping back on for this source."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('source is active', function () {",
+              "    pm.response.to.have.status(200);",
+              "    const body = pm.response.json();",
+              "    pm.expect(body.success).to.eql(true);",
+              "    pm.expect(body.data.status).to.eql('active');",
+              "    pm.expect(body.message).to.include('will be scraped');",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "6. Unknown source",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Accept",
+            "value": "application/json"
+          }
+        ],
+        "url": "{{base_url}}/api/v1/sources/not-a-source",
+        "description": "Expect 404."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('unknown source is 404', function () {",
+              "    pm.response.to.have.status(404);",
+              "    const body = pm.response.json();",
+              "    pm.expect(body.success).to.eql(false);",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "7. Bad status",
+      "request": {
+        "method": "PATCH",
+        "header": [
+          {
+            "key": "Accept",
+            "value": "application/json"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"status\": \"paused\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": "{{base_url}}/api/v1/sources/{{source_id}}",
+        "description": "Only active and inactive are accepted. Expect 422."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('bad status is 422', function () {",
+              "    pm.response.to.have.status(422);",
+              "    const body = pm.response.json();",
+              "    pm.expect(body.success).to.eql(false);",
+              "});"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}
