@@ -1,8 +1,9 @@
-"""WhatsApp alerts for jobs that newly match a person's recommendations.
+"""WhatsApp alerts for newly scraped jobs.
 
 Every ingest path saves through upsert_jobs. That function queues only rows
-that were not already stored. A short debounce then scores those rows with the
-same matcher as /api/recommend and posts one message per matching job.
+that were not already stored. A short debounce then posts each new job to the
+Jobs in Saudi group, and scores those rows with the same matcher as
+/api/recommend to post one message per matching job to that person.
 """
 
 from __future__ import annotations
@@ -37,10 +38,14 @@ log = logging.getLogger("jobscraper.whatsapp")
 
 ALERTS_TABLE = "job_whatsapp_alerts"
 DEFAULT_SEND_URL = "http://74.208.184.175:8000/sessions/Intellirestro/send-message"
+DEFAULT_GROUP_URL = "http://74.208.184.175:8000/sessions/Intellirestro/send-message-to-group"
+DEFAULT_GROUP_ID = "966563226748-1448363692@g.us"
+DEFAULT_GROUP_NAME = "Jobs in Saudi"
+DEFAULT_API_KEY = "my-key"
 CREATE_ALERTS_SQL = f"""
 CREATE TABLE IF NOT EXISTS {ALERTS_TABLE} (
   id BIGINT NOT NULL AUTO_INCREMENT,
-  phone VARCHAR(20) NOT NULL,
+  phone VARCHAR(64) NOT NULL,
   source_id VARCHAR(255) NOT NULL,
   user_id VARCHAR(64) NULL,
   title VARCHAR(512) NULL,
@@ -83,6 +88,16 @@ def _env(name: str, default: str = "") -> str:
 
 def alerts_enabled() -> bool:
     return _env("WHATSAPP_ALERTS", "true").lower() in {"1", "true", "yes", "on"}
+
+
+def group_alerts_enabled() -> bool:
+    if not alerts_enabled():
+        return False
+    return _env("WHATSAPP_GROUP_ALERTS", "true").lower() in {"1", "true", "yes", "on"}
+
+
+def _api_key() -> str:
+    return _env("WHATSAPP_API_KEY", DEFAULT_API_KEY)
 
 
 def _int_env(name: str, default: int) -> int:
@@ -260,6 +275,31 @@ def _clip(value: str, limit: int) -> str:
     return text[: limit - 1].rstrip() + "…"
 
 
+def group_message_for(job: dict) -> str:
+    place = " · ".join(
+        part
+        for part in (
+            job.get("company"),
+            job.get("location") or job.get("state"),
+            job.get("platform"),
+        )
+        if part
+    )
+    lines = ["New job in Saudi", "", str(job.get("title") or "Job")]
+    if place:
+        lines.append(place)
+    skills = [str(item).strip() for item in (job.get("skills") or []) if str(item).strip()][:6]
+    if skills:
+        lines.append("Skills: " + ", ".join(skills))
+    description = _clip(job.get("description") or "", 320)
+    if description:
+        lines.extend(["", description])
+    url = str(job.get("url") or "").strip()
+    if url:
+        lines.extend(["", url])
+    return "\n".join(lines)
+
+
 def message_for(job: dict, match: dict) -> str:
     place = " · ".join(
         part for part in (job.get("company"), job.get("location"), job.get("platform")) if part
@@ -281,7 +321,7 @@ def message_for(job: dict, match: dict) -> str:
 
 def _auth_headers() -> dict[str, str]:
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
-    key = _env("WHATSAPP_API_KEY")
+    key = _api_key()
     if not key:
         return headers
     header = _env("WHATSAPP_API_KEY_HEADER", "x-api-key") or "x-api-key"
@@ -332,41 +372,89 @@ def _send_body(number: str, message: str, url: str) -> dict:
     return {"number": number, "message": message}
 
 
-def send_whatsapp(number: str, message: str) -> bool:
-    url = _send_url()
-    if not _env("WHATSAPP_API_KEY"):
-        _note("WhatsApp send skipped: WHATSAPP_API_KEY is empty and the gateway returns 401")
+def _group_id() -> str:
+    value = _env("WHATSAPP_GROUP_ID", DEFAULT_GROUP_ID)
+    if "@g.us" not in value:
+        return ""
+    return value
+
+
+def _group_name() -> str:
+    return _env("WHATSAPP_GROUP_NAME", DEFAULT_GROUP_NAME) or DEFAULT_GROUP_NAME
+
+
+def _group_url() -> str:
+    return (_env("WHATSAPP_GROUP_URL") or DEFAULT_GROUP_URL).strip().rstrip("/")
+
+
+def _post_json(url: str, payload: dict, *, label: str) -> bool:
+    if not _api_key():
+        _note(f"{label} skipped: WHATSAPP_API_KEY is empty and the gateway returns 401")
         return False
-    body = json.dumps(_send_body(number, message, url), ensure_ascii=False).encode("utf-8")
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     request = urllib.request.Request(url, data=body, headers=_auth_headers(), method="POST")
     try:
         with urllib.request.urlopen(request, timeout=15) as response:
             raw = response.read()[:500]
             if not (200 <= int(response.status) < 300):
-                _note(f"WhatsApp send failed status={response.status} body={raw!r}")
+                _note(f"{label} failed status={response.status} body={raw!r}")
                 return False
             if raw:
                 try:
-                    payload = json.loads(raw.decode("utf-8", "ignore"))
+                    parsed = json.loads(raw.decode("utf-8", "ignore"))
                 except json.JSONDecodeError:
-                    payload = None
-                if isinstance(payload, dict) and payload.get("success") is False:
-                    _note(f"WhatsApp gateway rejected the message: {payload}")
+                    parsed = None
+                if isinstance(parsed, dict) and parsed.get("success") is False:
+                    _note(f"WhatsApp gateway rejected the message: {parsed}")
                     return False
             return True
     except urllib.error.HTTPError as exc:
         detail = exc.read()[:300]
-        _note(f"WhatsApp send failed status={exc.code} body={detail!r}")
+        _note(f"{label} failed status={exc.code} body={detail!r}")
         return False
     except Exception:
-        log.exception("WhatsApp send failed for %s", number)
-        _note(f"WhatsApp send failed for {number}")
+        log.exception("%s failed", label)
+        _note(f"{label} failed")
         return False
+
+
+def send_whatsapp(number: str, message: str) -> bool:
+    url = _send_url()
+    return _post_json(url, _send_body(number, message, url), label=f"WhatsApp send to {number}")
+
+
+def send_whatsapp_group(message: str) -> bool:
+    group_id = _group_id()
+    if not group_id:
+        _note("WhatsApp group send skipped: WHATSAPP_GROUP_ID is not a group id")
+        return False
+    return _post_json(
+        _group_url(),
+        {"groupid": group_id, "groupname": _group_name(), "message": message},
+        label="WhatsApp group send",
+    )
 
 
 def ensure_alert_table(cur) -> None:
     cur.execute(CREATE_ALERTS_SQL)
     _ensure_alert_columns(cur)
+    _widen_phone(cur)
+
+
+def _widen_phone(cur) -> None:
+    """Group ids such as 966...@g.us do not fit the original VARCHAR(20) phone column."""
+    cur.execute(
+        """
+        SELECT CHARACTER_MAXIMUM_LENGTH AS width
+        FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s AND COLUMN_NAME = 'phone'
+        """,
+        (ALERTS_TABLE,),
+    )
+    row = cur.fetchone() or {}
+    width = int(row.get("width") or 0)
+    if width and width < 64:
+        cur.execute(f"ALTER TABLE {ALERTS_TABLE} MODIFY COLUMN `phone` VARCHAR(64) NOT NULL")
 
 
 def _ensure_alert_columns(cur) -> None:
@@ -600,8 +688,61 @@ def _mark_sent(
     )
 
 
+def _retry_job(job: dict) -> dict | None:
+    retry = dict(job)
+    retry["_attempts"] = int(job.get("_attempts") or 0) + 1
+    if retry["_attempts"] >= 3:
+        return None
+    return retry
+
+
+def _requeue(jobs: list[dict]) -> None:
+    merged: dict[str, dict] = {}
+    for job in jobs:
+        source_id = str(job.get("source_id") or "")
+        if not source_id:
+            continue
+        previous = merged.get(source_id)
+        if previous is None or int(job.get("_attempts") or 0) >= int(previous.get("_attempts") or 0):
+            merged[source_id] = job
+    if merged:
+        queue_job_alerts(list(merged.values()))
+
+
+def _post_new_jobs_to_group(cur, jobs: list[dict]) -> tuple[int, list[dict]]:
+    """Post each new scrape to the group once. Returns (sent, still pending)."""
+    if not group_alerts_enabled():
+        return 0, []
+    channel = _group_id()
+    if not channel:
+        _note("WhatsApp group send skipped: WHATSAPP_GROUP_ID is not a group id")
+        return 0, []
+    already = _sent_ids(cur, channel[:64], [job["source_id"] for job in jobs])
+    pending = [job for job in jobs if job["source_id"] not in already]
+    per_flush = max(1, _int_env("WHATSAPP_GROUP_MAX_PER_FLUSH", 30))
+    sent = 0
+    left: list[dict] = []
+    for job in pending[:per_flush]:
+        text = group_message_for(job)
+        if send_whatsapp_group(text):
+            try:
+                _mark_sent(cur, channel[:64], job["source_id"], job=job, message=text)
+            except Exception as exc:
+                code = exc.args[0] if getattr(exc, "args", None) else None
+                if code != 1062:
+                    raise
+            sent += 1
+            time.sleep(0.35)
+            continue
+        retry = _retry_job(job)
+        if retry is not None:
+            left.append(retry)
+    left.extend(pending[per_flush:])
+    return sent, left
+
+
 def deliver_job_alerts(jobs: list[dict]) -> int:
-    """Score new jobs per person and send each match. Returns messages sent."""
+    """Post each new job to the group, then send personal matches. Returns messages sent."""
     if not alerts_enabled():
         return 0
     unique: dict[str, dict] = {}
@@ -613,9 +754,6 @@ def deliver_job_alerts(jobs: list[dict]) -> int:
     if not jobs:
         return 0
     recipients = _cached_recipients()
-    if not recipients:
-        _note(f"WhatsApp alerts skipped for {len(jobs)} jobs: no user with a phone and skills")
-        return 0
 
     from jobscraper.db import get_conn
 
@@ -627,11 +765,20 @@ def deliver_job_alerts(jobs: list[dict]) -> int:
     # 0 means every matching job is sent. A positive number is a daily cap.
     per_day = _int_env("WHATSAPP_MAX_PER_DAY", 0)
     sent = 0
+    group_sent = 0
     failed: list[dict] = []
     waiting: list[dict] = []
     try:
         with conn.cursor() as cur:
             ensure_alert_table(cur)
+            group_sent, group_left = _post_new_jobs_to_group(cur, jobs)
+            sent += group_sent
+            waiting.extend(group_left)
+            if not recipients:
+                _note(
+                    f"WhatsApp group sent {group_sent} of {len(jobs)} new job(s); "
+                    "personal alerts skipped: no user with a phone and skills"
+                )
             for person in recipients:
                 phone = person["phone"]
                 already = _sent_ids(cur, phone, [job["source_id"] for job in jobs])
@@ -678,19 +825,17 @@ def deliver_job_alerts(jobs: list[dict]) -> int:
                         sent += 1
                         time.sleep(0.35)
                         continue
-                    retry = dict(job)
-                    retry["_attempts"] = int(job.get("_attempts") or 0) + 1
-                    if retry["_attempts"] < 3:
+                    retry = _retry_job(job)
+                    if retry is not None:
                         failed.append(retry)
     except Exception:
         log.exception("WhatsApp alert delivery failed")
         return sent
-    if failed:
-        queue_job_alerts(failed)
-    if waiting:
-        queue_job_alerts(waiting)
-    _note(
-        f"WhatsApp alerts sent {sent} message(s) for {len(jobs)} job(s) "
-        f"to {len(recipients)} user(s); {len(waiting)} still queued"
-    )
+    _requeue(failed + waiting)
+    if recipients:
+        _note(
+            f"WhatsApp alerts sent {sent - group_sent} personal message(s) and "
+            f"{group_sent} group message(s) for {len(jobs)} job(s) "
+            f"to {len(recipients)} user(s); {len(waiting)} still queued"
+        )
     return sent
