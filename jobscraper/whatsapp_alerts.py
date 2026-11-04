@@ -42,12 +42,34 @@ CREATE TABLE IF NOT EXISTS {ALERTS_TABLE} (
   id BIGINT NOT NULL AUTO_INCREMENT,
   phone VARCHAR(20) NOT NULL,
   source_id VARCHAR(255) NOT NULL,
+  user_id VARCHAR(64) NULL,
+  candidate_id VARCHAR(64) NULL,
+  title VARCHAR(512) NULL,
+  company VARCHAR(512) NULL,
+  url VARCHAR(1024) NULL,
+  platform VARCHAR(64) NULL,
+  score INT NULL,
+  match_json JSON NULL,
+  message TEXT NULL,
   sent_at DATETIME(6) NOT NULL,
   PRIMARY KEY (id),
   UNIQUE KEY uk_whatsapp_alert (phone, source_id),
-  KEY idx_whatsapp_alert_sent (phone, sent_at)
+  KEY idx_whatsapp_alert_sent (phone, sent_at),
+  KEY idx_whatsapp_alert_user (user_id, sent_at),
+  KEY idx_whatsapp_alert_candidate (candidate_id, sent_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 """
+_ALERT_COLUMNS = {
+    "user_id": "VARCHAR(64) NULL",
+    "candidate_id": "VARCHAR(64) NULL",
+    "title": "VARCHAR(512) NULL",
+    "company": "VARCHAR(512) NULL",
+    "url": "VARCHAR(1024) NULL",
+    "platform": "VARCHAR(64) NULL",
+    "score": "INT NULL",
+    "match_json": "JSON NULL",
+    "message": "TEXT NULL",
+}
 
 _DIALS = tuple(sorted(set(_DIAL_CODES), key=len, reverse=True))
 _LOCK = threading.Lock()
@@ -347,6 +369,16 @@ def send_whatsapp(number: str, message: str) -> bool:
 
 def ensure_alert_table(cur) -> None:
     cur.execute(CREATE_ALERTS_SQL)
+    _ensure_alert_columns(cur)
+
+
+def _ensure_alert_columns(cur) -> None:
+    """Add recommendation fields on older alert tables that only stored phone+source_id."""
+    existing = _table_columns(cur, ALERTS_TABLE)
+    for name, ddl in _ALERT_COLUMNS.items():
+        if name in existing:
+            continue
+        cur.execute(f"ALTER TABLE {ALERTS_TABLE} ADD COLUMN `{name}` {ddl}")
 
 
 def _profile_phone(profile: dict) -> tuple[str, str]:
@@ -355,7 +387,13 @@ def _profile_phone(profile: dict) -> tuple[str, str]:
     return number, code
 
 
-def _recipient_from_profile(profile: dict, phone: str) -> dict | None:
+def _recipient_from_profile(
+    profile: dict,
+    phone: str,
+    *,
+    user_id: str = "",
+    candidate_id: str = "",
+) -> dict | None:
     skills = skills_from_profile(profile)
     certifications = certifications_from_profile(profile)
     titles = experience_titles_from_profile(profile)
@@ -363,6 +401,8 @@ def _recipient_from_profile(profile: dict, phone: str) -> dict | None:
         return None
     return {
         "phone": phone,
+        "user_id": str(user_id or "").strip() or None,
+        "candidate_id": str(candidate_id or "").strip() or None,
         "profile": profile,
         "skills": skills,
         "certifications": certifications,
@@ -441,7 +481,11 @@ def _load_recipients() -> list[dict]:
             continue
         profile = dict(profile)
         profile.setdefault("phone", row.get("phone") or "")
-        built = _recipient_from_profile(profile, number)
+        built = _recipient_from_profile(
+            profile,
+            number,
+            user_id=str(row.get("user_id") or ""),
+        )
         if not built:
             continue
         seen.add(number)
@@ -455,7 +499,11 @@ def _load_recipients() -> list[dict]:
         number = whatsapp_number(raw, code)
         if not number or number in seen:
             continue
-        built = _recipient_from_profile(profile, number)
+        built = _recipient_from_profile(
+            profile,
+            number,
+            candidate_id=str(row.get("candidate_id") or ""),
+        )
         if not built:
             continue
         seen.add(number)
@@ -498,11 +546,56 @@ def _sent_today(cur, phone: str) -> int:
     return int(row.get("n") or 0)
 
 
-def _mark_sent(cur, phone: str, source_id: str) -> None:
+def _match_payload(match: dict) -> str:
+    return json.dumps(
+        {
+            "score": int(match.get("score") or 0),
+            "matched_skills": list(match.get("matched_skills") or [])[:20],
+            "matched_certifications": list(match.get("matched_certifications") or [])[:20],
+            "matched_titles": list(match.get("matched_titles") or [])[:10],
+            "experience_fit": match.get("experience_fit") or "none",
+        },
+        ensure_ascii=False,
+    )
+
+
+def _mark_sent(
+    cur,
+    phone: str,
+    source_id: str,
+    *,
+    job: dict | None = None,
+    match: dict | None = None,
+    message: str = "",
+    user_id: str | None = None,
+    candidate_id: str | None = None,
+) -> None:
+    """Persist the recommendation that was just sent on WhatsApp."""
+    job = job or {}
+    match = match or {}
     cur.execute(
-        f"INSERT INTO {ALERTS_TABLE} (phone, source_id, sent_at) "
-        "VALUES (%s, %s, UTC_TIMESTAMP(6))",
-        (phone, source_id),
+        f"""
+        INSERT INTO {ALERTS_TABLE} (
+          phone, source_id, user_id, candidate_id, title, company, url, platform,
+          score, match_json, message, sent_at
+        ) VALUES (
+          %s, %s, %s, %s, %s, %s, %s, %s,
+          %s, %s, %s, UTC_TIMESTAMP(6)
+        )
+        """,
+        (
+            phone,
+            source_id,
+            user_id or None,
+            candidate_id or None,
+            (str(job.get("title") or "")[:512] or None),
+            (str(job.get("company") or "")[:512] or None),
+            (str(job.get("url") or "")[:1024] or None),
+            (str(job.get("platform") or "")[:64] or None),
+            int(match.get("score") or 0) or None,
+            _match_payload(match),
+            (message or "")[:65000] or None,
+        ),
     )
 
 
@@ -565,9 +658,19 @@ def deliver_job_alerts(jobs: list[dict]) -> int:
                 for _score, job, _match in matched[take:]:
                     waiting.append(job)
                 for _score, job, match in matched[:take]:
-                    if send_whatsapp(phone, message_for(job, match)):
+                    text = message_for(job, match)
+                    if send_whatsapp(phone, text):
                         try:
-                            _mark_sent(cur, phone, job["source_id"])
+                            _mark_sent(
+                                cur,
+                                phone,
+                                job["source_id"],
+                                job=job,
+                                match=match,
+                                message=text,
+                                user_id=person.get("user_id"),
+                                candidate_id=person.get("candidate_id"),
+                            )
                         except Exception as exc:
                             code = exc.args[0] if getattr(exc, "args", None) else None
                             if code != 1062:
