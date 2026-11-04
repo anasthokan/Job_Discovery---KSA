@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 
 from jobscraper.jd_to_cv import SKILL_RELATED
 from jobscraper.resume_parser import SKILL_CANONICAL
+from jobscraper.score_config import score_config
 
 DEFAULT_LIMIT = 25
 MAX_LIMIT = 100
@@ -141,9 +142,11 @@ def recommend_jobs(
     years: int | None = None,
     limit: int | None = DEFAULT_LIMIT,
 ) -> list[dict]:
-    """Rank matches of 25 or higher. Most relevant is the best match from the last day.
+    """Rank matches at or above the admin score cutoff. Most relevant is the best match from the last day.
 
-    A score below 25 is left out of the list. Jobs posted hours ago or 1 day ago
+    The cutoff and the skill, certification, title, and years/level weights come from
+    the configuration screen. Until that table is saved, the cutoff is 25 and the
+    weights are 55, 15, 20, and 10. Jobs posted hours ago or 1 day ago
     come before a 3-day-old role, even when the older role scores higher. Inside
     that day, match score decides the order. `limit=None` keeps the full set;
     an int keeps the top N (max 100).
@@ -151,6 +154,7 @@ def recommend_jobs(
     wanted = _usable_terms(skills)
     certs = _usable_terms(certifications)
     titles = _clean_titles(experience_titles)
+    cutoff = int(score_config()["min_score"])
     if not wanted and not certs and not titles:
         return []
     ranked = []
@@ -162,7 +166,7 @@ def recommend_jobs(
             experience_titles=titles,
             years=years,
         )
-        if match["score"] < MIN_MATCH_SCORE:
+        if match["score"] < cutoff:
             continue
         ranked.append({**job, "match": match})
     for row in ranked:
@@ -219,6 +223,7 @@ def score_job(
     if not matched and not matched_certs and not matched_titles:
         skill_points = cert_points = year_points = 0
         experience_fit = "none"
+    weights = score_config()
     score = _blend_score(
         skill_points=skill_points,
         skill_max=len(wanted) * 2,
@@ -227,6 +232,7 @@ def score_job(
         title_hit=bool(matched_titles),
         has_titles=bool(titles),
         year_points=year_points if matched_titles or skill_points >= 4 or cert_points else 0,
+        weights=weights,
     )
     return {
         "score": score,
@@ -259,16 +265,20 @@ def _blend_score(
     title_hit: bool,
     has_titles: bool,
     year_points: int,
+    weights: dict | None = None,
 ) -> int:
+    from jobscraper.score_config import DEFAULT_WEIGHTS
+
+    chosen = weights or DEFAULT_WEIGHTS
     parts: list[tuple[float, float]] = []
-    if skill_max:
-        parts.append((skill_points / skill_max, 0.55))
-    if cert_max:
-        parts.append((cert_points / cert_max, 0.15))
-    if has_titles:
-        parts.append((1.0 if title_hit else 0.0, 0.20))
-    if year_points:
-        parts.append((min(year_points, 5) / 5, 0.10))
+    if skill_max and chosen.get("skills"):
+        parts.append((skill_points / skill_max, float(chosen["skills"])))
+    if cert_max and chosen.get("certifications"):
+        parts.append((cert_points / cert_max, float(chosen["certifications"])))
+    if has_titles and chosen.get("title"):
+        parts.append((1.0 if title_hit else 0.0, float(chosen["title"])))
+    if year_points and chosen.get("years_level"):
+        parts.append((min(year_points, 5) / 5, float(chosen["years_level"])))
     if not parts:
         return 0
     weight = sum(item[1] for item in parts)
