@@ -43,7 +43,6 @@ CREATE TABLE IF NOT EXISTS {ALERTS_TABLE} (
   phone VARCHAR(20) NOT NULL,
   source_id VARCHAR(255) NOT NULL,
   user_id VARCHAR(64) NULL,
-  candidate_id VARCHAR(64) NULL,
   title VARCHAR(512) NULL,
   company VARCHAR(512) NULL,
   url VARCHAR(1024) NULL,
@@ -55,13 +54,11 @@ CREATE TABLE IF NOT EXISTS {ALERTS_TABLE} (
   PRIMARY KEY (id),
   UNIQUE KEY uk_whatsapp_alert (phone, source_id),
   KEY idx_whatsapp_alert_sent (phone, sent_at),
-  KEY idx_whatsapp_alert_user (user_id, sent_at),
-  KEY idx_whatsapp_alert_candidate (candidate_id, sent_at)
+  KEY idx_whatsapp_alert_user (user_id, sent_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 """
 _ALERT_COLUMNS = {
     "user_id": "VARCHAR(64) NULL",
-    "candidate_id": "VARCHAR(64) NULL",
     "title": "VARCHAR(512) NULL",
     "company": "VARCHAR(512) NULL",
     "url": "VARCHAR(1024) NULL",
@@ -375,6 +372,18 @@ def ensure_alert_table(cur) -> None:
 def _ensure_alert_columns(cur) -> None:
     """Add recommendation fields on older alert tables that only stored phone+source_id."""
     existing = _table_columns(cur, ALERTS_TABLE)
+    if "candidate_id" in existing:
+        cur.execute(
+            "SELECT INDEX_NAME AS name FROM information_schema.STATISTICS "
+            "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s AND COLUMN_NAME = 'candidate_id'",
+            (ALERTS_TABLE,),
+        )
+        for row in cur.fetchall() or []:
+            index = str(row.get("name") or "")
+            if index and index != "PRIMARY":
+                cur.execute(f"ALTER TABLE {ALERTS_TABLE} DROP INDEX `{index}`")
+        cur.execute(f"ALTER TABLE {ALERTS_TABLE} DROP COLUMN `candidate_id`")
+        existing.discard("candidate_id")
     for name, ddl in _ALERT_COLUMNS.items():
         if name in existing:
             continue
@@ -392,7 +401,6 @@ def _recipient_from_profile(
     phone: str,
     *,
     user_id: str = "",
-    candidate_id: str = "",
 ) -> dict | None:
     skills = skills_from_profile(profile)
     certifications = certifications_from_profile(profile)
@@ -402,7 +410,6 @@ def _recipient_from_profile(
     return {
         "phone": phone,
         "user_id": str(user_id or "").strip() or None,
-        "candidate_id": str(candidate_id or "").strip() or None,
         "profile": profile,
         "skills": skills,
         "certifications": certifications,
@@ -499,11 +506,7 @@ def _load_recipients() -> list[dict]:
         number = whatsapp_number(raw, code)
         if not number or number in seen:
             continue
-        built = _recipient_from_profile(
-            profile,
-            number,
-            candidate_id=str(row.get("candidate_id") or ""),
-        )
+        built = _recipient_from_profile(profile, number)
         if not built:
             continue
         seen.add(number)
@@ -568,7 +571,6 @@ def _mark_sent(
     match: dict | None = None,
     message: str = "",
     user_id: str | None = None,
-    candidate_id: str | None = None,
 ) -> None:
     """Persist the recommendation that was just sent on WhatsApp."""
     job = job or {}
@@ -576,10 +578,10 @@ def _mark_sent(
     cur.execute(
         f"""
         INSERT INTO {ALERTS_TABLE} (
-          phone, source_id, user_id, candidate_id, title, company, url, platform,
+          phone, source_id, user_id, title, company, url, platform,
           score, match_json, message, sent_at
         ) VALUES (
-          %s, %s, %s, %s, %s, %s, %s, %s,
+          %s, %s, %s, %s, %s, %s, %s,
           %s, %s, %s, UTC_TIMESTAMP(6)
         )
         """,
@@ -587,7 +589,6 @@ def _mark_sent(
             phone,
             source_id,
             user_id or None,
-            candidate_id or None,
             (str(job.get("title") or "")[:512] or None),
             (str(job.get("company") or "")[:512] or None),
             (str(job.get("url") or "")[:1024] or None),
@@ -669,7 +670,6 @@ def deliver_job_alerts(jobs: list[dict]) -> int:
                                 match=match,
                                 message=text,
                                 user_id=person.get("user_id"),
-                                candidate_id=person.get("candidate_id"),
                             )
                         except Exception as exc:
                             code = exc.args[0] if getattr(exc, "args", None) else None
