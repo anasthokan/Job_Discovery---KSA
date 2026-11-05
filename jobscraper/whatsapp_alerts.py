@@ -351,6 +351,12 @@ def _flush() -> None:
                 _ensure_timer()
 
 
+_WHATSAPP_LINK = re.compile(
+    r"(?:https?://)?(?:www\.)?(?:wa\.me|api\.whatsapp\.com)/\S+",
+    re.IGNORECASE,
+)
+
+
 def _clip(value: str, limit: int) -> str:
     text = " ".join(str(value or "").split())
     if len(text) <= limit:
@@ -358,29 +364,49 @@ def _clip(value: str, limit: int) -> str:
     return text[: limit - 1].rstrip() + "…"
 
 
+def _without_whatsapp_contact(value: str) -> str:
+    text = _WHATSAPP_LINK.sub("", str(value or ""))
+    return " ".join(text.split())
+
+
+def _job_link(url: str) -> str:
+    """Real posting link. A wa.me link is a WhatsApp number, not the job."""
+    text = str(url or "").strip()
+    if not text or _WHATSAPP_LINK.search(text):
+        return ""
+    return text
+
+
 def group_message_for(job: dict) -> str:
+    platform = _without_whatsapp_contact(str(job.get("platform") or ""))
+    if platform.lower() == "whatsapp":
+        platform = ""
     place = " · ".join(
         part
         for part in (
-            job.get("company"),
-            job.get("location") or job.get("state"),
-            job.get("platform"),
+            _without_whatsapp_contact(str(job.get("company") or "")),
+            _without_whatsapp_contact(str(job.get("location") or job.get("state") or "")),
+            platform,
         )
         if part
     )
-    lines = ["New job in Saudi", "", str(job.get("title") or "Job")]
+    lines = ["New job in Saudi", "", _without_whatsapp_contact(str(job.get("title") or "")) or "Job"]
     if place:
         lines.append(place)
-    skills = [str(item).strip() for item in (job.get("skills") or []) if str(item).strip()][:6]
+    skills = [
+        _without_whatsapp_contact(str(item))
+        for item in (job.get("skills") or [])
+        if _without_whatsapp_contact(str(item))
+    ][:6]
     if skills:
         lines.append("Skills: " + ", ".join(skills))
-    description = _clip(job.get("description") or "", 320)
+    description = _clip(_without_whatsapp_contact(str(job.get("description") or "")), 320)
     if description:
         lines.extend(["", description])
-    url = str(job.get("url") or "").strip()
+    url = _job_link(str(job.get("url") or ""))
     if url:
         lines.extend(["", url])
-    return "\n".join(lines)
+    return "\r\n".join(lines)
 
 
 def message_for(job: dict, match: dict) -> str:
