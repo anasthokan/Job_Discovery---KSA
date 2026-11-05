@@ -194,6 +194,8 @@ def queue_job_alerts(rows: list[dict]) -> None:
         job = _alert_job(row)
         if not job["source_id"] or not job["title"] or job["source_id"] in seen:
             continue
+        if not job_is_alertable(job):
+            continue
         seen.add(job["source_id"])
         prepared.append(job)
     if not prepared:
@@ -277,13 +279,16 @@ def queue_unsent_group_jobs(limit: int = 200) -> None:
                   ON a.source_id = j.source_id AND a.phone = %s
                 WHERE a.id IS NULL
                   AND j.title IS NOT NULL AND TRIM(j.title) <> ''
+                  AND LOWER(IFNULL(j.platform, '')) NOT LIKE '%whatsapp%'
+                  AND IFNULL(j.url, '') NOT LIKE '%wa.me%'
+                  AND IFNULL(j.url, '') NOT LIKE '%api.whatsapp.com%'
                   AND j.first_seen_at >= UTC_TIMESTAMP() - INTERVAL 24 HOUR
                 ORDER BY j.first_seen_at DESC
                 LIMIT %s
                 """,
                 (channel[:64], limit),
             )
-            rows = list(cur.fetchall() or [])
+            rows = [row for row in (cur.fetchall() or []) if job_is_alertable(_alert_job(row))]
     except Exception:
         log.exception("WhatsApp group sweep query failed")
         _note("WhatsApp group sweep query failed")
@@ -355,10 +360,14 @@ _WHATSAPP_LINK = re.compile(
     r"(?:https?://)?(?:www\.)?(?:wa\.me|api\.whatsapp\.com)/\S+",
     re.IGNORECASE,
 )
-_HEADER_ECHO = re.compile(r"new\s+job\s+in\s+saudi", re.IGNORECASE)
-_GROUP_DESC_LIMIT = 180
+_HEADER_ECHO = re.compile(r"new\s+job\s+(?:in\s+saudi|for\s+you)", re.IGNORECASE)
+_PLACE_NOISE = re.compile(
+    r"\bSaudi Arabia\s*·\s*whatsapp\b|\bwhatsapp\b",
+    re.IGNORECASE,
+)
+_GROUP_DESC_LIMIT = 220
 _GROUP_TITLE_LIMIT = 100
-_GROUP_MESSAGE_LIMIT = 900
+_GROUP_MESSAGE_LIMIT = 1100
 
 
 def _clip(value: str, limit: int) -> str:
@@ -374,6 +383,7 @@ def _clip(value: str, limit: int) -> str:
 def _clean_field(value: str) -> str:
     text = _WHATSAPP_LINK.sub(" ", str(value or ""))
     text = _HEADER_ECHO.sub(" ", text)
+    text = _PLACE_NOISE.sub(" ", text)
     return " ".join(text.split()).strip()
 
 
@@ -392,19 +402,68 @@ def _display_platform(value: str) -> str:
     return platform
 
 
+def _is_whatsapp_source(job: dict) -> bool:
+    platform = str(job.get("platform") or "").lower()
+    url = str(job.get("url") or "").lower()
+    if "whatsapp" in platform:
+        return True
+    if "wa.me" in url or "api.whatsapp.com" in url:
+        return True
+    return False
+
+
 def _display_title(job: dict) -> str:
     title = _clip(_clean_field(str(job.get("title") or "")), _GROUP_TITLE_LIMIT)
     if not title:
-        return "Job"
-    # Scrapes sometimes store a description sentence in title. Keep it short.
-    if title[:1].islower() and len(title) > 60:
-        return _clip(title, 60)
+        return ""
+    lowered = title.lower().strip(" .")
+    if lowered in {"job", "new job", "saudi arabia"}:
+        return ""
+    # Scrapes sometimes store a description sentence in title.
+    if title[:1].islower() and len(title) > 50:
+        return ""
+    if " " in title and not any(ch.isupper() for ch in title[1:]):
+        # All-lowercase multi-word strings are almost always body text.
+        if title[:1].islower():
+            return ""
     return title
 
 
-def group_message_for(job: dict) -> str:
-    """One job, one short WhatsApp message. Keep under the gateway cut limit."""
+def _clean_description(job: dict, title: str) -> str:
+    raw = str(job.get("description") or "")
+    # Old WhatsApp bubbles sometimes got saved back into description.
+    raw = _HEADER_ECHO.split(raw)[0]
+    parts = []
+    for chunk in re.split(r"[\r\n]+", raw):
+        low_raw = chunk.lower()
+        if "saudi arabia · whatsapp" in low_raw or "· whatsapp" in low_raw:
+            continue
+        piece = _clean_field(chunk)
+        if not piece or piece.lower().startswith("skills:"):
+            continue
+        parts.append(piece)
+    description = " ".join(parts)
+    if title and description.lower().startswith(title.lower()[:40].lower()):
+        return ""
+    return description
+
+
+def job_is_alertable(job: dict) -> bool:
+    """Drop WhatsApp-sourced junk and rows with no real title or apply link."""
+    if _is_whatsapp_source(job):
+        return False
     title = _display_title(job)
+    url = _job_link(str(job.get("url") or ""))
+    company = _clean_field(str(job.get("company") or ""))
+    if not title:
+        return False
+    if not url and not company:
+        return False
+    return True
+
+
+def _format_job_message(job: dict, *, header: str, extra_lines: list[str] | None = None) -> str:
+    title = _display_title(job) or "Job"
     place = " · ".join(
         part
         for part in (
@@ -416,42 +475,36 @@ def group_message_for(job: dict) -> str:
     )
     skills = [_clean_field(str(item)) for item in (job.get("skills") or []) if _clean_field(str(item))][:6]
     url = _job_link(str(job.get("url") or ""))
-    description = _clean_field(str(job.get("description") or ""))
-    if description.lower().startswith(title.lower()[:40].lower()):
-        description = ""
+    description = _clean_description(job, title)
 
-    fixed = ["New job in Saudi", "", title]
+    fixed = [header, "", title]
     if place:
         fixed.append(place)
     if skills:
         fixed.append("Skills: " + ", ".join(skills))
+    for line in extra_lines or []:
+        if line:
+            fixed.append(line)
     fixed_text = "\n".join(fixed)
     room = _GROUP_MESSAGE_LIMIT - len(fixed_text) - len(url) - 4
     if description and room >= 40:
-        description = _clip(description, min(_GROUP_DESC_LIMIT, room))
-        fixed.extend(["", description])
+        fixed.extend(["", _clip(description, min(_GROUP_DESC_LIMIT, room))])
     if url:
         fixed.extend(["", url])
     return "\n".join(fixed).strip()
 
 
+def group_message_for(job: dict) -> str:
+    """One job, one short WhatsApp group message."""
+    return _format_job_message(job, header="New job in Saudi")
+
+
 def message_for(job: dict, match: dict) -> str:
-    place = " · ".join(
-        part for part in (job.get("company"), job.get("location"), job.get("platform")) if part
-    )
-    lines = ["New job for you", "", str(job.get("title") or "Job")]
-    if place:
-        lines.append(place)
     why = list(match.get("matched_skills") or [])[:4] or list(match.get("matched_titles") or [])[:2]
+    extra = []
     if why:
-        lines.append("Match: " + ", ".join(why))
-    description = _clip(job.get("description") or "", 320)
-    if description:
-        lines.extend(["", description])
-    url = str(job.get("url") or "").strip()
-    if url:
-        lines.extend(["", url])
-    return "\n".join(lines)
+        extra.append("Match: " + ", ".join(_clean_field(str(item)) for item in why if _clean_field(str(item))))
+    return _format_job_message(job, header="New job for you", extra_lines=extra)
 
 
 def _auth_headers() -> dict[str, str]:
@@ -854,10 +907,19 @@ def _post_new_jobs_to_group(cur, jobs: list[dict]) -> tuple[int, list[dict]]:
         return 0, []
     already = _sent_ids(cur, channel[:64], [job["source_id"] for job in jobs])
     pending = [job for job in jobs if job["source_id"] not in already]
-    per_flush = max(1, _int_env("WHATSAPP_GROUP_MAX_PER_FLUSH", 30))
+    per_flush = max(1, _int_env("WHATSAPP_GROUP_MAX_PER_FLUSH", 20))
     sent = 0
     left: list[dict] = []
     for index, job in enumerate(pending[:per_flush]):
+        if not job_is_alertable(job):
+            try:
+                cur.connection.ping(reconnect=True)
+                _mark_sent(cur, channel[:64], job["source_id"], job=job, message="")
+            except Exception as exc:
+                code = exc.args[0] if getattr(exc, "args", None) else None
+                if code != 1062:
+                    raise
+            continue
         text = group_message_for(job)
         if send_whatsapp_group(text):
             try:
@@ -869,7 +931,7 @@ def _post_new_jobs_to_group(cur, jobs: list[dict]) -> tuple[int, list[dict]]:
                     raise
             sent += 1
             # Gateway merges bursts into one cut bubble if sends are too close.
-            time.sleep(max(1.0, float(_env("WHATSAPP_GROUP_SEND_GAP", "1.5") or "1.5")))
+            time.sleep(max(1.5, float(_env("WHATSAPP_GROUP_SEND_GAP", "2") or "2")))
             continue
         _note_group_backoff()
         left.append(job)
@@ -931,6 +993,8 @@ def deliver_job_alerts(jobs: list[dict]) -> int:
                 matched: list[tuple[int, dict, dict]] = []
                 for job in jobs:
                     if job["source_id"] in already:
+                        continue
+                    if not job_is_alertable(job):
                         continue
                     if not filter_jobs_for_candidate([job], person["profile"], state="All", city=""):
                         continue
