@@ -260,6 +260,39 @@ def _strip_bullet(text: str) -> str:
     return re.sub(r"^[\-•●○▪◦\*]+\s*", "", (text or "").strip())
 
 
+def cv_text_to_docx(text: str) -> bytes:
+    """Turn plain CV text into a Word file. The first line is the name."""
+    from docx import Document
+    from docx.shared import Inches, Pt, RGBColor
+
+    lines = _split_lines(text)
+    if not lines:
+        raise ConvertError("Resume has no text to download.")
+
+    document = Document()
+    section = document.sections[0]
+    section.top_margin = Inches(0.7)
+    section.bottom_margin = Inches(0.7)
+    section.left_margin = Inches(0.8)
+    section.right_margin = Inches(0.8)
+    style = document.styles["Normal"]
+    style.font.name = "Calibri"
+    style.font.size = Pt(11)
+    style.font.color.rgb = RGBColor(15, 23, 42)
+
+    first = True
+    for line in lines:
+        kind = "h1" if first else _heading_kind(line)
+        first = False
+        _add_docx_block(document, line, kind)
+    return _save_docx(document)
+
+
+def cv_text_to_pdf(text: str) -> bytes:
+    """Turn plain CV text into a PDF download."""
+    return docx_to_pdf(cv_text_to_docx(text), "resume.docx")
+
+
 def preview_text_from_docx(data: bytes) -> str:
     from docx import Document
 

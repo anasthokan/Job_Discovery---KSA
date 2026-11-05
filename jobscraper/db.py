@@ -1803,6 +1803,42 @@ def load_jobs(description_chars: int = 800) -> list[dict]:
         return []
 
 
+def load_job(job_ref: str) -> dict | None:
+    """One job by numeric id, public_id, or source id, including the full description."""
+    ref = (job_ref or "").strip()
+    if not ref or not mysql_configured():
+        return None
+    conn = get_conn()
+    if conn is None:
+        return None
+    clauses = ["public_id = %s", "source_id = %s"]
+    params: list = [ref, ref]
+    if ref.isdigit():
+        clauses.insert(0, "id = %s")
+        params.insert(0, int(ref))
+    sql = (
+        "SELECT id AS api_id, "
+        "COALESCE(NULLIF(source_id, ''), public_id, CAST(id AS CHAR)) AS id, "
+        "title, company, skills, state, location, platform, "
+        "days_ago, url, description, "
+        "job_type, work_model, experience_level, "
+        "years_experience, visa_sponsorship, clearance_required, saudi_national_required, "
+        "compensation, posted_at, platform_posted_at, first_seen_at, created_at "
+        f"FROM {JOBS_TABLE} WHERE " + " OR ".join(clauses) + " LIMIT 1"
+    )
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            row = cur.fetchone()
+        if not row:
+            return None
+        return _job_from_row(row)
+    except Exception:
+        log.exception("MySQL load_job failed for %s", ref)
+        close_conn()
+        raise
+
+
 def job_count() -> int:
     if not mysql_configured():
         return 0

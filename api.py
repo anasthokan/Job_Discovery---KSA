@@ -38,6 +38,8 @@ from jobscraper.document_convert import (
     ConvertError,
     DOCX_TYPE,
     PDF_TYPE,
+    cv_text_to_docx,
+    cv_text_to_pdf,
     docx_to_pdf,
     pdf_to_docx,
     preview_text_from_docx,
@@ -80,6 +82,7 @@ from jobscraper.recommend import (
 from jobscraper.score_config import score_config
 from jobscraper.linkedin_profile import LinkedInProfileError, autofill_from_linkedin
 from jobscraper.profile_autofill import autofill_from_parsed
+from jobscraper.resume_enhance import enhance_profile_for_job
 from jobscraper.resume_parser import ResumeParseError, parse_resume_bytes, parse_resume_text
 from jobscraper.db import (
     close_conn as close_mysql,
@@ -94,6 +97,7 @@ from jobscraper.db import (
     load_candidate as load_candidate_mysql,
     attach_descriptions,
     attach_raw_descriptions,
+    load_job as load_job_mysql,
     load_jobs as load_jobs_mysql,
     mysql_configured,
     save_candidate as save_candidate_mysql,
@@ -343,7 +347,7 @@ async def lifespan(_app):
 
 app = FastAPI(
     title="Job Discovery",
-    description="Job listings API, skill-based job recommendations, resume/CV parse, profile autofill from a resume, ATS resume score, job-description-to-CV, PDF/DOCX conversion, and MySQL job storage.",
+    description="Job listings API, skill-based job recommendations, resume/CV parse, profile autofill from a resume, ATS resume score, job-description-to-CV, resume enhance download, PDF/DOCX conversion, and MySQL job storage.",
     version="1.7.0",
     lifespan=lifespan,
     redirect_slashes=False,
@@ -438,6 +442,11 @@ class ResumeInput(BaseModel):
     projects: list[ResumeProject] = []
     certifications: list[str] = []
     languages: list[str] = []
+
+
+class ResumeEnhanceRequest(BaseModel):
+    user_id: str = Field(..., min_length=1, description="App user id: numeric users.id or public_id")
+    job_id: str = Field(..., min_length=1, description="Job id, public_id, or source id from /api/jobs")
 
 
 class CvFromJobRequest(BaseModel):
@@ -1357,6 +1366,7 @@ def health():
         "profile_linkedin": True,
         "ats_score": True,
         "cv_from_job": True,
+        "resume_enhance": True,
         "pdf_docx_convert": True,
         "resume_formats": ["pdf", "docx", "txt"],
         "mysql": mysql,
@@ -2154,6 +2164,14 @@ def resume_contract():
                 "body": {"text": "resume text"},
                 "query": {"include_raw": "false"},
             },
+            "enhance": {
+                "method": "POST",
+                "path": "/api/resume/enhance",
+                "content_type": "application/json",
+                "body": {"user_id": "123", "job_id": "456"},
+                "query": {"format": "pdf"},
+                "returns": "application/pdf or a Word .docx file download",
+            },
         },
         "docs": "/docs",
     }
@@ -2202,6 +2220,63 @@ def parse_resume_from_text(
     except ResumeParseError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     return _resume_response(parsed, include_raw)
+
+
+def _job_for_enhance(job_id: str) -> dict:
+    ref = (job_id or "").strip()
+    if not ref:
+        raise HTTPException(status_code=400, detail="job_id is required.")
+    if mysql_configured():
+        try:
+            job = load_job_mysql(ref)
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"Could not load job {ref}: {exc}") from exc
+        if job:
+            return job
+    wanted = ref.lower()
+    for job in load_jobs_json():
+        if str(job.get("id") or "").lower() == wanted or str(job.get("job_id") or "") == wanted:
+            return job
+    raise HTTPException(status_code=404, detail=f"No job found for id '{ref}'.")
+
+
+def _enhanced_filename(profile: dict, job: dict, extension: str) -> str:
+    who = " ".join(part for part in (profile.get("first_name"), profile.get("last_name")) if part).strip() or "resume"
+    role = str(job.get("title") or "job")
+    stem = re.sub(r"[^\w.\-]+", "_", f"{who}_{role}").strip("._")[:80] or "resume"
+    return f"{stem}_enhanced.{extension}"
+
+
+@app.post(
+    "/api/resume/enhance",
+    summary="Enhance a saved user's resume for one job and download it",
+    response_class=Response,
+)
+def enhance_user_resume(
+    body: ResumeEnhanceRequest,
+    file_format: str = Query("pdf", alias="format", description="Download format: pdf or docx"),
+):
+    """Uses the user's saved resume and the job posting. Does not change /api/ats/score-file."""
+    fmt = (file_format or "pdf").strip().lower()
+    if fmt not in {"pdf", "docx"}:
+        raise HTTPException(status_code=400, detail="format must be pdf or docx.")
+    _cid, profile = _require_candidate(body.user_id.strip())
+    job = _job_for_enhance(body.job_id)
+    try:
+        built = enhance_profile_for_job(profile, job)
+        cv_text = built.get("cv_text") or ""
+        if fmt == "docx":
+            content = cv_text_to_docx(cv_text)
+            media = DOCX_TYPE
+        else:
+            content = cv_text_to_pdf(cv_text)
+            media = PDF_TYPE
+    except (JobToCvError, ResumeParseError, ConvertError) as exc:
+        status = getattr(exc, "status_code", 400)
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Resume enhance failed: {exc}") from exc
+    return _file_download(content, _enhanced_filename(profile, job, fmt), media)
 
 
 class ProfileJob(BaseModel):
