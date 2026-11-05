@@ -77,7 +77,6 @@ from jobscraper.recommend import (
     recommend_jobs,
     search_phrase,
 )
-from jobscraper.score_config import score_config
 from jobscraper.linkedin_profile import LinkedInProfileError, autofill_from_linkedin
 from jobscraper.profile_autofill import autofill_from_parsed
 from jobscraper.resume_parser import ResumeParseError, parse_resume_bytes, parse_resume_text
@@ -994,31 +993,6 @@ def _scrape_terms(
     return terms
 
 
-def _score_settings() -> dict:
-    """Weights and cutoff currently saved on the admin configuration screen."""
-    cfg = score_config()
-    return {
-        "weights": {
-            "skills": cfg["skills"],
-            "certifications": cfg["certifications"],
-            "title": cfg["title"],
-            "years_level": cfg["years_level"],
-        },
-        "min_score": cfg["min_score"],
-    }
-
-
-def _no_match_hint(*, refresh: bool = False) -> str:
-    cutoff = int(score_config()["min_score"])
-    hint = (
-        f"Listings were found, but none scored {cutoff} or higher against these skills, "
-        "certifications, or experience."
-    )
-    if refresh:
-        hint += " Try refresh=true."
-    return hint
-
-
 def _recommend_payload(
     *,
     skills: list[str],
@@ -1075,7 +1049,10 @@ def _recommend_payload(
     elif not filtered:
         hint = _empty_cache_hint()
     elif not ranked_all:
-        hint = _no_match_hint(refresh=True)
+        hint = (
+            "Listings were found, but none scored 25 or higher against these skills, "
+            "certifications, or experience. Try refresh=true."
+        )
     payload = {
         "ok": True,
         "count": len(ranked),
@@ -1084,7 +1061,6 @@ def _recommend_payload(
         "certifications": certifications,
         "experience_titles": experience_titles,
         "years": years,
-        **_score_settings(),
         "jobs": _with_time_ago(ranked),
         "pagination": _pagination(len(ranked_all), page_size, start),
         "hint": hint,
@@ -1843,14 +1819,16 @@ def recommend_roles(
     elif not filtered:
         hint = "No listings matched these filters."
     elif not ranked_all:
-        hint = _no_match_hint()
+        hint = (
+            "Listings were found, but none scored 25 or higher against these skills, "
+            "certifications, or experience."
+        )
     return {
         "ok": True,
         "skills": found,
         "certifications": certs,
         "experience_titles": titles,
         "years": years,
-        **_score_settings(),
         "jobs": _with_time_ago(ranked),
         "count": len(ranked),
         "total": len(ranked_all),

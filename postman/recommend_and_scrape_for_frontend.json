@@ -119,8 +119,6 @@
     "certifications": "Certifications used to rank this response.",
     "experience_titles": "Past job titles used to rank this response.",
     "years": "Candidate years used to rank. Null when dates are missing.",
-    "weights": "Percents from the admin configuration screen. Defaults are skills 55, certifications 15, title 20, years_level 10.",
-    "min_score": "Jobs below this score are left out. The admin score-value list sets it. Default 25.",
     "hint": "Null when jobs were found. A string when nothing matched.",
     "jobs[].match.score": "0 to 100. Sort is already done. Highest score is first.",
     "jobs[].match.matched_skills": "Skills found on this job.",
