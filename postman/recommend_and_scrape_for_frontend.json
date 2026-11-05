@@ -79,6 +79,13 @@
       "certifications": ["PMP"],
       "experience_titles": ["Software Engineer"],
       "years": 5,
+      "weights": {
+        "skills": 55,
+        "certifications": 15,
+        "title": 20,
+        "years_level": 10
+      },
+      "min_score": 25,
       "hint": null,
       "jobs": [
         {
@@ -119,6 +126,8 @@
     "certifications": "Certifications used to rank this response.",
     "experience_titles": "Past job titles used to rank this response.",
     "years": "Candidate years used to rank. Null when dates are missing.",
+    "weights": "Live factors from the admin recommendation-score API. skills, certifications, title, years_level.",
+    "min_score": "Lowest integer from the admin scores API. Jobs below this are left out.",
     "hint": "Null when jobs were found. A string when nothing matched.",
     "jobs[].match.score": "0 to 100. Sort is already done. Highest score is first.",
     "jobs[].match.matched_skills": "Skills found on this job.",
