@@ -355,18 +355,26 @@ _WHATSAPP_LINK = re.compile(
     r"(?:https?://)?(?:www\.)?(?:wa\.me|api\.whatsapp\.com)/\S+",
     re.IGNORECASE,
 )
+_HEADER_ECHO = re.compile(r"new\s+job\s+in\s+saudi", re.IGNORECASE)
+_GROUP_DESC_LIMIT = 180
+_GROUP_TITLE_LIMIT = 100
+_GROUP_MESSAGE_LIMIT = 900
 
 
 def _clip(value: str, limit: int) -> str:
     text = " ".join(str(value or "").split())
     if len(text) <= limit:
         return text
-    return text[: limit - 1].rstrip() + "…"
+    cut = text[:limit].rstrip()
+    if " " in cut:
+        cut = cut.rsplit(" ", 1)[0].rstrip()
+    return cut + "…"
 
 
-def _without_whatsapp_contact(value: str) -> str:
-    text = _WHATSAPP_LINK.sub("", str(value or ""))
-    return " ".join(text.split())
+def _clean_field(value: str) -> str:
+    text = _WHATSAPP_LINK.sub(" ", str(value or ""))
+    text = _HEADER_ECHO.sub(" ", text)
+    return " ".join(text.split()).strip()
 
 
 def _job_link(url: str) -> str:
@@ -377,36 +385,54 @@ def _job_link(url: str) -> str:
     return text
 
 
+def _display_platform(value: str) -> str:
+    platform = _clean_field(value)
+    if not platform or "whatsapp" in platform.lower():
+        return ""
+    return platform
+
+
+def _display_title(job: dict) -> str:
+    title = _clip(_clean_field(str(job.get("title") or "")), _GROUP_TITLE_LIMIT)
+    if not title:
+        return "Job"
+    # Scrapes sometimes store a description sentence in title. Keep it short.
+    if title[:1].islower() and len(title) > 60:
+        return _clip(title, 60)
+    return title
+
+
 def group_message_for(job: dict) -> str:
-    platform = _without_whatsapp_contact(str(job.get("platform") or ""))
-    if platform.lower() == "whatsapp":
-        platform = ""
+    """One job, one short WhatsApp message. Keep under the gateway cut limit."""
+    title = _display_title(job)
     place = " · ".join(
         part
         for part in (
-            _without_whatsapp_contact(str(job.get("company") or "")),
-            _without_whatsapp_contact(str(job.get("location") or job.get("state") or "")),
-            platform,
+            _clean_field(str(job.get("company") or "")),
+            _clean_field(str(job.get("location") or job.get("state") or "")),
+            _display_platform(str(job.get("platform") or "")),
         )
         if part
     )
-    lines = ["New job in Saudi", "", _without_whatsapp_contact(str(job.get("title") or "")) or "Job"]
-    if place:
-        lines.append(place)
-    skills = [
-        _without_whatsapp_contact(str(item))
-        for item in (job.get("skills") or [])
-        if _without_whatsapp_contact(str(item))
-    ][:6]
-    if skills:
-        lines.append("Skills: " + ", ".join(skills))
-    description = _clip(_without_whatsapp_contact(str(job.get("description") or "")), 320)
-    if description:
-        lines.extend(["", description])
+    skills = [_clean_field(str(item)) for item in (job.get("skills") or []) if _clean_field(str(item))][:6]
     url = _job_link(str(job.get("url") or ""))
+    description = _clean_field(str(job.get("description") or ""))
+    if description.lower().startswith(title.lower()[:40].lower()):
+        description = ""
+
+    fixed = ["New job in Saudi", "", title]
+    if place:
+        fixed.append(place)
+    if skills:
+        fixed.append("Skills: " + ", ".join(skills))
+    fixed_text = "\n".join(fixed)
+    room = _GROUP_MESSAGE_LIMIT - len(fixed_text) - len(url) - 4
+    if description and room >= 40:
+        description = _clip(description, min(_GROUP_DESC_LIMIT, room))
+        fixed.extend(["", description])
     if url:
-        lines.extend(["", url])
-    return "\r\n".join(lines)
+        fixed.extend(["", url])
+    return "\n".join(fixed).strip()
 
 
 def message_for(job: dict, match: dict) -> str:
@@ -842,7 +868,8 @@ def _post_new_jobs_to_group(cur, jobs: list[dict]) -> tuple[int, list[dict]]:
                 if code != 1062:
                     raise
             sent += 1
-            time.sleep(0.35)
+            # Gateway merges bursts into one cut bubble if sends are too close.
+            time.sleep(max(1.0, float(_env("WHATSAPP_GROUP_SEND_GAP", "1.5") or "1.5")))
             continue
         _note_group_backoff()
         left.append(job)
