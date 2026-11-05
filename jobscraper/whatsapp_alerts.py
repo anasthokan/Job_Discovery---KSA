@@ -77,9 +77,12 @@ _DIALS = tuple(sorted(set(_DIAL_CODES), key=len, reverse=True))
 _LOCK = threading.Lock()
 _DELIVER_LOCK = threading.Lock()
 _pending: list[dict] = []
+_inflight: set[str] = set()
 _timer: threading.Timer | None = None
 _recipients: dict = {"at": 0.0, "rows": []}
 _RECIPIENT_TTL = 600
+_group_backoff_until = 0.0
+_SWEEP_STARTED = False
 
 
 def _env(name: str, default: str = "") -> str:
@@ -196,9 +199,10 @@ def queue_job_alerts(rows: list[dict]) -> None:
     if not prepared:
         return
     with _LOCK:
-        known = {item["source_id"] for item in _pending}
+        known = {item["source_id"] for item in _pending} | _inflight
         _pending.extend(job for job in prepared if job["source_id"] not in known)
         _ensure_timer()
+    start_group_sweep()
 
 
 def queue_recent_unsent(hours: int = 24) -> None:
@@ -209,6 +213,7 @@ def queue_recent_unsent(hours: int = 24) -> None:
     """
     if not alerts_enabled():
         return
+    start_group_sweep()
     from jobscraper.db import JOBS_TABLE, get_conn
 
     conn = get_conn()
@@ -238,6 +243,81 @@ def queue_recent_unsent(hours: int = 24) -> None:
     _note(f"WhatsApp catch-up found {len(rows)} recent jobs")
     if rows:
         queue_job_alerts(rows)
+    start_group_sweep()
+
+
+def queue_unsent_group_jobs(limit: int = 200) -> None:
+    """Queue scraped jobs that never reached the group.
+
+    The in-memory queue is wiped if a send fails or the process restarts.
+    A saved job is not "fresh" on the next scrape, so this is what keeps the
+    group moving after the first few hundred messages.
+    """
+    if not group_alerts_enabled():
+        return
+    channel = _group_id()
+    if not channel:
+        return
+    from jobscraper.db import JOBS_TABLE, get_conn
+
+    conn = get_conn()
+    if conn is None:
+        return
+    try:
+        with conn.cursor() as cur:
+            ensure_alert_table(cur)
+            cur.execute(
+                f"""
+                SELECT j.source_id, j.title, j.company, j.skills, j.state, j.location,
+                       j.platform, j.url, j.description, j.job_type, j.work_model,
+                       j.experience_level, j.years_experience, j.visa_sponsorship,
+                       j.saudi_national_required, j.posted_at, j.platform_posted_at
+                FROM {JOBS_TABLE} j
+                LEFT JOIN {ALERTS_TABLE} a
+                  ON a.source_id = j.source_id AND a.phone = %s
+                WHERE a.id IS NULL
+                  AND j.title IS NOT NULL AND TRIM(j.title) <> ''
+                  AND j.first_seen_at >= UTC_TIMESTAMP() - INTERVAL 24 HOUR
+                ORDER BY j.first_seen_at DESC
+                LIMIT %s
+                """,
+                (channel[:64], limit),
+            )
+            rows = list(cur.fetchall() or [])
+    except Exception:
+        log.exception("WhatsApp group sweep query failed")
+        _note("WhatsApp group sweep query failed")
+        return
+    if rows:
+        _note(f"WhatsApp group sweep found {len(rows)} unsent job(s)")
+        queue_job_alerts(rows)
+
+
+def start_group_sweep() -> None:
+    global _SWEEP_STARTED
+    if not group_alerts_enabled():
+        return
+    with _LOCK:
+        if _SWEEP_STARTED:
+            return
+        _SWEEP_STARTED = True
+
+    def _loop() -> None:
+        while True:
+            time.sleep(max(30, _int_env("WHATSAPP_GROUP_SWEEP_SECONDS", 90)))
+            try:
+                queue_unsent_group_jobs()
+            except Exception:
+                log.exception("WhatsApp group sweep failed")
+
+    threading.Thread(target=_loop, name="whatsapp-group-sweep", daemon=True).start()
+
+
+def _note_group_backoff() -> None:
+    global _group_backoff_until
+    pause = max(30, _int_env("WHATSAPP_GROUP_BACKOFF_SECONDS", 120))
+    _group_backoff_until = time.time() + pause
+    _note(f"WhatsApp group send failed; next batch waits {pause}s")
 
 
 def _ensure_timer() -> None:
@@ -245,6 +325,9 @@ def _ensure_timer() -> None:
     if _timer is not None and _timer.is_alive():
         return
     delay = max(0, _int_env("WHATSAPP_DEBOUNCE_SECONDS", 30))
+    backoff = _group_backoff_until - time.time()
+    if backoff > delay:
+        delay = backoff
     _timer = threading.Timer(delay, _flush)
     _timer.daemon = True
     _timer.start()
@@ -722,10 +805,11 @@ def _post_new_jobs_to_group(cur, jobs: list[dict]) -> tuple[int, list[dict]]:
     per_flush = max(1, _int_env("WHATSAPP_GROUP_MAX_PER_FLUSH", 30))
     sent = 0
     left: list[dict] = []
-    for job in pending[:per_flush]:
+    for index, job in enumerate(pending[:per_flush]):
         text = group_message_for(job)
         if send_whatsapp_group(text):
             try:
+                cur.connection.ping(reconnect=True)
                 _mark_sent(cur, channel[:64], job["source_id"], job=job, message=text)
             except Exception as exc:
                 code = exc.args[0] if getattr(exc, "args", None) else None
@@ -734,9 +818,10 @@ def _post_new_jobs_to_group(cur, jobs: list[dict]) -> tuple[int, list[dict]]:
             sent += 1
             time.sleep(0.35)
             continue
-        retry = _retry_job(job)
-        if retry is not None:
-            left.append(retry)
+        _note_group_backoff()
+        left.append(job)
+        left.extend(pending[index + 1 :])
+        return sent, left
     left.extend(pending[per_flush:])
     return sent, left
 
@@ -753,12 +838,17 @@ def deliver_job_alerts(jobs: list[dict]) -> int:
     jobs = list(unique.values())
     if not jobs:
         return 0
+    source_ids = [job["source_id"] for job in jobs]
+    with _LOCK:
+        _inflight.update(source_ids)
     recipients = _cached_recipients()
 
     from jobscraper.db import get_conn
 
     conn = get_conn()
     if conn is None:
+        with _LOCK:
+            _inflight.difference_update(source_ids)
         return 0
     minimum = max(1, _int_env("WHATSAPP_MIN_SCORE", 1))
     per_flush = max(1, _int_env("WHATSAPP_MAX_PER_FLUSH", 30))
@@ -766,6 +856,7 @@ def deliver_job_alerts(jobs: list[dict]) -> int:
     per_day = _int_env("WHATSAPP_MAX_PER_DAY", 0)
     sent = 0
     group_sent = 0
+    group_left: list[dict] = []
     failed: list[dict] = []
     waiting: list[dict] = []
     try:
@@ -773,7 +864,6 @@ def deliver_job_alerts(jobs: list[dict]) -> int:
             ensure_alert_table(cur)
             group_sent, group_left = _post_new_jobs_to_group(cur, jobs)
             sent += group_sent
-            waiting.extend(group_left)
             if not recipients:
                 _note(
                     f"WhatsApp group sent {group_sent} of {len(jobs)} new job(s); "
@@ -830,8 +920,11 @@ def deliver_job_alerts(jobs: list[dict]) -> int:
                         failed.append(retry)
     except Exception:
         log.exception("WhatsApp alert delivery failed")
-        return sent
-    _requeue(failed + waiting)
+        _note("WhatsApp alert delivery failed")
+    finally:
+        with _LOCK:
+            _inflight.difference_update(source_ids)
+    _requeue(group_left + failed + waiting)
     if recipients:
         _note(
             f"WhatsApp alerts sent {sent - group_sent} personal message(s) and "
