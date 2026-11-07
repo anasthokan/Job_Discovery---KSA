@@ -83,6 +83,15 @@ _recipients: dict = {"at": 0.0, "rows": []}
 _RECIPIENT_TTL = 600
 _group_backoff_until = 0.0
 _SWEEP_STARTED = False
+_FIRST_SEEN_INDEXED = False
+_SWEEP_STATUS = {
+    "at": None,
+    "found": 0,
+    "queued": 0,
+    "skipped": 0,
+    "error": None,
+    "skipped_titles": [],
+}
 # Group posts only jobs scraped after this process started. Older rows stay in
 # the database and are not announced.
 _GROUP_NOT_BEFORE = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -188,7 +197,12 @@ def _alert_job(row: dict) -> dict:
     }
 
 
-def queue_job_alerts(rows: list[dict], *, group: bool | None = None) -> None:
+def group_sweep_status() -> dict:
+    """Last group sweep, so a restart can be checked without the server log."""
+    return dict(_SWEEP_STATUS)
+
+
+def queue_job_alerts(rows: list[dict], *, group: bool | None = None, immediate: bool = False) -> None:
     """Hold brand-new jobs briefly so one scrape wave becomes one matching pass."""
     if not alerts_enabled() or not rows:
         return
@@ -209,7 +223,7 @@ def queue_job_alerts(rows: list[dict], *, group: bool | None = None) -> None:
     with _LOCK:
         known = {item["source_id"] for item in _pending} | _inflight
         _pending.extend(job for job in prepared if job["source_id"] not in known)
-        _ensure_timer()
+        _ensure_timer(0 if immediate else None)
     start_group_sweep()
 
 
@@ -255,15 +269,80 @@ def queue_recent_unsent(hours: int = 24) -> None:
     start_group_sweep()
 
 
-def queue_unsent_group_jobs(limit: int | None = None) -> None:
-    """Retry group sends that failed during the scrape running in this process.
+def _remember_sweep(
+    *,
+    found: int = 0,
+    queued: int = 0,
+    skipped: int = 0,
+    error: str | None = None,
+    skipped_titles: list[str] | None = None,
+) -> None:
+    global _SWEEP_STATUS
+    _SWEEP_STATUS = {
+        "at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+        "found": found,
+        "queued": queued,
+        "skipped": skipped,
+        "error": error,
+        "skipped_titles": list(skipped_titles or []),
+    }
 
-    Jobs already stored before this process started are not announced.
+
+def _ensure_first_seen_index(cur, table: str) -> None:
+    """Jobs scanned by first_seen_at. Without this, startup reads the whole table."""
+    global _FIRST_SEEN_INDEXED
+    if _FIRST_SEEN_INDEXED:
+        return
+    try:
+        cur.execute(
+            """
+            SELECT 1 AS ok FROM information_schema.STATISTICS
+            WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s AND INDEX_NAME = 'idx_jobs_first_seen'
+            LIMIT 1
+            """,
+            (table,),
+        )
+        if not cur.fetchone():
+            cur.execute(f"ALTER TABLE {table} ADD INDEX idx_jobs_first_seen (first_seen_at)")
+    except Exception:
+        log.exception("Could not add first_seen index")
+    _FIRST_SEEN_INDEXED = True
+
+
+def _attach_short_descriptions(cur, table: str, rows: list[dict]) -> None:
+    """Short description for the few jobs about to be posted. Not the whole table."""
+    ids = [str(row.get("source_id") or "") for row in rows if row.get("source_id")]
+    found: dict[str, str] = {}
+    for start in range(0, len(ids), 200):
+        chunk = ids[start : start + 200]
+        marks = ", ".join(["%s"] * len(chunk))
+        cur.execute(
+            f"SELECT source_id, LEFT(description, 800) AS description "
+            f"FROM {table} WHERE source_id IN ({marks})",
+            chunk,
+        )
+        for hit in cur.fetchall() or []:
+            source_id = str(hit.get("source_id") or "")
+            if source_id:
+                found[source_id] = str(hit.get("description") or "")
+    for row in rows:
+        row["description"] = found.get(str(row.get("source_id") or ""), "")
+
+
+def queue_unsent_group_jobs(limit: int | None = None) -> None:
+    """Post group jobs from the last 6 hours that never got a real message.
+
+    A row marked skipped is tried again. Jobs already posted stay out.
+    The description column is not part of this scan. It is a LONGTEXT, and
+    reading it for the whole table hits the 20s query limit, so the sweep
+    died on startup and the group stayed quiet.
     """
     if not group_alerts_enabled():
+        _remember_sweep(error="group alerts are off")
         return
     channel = _group_id()
     if not channel:
+        _remember_sweep(error="group id is missing")
         return
     if limit is None:
         limit = max(1, _int_env("WHATSAPP_GROUP_SWEEP_LIMIT", 1000))
@@ -271,16 +350,24 @@ def queue_unsent_group_jobs(limit: int | None = None) -> None:
 
     conn = get_conn()
     if conn is None:
+        _remember_sweep(error="database connection failed")
+        _note("WhatsApp group sweep query failed")
         return
     try:
         with conn.cursor() as cur:
+            try:
+                cur.execute("SET SESSION max_execution_time=120000")
+            except Exception:
+                pass
             ensure_alert_table(cur)
+            _ensure_first_seen_index(cur, JOBS_TABLE)
             cur.execute(
                 f"""
                 SELECT j.source_id, j.title, j.company, j.skills, j.state, j.location,
-                       j.platform, j.url, j.description, j.job_type, j.work_model,
+                       j.platform, j.url, j.job_type, j.work_model,
                        j.experience_level, j.years_experience, j.visa_sponsorship,
-                       j.saudi_national_required, j.posted_at, j.platform_posted_at
+                       j.saudi_national_required, j.posted_at, j.platform_posted_at,
+                       IFNULL(a.message, '') AS alert_message
                 FROM {JOBS_TABLE} j
                 LEFT JOIN {ALERTS_TABLE} a
                   ON a.source_id = j.source_id AND a.phone = %s
@@ -289,7 +376,7 @@ def queue_unsent_group_jobs(limit: int | None = None) -> None:
                   AND IFNULL(j.url, '') NOT LIKE '%wa.me%'
                   AND IFNULL(j.url, '') NOT LIKE '%api.whatsapp.com%'
                   AND j.first_seen_at >= UTC_TIMESTAMP() - INTERVAL 6 HOUR
-                  AND (a.id IS NULL OR IFNULL(a.message, '') = '')
+                  AND (a.id IS NULL OR IFNULL(a.message, '') IN ('', 'skipped'))
                 ORDER BY j.first_seen_at DESC
                 LIMIT %s
                 """,
@@ -298,13 +385,20 @@ def queue_unsent_group_jobs(limit: int | None = None) -> None:
             fetched = list(cur.fetchall() or [])
             rows = []
             skipped = 0
+            skipped_titles: list[str] = []
             for row in fetched:
                 job = _alert_job(row)
-                if job_is_alertable(job):
+                text = group_message_for(job)
+                if job_is_alertable(job) and text and _group_message_ok(text):
                     rows.append(row)
+                    continue
+                if str(row.get("alert_message") or "") == "skipped":
                     continue
                 # Leave these out of the send queue, and record them so the
                 # next sweep is not stuck re-reading the same unusable rows.
+                title = str(row.get("title") or "").strip()
+                if title and len(skipped_titles) < 8:
+                    skipped_titles.append(title[:80])
                 try:
                     cur.connection.ping(reconnect=True)
                     _mark_sent(cur, channel[:64], job["source_id"], job=job, message="skipped")
@@ -314,20 +408,30 @@ def queue_unsent_group_jobs(limit: int | None = None) -> None:
                     if code == 1062:
                         cur.execute(
                             f"UPDATE {ALERTS_TABLE} SET message = 'skipped' "
-                            "WHERE phone = %s AND source_id = %s AND IFNULL(message, '') = ''",
+                            "WHERE phone = %s AND source_id = %s "
+                            "AND IFNULL(message, '') IN ('', 'skipped')",
                             (channel[:64], job["source_id"]),
                         )
+                        skipped += 1
                     else:
                         log.exception("WhatsApp group sweep could not skip unusable job")
+            if rows:
+                try:
+                    _attach_short_descriptions(cur, JOBS_TABLE, rows)
+                except Exception:
+                    log.exception("WhatsApp group sweep could not read descriptions")
     except Exception:
         log.exception("WhatsApp group sweep query failed")
         _note("WhatsApp group sweep query failed")
+        _remember_sweep(error="query failed")
         return
-    if skipped:
-        _note(f"WhatsApp group sweep skipped {skipped} job(s) with no usable title or link")
+    _remember_sweep(found=len(fetched), queued=len(rows), skipped=skipped, skipped_titles=skipped_titles)
+    _note(
+        f"WhatsApp group sweep found {len(rows)} unsent job(s)"
+        + (f"; skipped {skipped} with no usable title or link" if skipped else "")
+    )
     if rows:
-        _note(f"WhatsApp group sweep found {len(rows)} unsent job(s)")
-        queue_job_alerts(rows)
+        queue_job_alerts(rows, immediate=True)
 
 
 def start_group_sweep() -> None:
@@ -357,11 +461,12 @@ def _note_group_backoff() -> None:
     _note(f"WhatsApp group send failed; next batch waits {pause}s")
 
 
-def _ensure_timer() -> None:
+def _ensure_timer(delay: int | None = None) -> None:
     global _timer
     if _timer is not None and _timer.is_alive():
         return
-    delay = max(0, _int_env("WHATSAPP_DEBOUNCE_SECONDS", 30))
+    if delay is None:
+        delay = max(0, _int_env("WHATSAPP_DEBOUNCE_SECONDS", 30))
     backoff = _group_backoff_until - time.time()
     if backoff > delay:
         delay = backoff
@@ -549,7 +654,7 @@ def _group_urls_already_sent(cur, channel: str, urls: list[str]) -> set[str]:
         marks = ", ".join(["%s"] * len(chunk))
         cur.execute(
             f"SELECT url FROM {ALERTS_TABLE} WHERE phone = %s "
-            f"AND IFNULL(message, '') <> '' AND url IN ({marks})",
+            f"AND IFNULL(message, '') NOT IN ('', 'skipped') AND url IN ({marks})",
             [channel, *chunk],
         )
         for hit in cur.fetchall() or []:
@@ -922,7 +1027,7 @@ def _cached_recipients() -> list[dict]:
 
 def _sent_ids(cur, phone: str, source_ids: list[str], *, require_message: bool = False) -> set[str]:
     found: set[str] = set()
-    posted = " AND IFNULL(message, '') <> ''" if require_message else ""
+    posted = " AND IFNULL(message, '') NOT IN ('', 'skipped')" if require_message else ""
     for start in range(0, len(source_ids), 200):
         chunk = source_ids[start : start + 200]
         marks = ", ".join(["%s"] * len(chunk))
@@ -1036,7 +1141,8 @@ def _record_group_send(cur, channel: str, job: dict, message: str) -> bool:
                 if message:
                     cur.execute(
                         f"UPDATE {ALERTS_TABLE} SET message = %s, sent_at = UTC_TIMESTAMP(6) "
-                        "WHERE phone = %s AND source_id = %s AND IFNULL(message, '') = ''",
+                        "WHERE phone = %s AND source_id = %s "
+                        "AND IFNULL(message, '') IN ('', 'skipped')",
                         ((message or "")[:65000], channel, job["source_id"]),
                     )
                 return True

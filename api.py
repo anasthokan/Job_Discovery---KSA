@@ -1350,6 +1350,15 @@ async def _load_resume_upload(request: Request, file: UploadFile | None) -> tupl
     )
 
 
+def _whatsapp_group_status() -> dict:
+    try:
+        from jobscraper.whatsapp_alerts import group_sweep_status
+
+        return group_sweep_status()
+    except Exception:
+        return {"error": "unavailable"}
+
+
 @app.get("/api/health")
 def health():
     mysql = mysql_health()
@@ -1380,6 +1389,7 @@ def health():
         "headcount": headcount_status(),
         "ats_boards": ats_boards_status(),
         "inactive_sources": inactive_source_ids(),
+        "whatsapp_group": _whatsapp_group_status(),
     }
 
 
@@ -1688,6 +1698,7 @@ def scrape_status():
         "headcount": headcount_status(),
         "ats_boards": ats_boards_status(),
         "inactive_sources": inactive_source_ids(),
+        "whatsapp_group": _whatsapp_group_status(),
         **cache_meta(),
     }
 
