@@ -83,6 +83,9 @@ _recipients: dict = {"at": 0.0, "rows": []}
 _RECIPIENT_TTL = 600
 _group_backoff_until = 0.0
 _SWEEP_STARTED = False
+# Group posts only jobs scraped after this process started. Older rows stay in
+# the database and are not announced.
+_GROUP_NOT_BEFORE = datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 def _env(name: str, default: str = "") -> str:
@@ -181,10 +184,11 @@ def _alert_job(row: dict) -> dict:
         "posted_at": row.get("posted_at"),
         "platform_posted_at": row.get("platform_posted_at"),
         "_attempts": int(row.get("_attempts") or 0),
+        "_group": bool(row.get("_group", True)),
     }
 
 
-def queue_job_alerts(rows: list[dict]) -> None:
+def queue_job_alerts(rows: list[dict], *, group: bool | None = None) -> None:
     """Hold brand-new jobs briefly so one scrape wave becomes one matching pass."""
     if not alerts_enabled() or not rows:
         return
@@ -196,6 +200,8 @@ def queue_job_alerts(rows: list[dict]) -> None:
             continue
         if not job_is_alertable(job):
             continue
+        if group is not None:
+            job["_group"] = group
         seen.add(job["source_id"])
         prepared.append(job)
     if not prepared:
@@ -244,22 +250,23 @@ def queue_recent_unsent(hours: int = 24) -> None:
         return
     _note(f"WhatsApp catch-up found {len(rows)} recent jobs")
     if rows:
-        queue_job_alerts(rows)
+        # Personal matches only. The group hears a job when that scrape saves it.
+        queue_job_alerts(rows, group=False)
     start_group_sweep()
 
 
-def queue_unsent_group_jobs(limit: int = 200) -> None:
-    """Queue scraped jobs that never reached the group.
+def queue_unsent_group_jobs(limit: int | None = None) -> None:
+    """Retry group sends that failed during the scrape running in this process.
 
-    The in-memory queue is wiped if a send fails or the process restarts.
-    A saved job is not "fresh" on the next scrape, so this is what keeps the
-    group moving after the first few hundred messages.
+    Jobs already stored before this process started are not announced.
     """
     if not group_alerts_enabled():
         return
     channel = _group_id()
     if not channel:
         return
+    if limit is None:
+        limit = max(1, _int_env("WHATSAPP_GROUP_SWEEP_LIMIT", 1000))
     from jobscraper.db import JOBS_TABLE, get_conn
 
     conn = get_conn()
@@ -282,17 +289,36 @@ def queue_unsent_group_jobs(limit: int = 200) -> None:
                   AND LOWER(IFNULL(j.platform, '')) NOT LIKE '%whatsapp%'
                   AND IFNULL(j.url, '') NOT LIKE '%wa.me%'
                   AND IFNULL(j.url, '') NOT LIKE '%api.whatsapp.com%'
-                  AND j.first_seen_at >= UTC_TIMESTAMP() - INTERVAL 24 HOUR
+                  AND j.first_seen_at >= %s
                 ORDER BY j.first_seen_at DESC
                 LIMIT %s
                 """,
-                (channel[:64], limit),
+                (channel[:64], _GROUP_NOT_BEFORE, limit),
             )
-            rows = [row for row in (cur.fetchall() or []) if job_is_alertable(_alert_job(row))]
+            fetched = list(cur.fetchall() or [])
+            rows = []
+            skipped = 0
+            for row in fetched:
+                job = _alert_job(row)
+                if job_is_alertable(job):
+                    rows.append(row)
+                    continue
+                # Leave these out of the send queue, and record them so the
+                # next sweep is not stuck re-reading the same unusable rows.
+                try:
+                    cur.connection.ping(reconnect=True)
+                    _mark_sent(cur, channel[:64], job["source_id"], job=job, message="")
+                    skipped += 1
+                except Exception as exc:
+                    code = exc.args[0] if getattr(exc, "args", None) else None
+                    if code != 1062:
+                        log.exception("WhatsApp group sweep could not skip unusable job")
     except Exception:
         log.exception("WhatsApp group sweep query failed")
         _note("WhatsApp group sweep query failed")
         return
+    if skipped:
+        _note(f"WhatsApp group sweep skipped {skipped} job(s) with no usable title or link")
     if rows:
         _note(f"WhatsApp group sweep found {len(rows)} unsent job(s)")
         queue_job_alerts(rows)
@@ -309,11 +335,11 @@ def start_group_sweep() -> None:
 
     def _loop() -> None:
         while True:
-            time.sleep(max(30, _int_env("WHATSAPP_GROUP_SWEEP_SECONDS", 90)))
             try:
                 queue_unsent_group_jobs()
             except Exception:
                 log.exception("WhatsApp group sweep failed")
+            time.sleep(max(30, _int_env("WHATSAPP_GROUP_SWEEP_SECONDS", 90)))
 
     threading.Thread(target=_loop, name="whatsapp-group-sweep", daemon=True).start()
 
@@ -362,9 +388,26 @@ _WHATSAPP_LINK = re.compile(
 )
 _HEADER_ECHO = re.compile(r"new\s+job\s+(?:in\s+saudi|for\s+you)", re.IGNORECASE)
 _PLACE_NOISE = re.compile(
-    r"\bSaudi Arabia\s*·\s*whatsapp\b|\bwhatsapp\b",
+    r"saudi arabia\s*[·•|\-]\s*whatsapp|\bwhatsapp\b",
     re.IGNORECASE,
 )
+_JUNK_TITLES = {
+    "job",
+    "jobs",
+    "new job",
+    "new job in saudi",
+    "new job for you",
+    "saudi arabia",
+    "the right people",
+    "right people",
+}
+_COUNTRY_ONLY = {
+    "saudi arabia",
+    "saudi",
+    "ksa",
+    "kingdom of saudi arabia",
+    "ksa saudi arabia",
+}
 _GROUP_DESC_LIMIT = 220
 _GROUP_TITLE_LIMIT = 100
 _GROUP_MESSAGE_LIMIT = 1100
@@ -412,12 +455,28 @@ def _is_whatsapp_source(job: dict) -> bool:
     return False
 
 
+def _is_junk_title(title: str) -> bool:
+    lowered = " ".join(title.lower().strip(" .").split())
+    if not lowered or lowered in _JUNK_TITLES:
+        return True
+    if lowered.startswith("new job in saudi") or lowered.startswith("new job for you"):
+        return True
+    return False
+
+
+def _short_label(value: str, limit: int = 80) -> str:
+    """Company or city. A pasted paragraph is not a place name."""
+    text = _clean_field(value)
+    if not text or text.lower() in _COUNTRY_ONLY:
+        return ""
+    if len(text) > limit or "!" in text or len(text.split()) > 8:
+        return ""
+    return text
+
+
 def _display_title(job: dict) -> str:
     title = _clip(_clean_field(str(job.get("title") or "")), _GROUP_TITLE_LIMIT)
-    if not title:
-        return ""
-    lowered = title.lower().strip(" .")
-    if lowered in {"job", "new job", "saudi arabia"}:
+    if not title or _is_junk_title(title):
         return ""
     # Scrapes sometimes store a description sentence in title.
     if title[:1].islower() and len(title) > 50:
@@ -426,6 +485,8 @@ def _display_title(job: dict) -> str:
         # All-lowercase multi-word strings are almost always body text.
         if title[:1].islower():
             return ""
+    if "whatsapp" in title.lower() or "wa.me" in title.lower():
+        return ""
     return title
 
 
@@ -436,10 +497,12 @@ def _clean_description(job: dict, title: str) -> str:
     parts = []
     for chunk in re.split(r"[\r\n]+", raw):
         low_raw = chunk.lower()
-        if "saudi arabia · whatsapp" in low_raw or "· whatsapp" in low_raw:
+        if "whatsapp" in low_raw or "wa.me" in low_raw or "api.whatsapp.com" in low_raw:
             continue
         piece = _clean_field(chunk)
         if not piece or piece.lower().startswith("skills:"):
+            continue
+        if "new job in saudi" in piece.lower() or "new job for you" in piece.lower():
             continue
         parts.append(piece)
     description = " ".join(parts)
@@ -454,7 +517,7 @@ def job_is_alertable(job: dict) -> bool:
         return False
     title = _display_title(job)
     url = _job_link(str(job.get("url") or ""))
-    company = _clean_field(str(job.get("company") or ""))
+    company = _short_label(str(job.get("company") or ""))
     if not title:
         return False
     if not url and not company:
@@ -462,13 +525,61 @@ def job_is_alertable(job: dict) -> bool:
     return True
 
 
+def _group_repeat_key(job: dict) -> str:
+    title = _display_title(job).lower()
+    company = _short_label(str(job.get("company") or "")).lower()
+    url = _job_link(str(job.get("url") or "")).lower()
+    return f"{title}|{company}|{url}"
+
+
+def _group_urls_already_sent(cur, channel: str, urls: list[str]) -> set[str]:
+    found: set[str] = set()
+    clean: list[str] = []
+    seen: set[str] = set()
+    for url in urls:
+        text = _job_link(url)
+        if text and text not in seen:
+            seen.add(text)
+            clean.append(text)
+    for start in range(0, len(clean), 100):
+        chunk = clean[start : start + 100]
+        marks = ", ".join(["%s"] * len(chunk))
+        cur.execute(
+            f"SELECT url FROM {ALERTS_TABLE} WHERE phone = %s "
+            f"AND IFNULL(message, '') <> '' AND url IN ({marks})",
+            [channel, *chunk],
+        )
+        for hit in cur.fetchall() or []:
+            saved = _job_link(str(hit.get("url") or ""))
+            if saved:
+                found.add(saved)
+    return found
+
+
+def _group_message_ok(text: str) -> bool:
+    """Reject the bad bubbles that were already posted to the group."""
+    low = text.lower()
+    if "whatsapp" in low or "wa.me" in low or "api.whatsapp.com" in low:
+        return False
+    if low.count("new job in saudi") != 1:
+        return False
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(lines) < 2 or lines[0].lower() != "new job in saudi":
+        return False
+    if _is_junk_title(lines[1]):
+        return False
+    return True
+
+
 def _format_job_message(job: dict, *, header: str, extra_lines: list[str] | None = None) -> str:
-    title = _display_title(job) or "Job"
+    title = _display_title(job)
+    if not title:
+        return ""
     place = " · ".join(
         part
         for part in (
-            _clean_field(str(job.get("company") or "")),
-            _clean_field(str(job.get("location") or job.get("state") or "")),
+            _short_label(str(job.get("company") or "")),
+            _short_label(str(job.get("location") or job.get("state") or "")),
             _display_platform(str(job.get("platform") or "")),
         )
         if part
@@ -897,48 +1008,105 @@ def _requeue(jobs: list[dict]) -> None:
         queue_job_alerts(list(merged.values()))
 
 
-def _post_new_jobs_to_group(cur, jobs: list[dict]) -> tuple[int, list[dict]]:
-    """Post each new scrape to the group once. Returns (sent, still pending)."""
+def _group_flush_limit() -> int:
+    """How many group messages one pass may send. 0 means the whole batch."""
+    return max(0, _int_env("WHATSAPP_GROUP_MAX_PER_FLUSH", 0))
+
+
+def _record_group_send(cur, channel: str, job: dict, message: str) -> bool:
+    """Store that this job already went to the group. False if the row was not saved."""
+    for _attempt in range(2):
+        try:
+            cur.connection.ping(reconnect=True)
+            _mark_sent(cur, channel, job["source_id"], job=job, message=message)
+            return True
+        except Exception as exc:
+            code = exc.args[0] if getattr(exc, "args", None) else None
+            if code == 1062:
+                return True
+            log.exception("WhatsApp group alert row was not saved")
+    return False
+
+
+def _post_new_jobs_to_group(cur, jobs: list[dict]) -> tuple[int, list[dict], bool]:
+    """Post new scrapes to the group. Returns (sent, still pending, keep going).
+
+    keep going is true only when this pass stopped because of the batch cap
+    and the gateway was still accepting messages.
+    """
     if not group_alerts_enabled():
-        return 0, []
+        return 0, [], False
     channel = _group_id()
     if not channel:
         _note("WhatsApp group send skipped: WHATSAPP_GROUP_ID is not a group id")
-        return 0, []
-    already = _sent_ids(cur, channel[:64], [job["source_id"] for job in jobs])
-    pending = [job for job in jobs if job["source_id"] not in already]
-    per_flush = max(1, _int_env("WHATSAPP_GROUP_MAX_PER_FLUSH", 20))
+        return 0, [], False
+    group_jobs = [job for job in jobs if job.get("_group", True)]
+    already = _sent_ids(cur, channel[:64], [job["source_id"] for job in group_jobs])
+    posted_urls = _group_urls_already_sent(
+        cur,
+        channel[:64],
+        [_job_link(str(job.get("url") or "")) for job in group_jobs],
+    )
+    pending = []
+    seen_keys: set[str] = set()
+    for job in group_jobs:
+        if job["source_id"] in already:
+            continue
+        url = _job_link(str(job.get("url") or ""))
+        key = _group_repeat_key(job)
+        if (url and url in posted_urls) or key in seen_keys:
+            _record_group_send(cur, channel[:64], job, "")
+            continue
+        seen_keys.add(key)
+        if url:
+            posted_urls.add(url)
+        pending.append(job)
+    cap = _group_flush_limit()
+    window = pending if cap <= 0 else pending[:cap]
+    overflow = [] if cap <= 0 else pending[cap:]
     sent = 0
     left: list[dict] = []
-    for index, job in enumerate(pending[:per_flush]):
-        if not job_is_alertable(job):
-            try:
-                cur.connection.ping(reconnect=True)
-                _mark_sent(cur, channel[:64], job["source_id"], job=job, message="")
-            except Exception as exc:
-                code = exc.args[0] if getattr(exc, "args", None) else None
-                if code != 1062:
-                    raise
-            continue
-        text = group_message_for(job)
-        if send_whatsapp_group(text):
-            try:
-                cur.connection.ping(reconnect=True)
-                _mark_sent(cur, channel[:64], job["source_id"], job=job, message=text)
-            except Exception as exc:
-                code = exc.args[0] if getattr(exc, "args", None) else None
-                if code != 1062:
-                    raise
-            sent += 1
-            # Gateway merges bursts into one cut bubble if sends are too close.
-            time.sleep(max(1.5, float(_env("WHATSAPP_GROUP_SEND_GAP", "2") or "2")))
-            continue
-        _note_group_backoff()
-        left.append(job)
-        left.extend(pending[index + 1 :])
-        return sent, left
-    left.extend(pending[per_flush:])
-    return sent, left
+    consecutive_fails = 0
+    fail_limit = max(1, _int_env("WHATSAPP_GROUP_FAILS_BEFORE_BACKOFF", 3))
+    gap = max(1.5, float(_env("WHATSAPP_GROUP_SEND_GAP", "2") or "2"))
+    keep_going = False
+    index = 0
+    try:
+        for index, job in enumerate(window):
+            if not job_is_alertable(job):
+                _record_group_send(cur, channel[:64], job, "")
+                consecutive_fails = 0
+                continue
+            text = group_message_for(job)
+            if not text or not _group_message_ok(text):
+                _record_group_send(cur, channel[:64], job, "")
+                consecutive_fails = 0
+                continue
+            if send_whatsapp_group(text):
+                _record_group_send(cur, channel[:64], job, text)
+                sent += 1
+                consecutive_fails = 0
+                # Gateway merges bursts into one cut bubble if sends are too close.
+                time.sleep(gap)
+                continue
+            consecutive_fails += 1
+            left.append(job)
+            if consecutive_fails >= fail_limit:
+                _note_group_backoff()
+                left.extend(window[index + 1 :])
+                break
+            time.sleep(gap)
+        else:
+            # One rejected job must not pull the overflow straight back into
+            # this same pass, or that job is retried forever.
+            keep_going = bool(overflow) and not left
+    except Exception:
+        log.exception("WhatsApp group send stopped")
+        _note("WhatsApp group send stopped; remaining jobs stay queued")
+        left.extend(window[index:])
+        keep_going = False
+    left.extend(overflow)
+    return sent, left, keep_going
 
 
 def deliver_job_alerts(jobs: list[dict]) -> int:
@@ -977,8 +1145,14 @@ def deliver_job_alerts(jobs: list[dict]) -> int:
     try:
         with conn.cursor() as cur:
             ensure_alert_table(cur)
-            group_sent, group_left = _post_new_jobs_to_group(cur, jobs)
-            sent += group_sent
+            group_batch = list(jobs)
+            while group_batch:
+                sent_now, group_left, keep_going = _post_new_jobs_to_group(cur, group_batch)
+                group_sent += sent_now
+                sent += sent_now
+                if not keep_going or not group_left or len(group_left) >= len(group_batch):
+                    break
+                group_batch = group_left
             if not recipients:
                 _note(
                     f"WhatsApp group sent {group_sent} of {len(jobs)} new job(s); "
