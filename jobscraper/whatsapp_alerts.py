@@ -284,16 +284,16 @@ def queue_unsent_group_jobs(limit: int | None = None) -> None:
                 FROM {JOBS_TABLE} j
                 LEFT JOIN {ALERTS_TABLE} a
                   ON a.source_id = j.source_id AND a.phone = %s
-                WHERE a.id IS NULL
-                  AND j.title IS NOT NULL AND TRIM(j.title) <> ''
+                WHERE j.title IS NOT NULL AND TRIM(j.title) <> ''
                   AND LOWER(IFNULL(j.platform, '')) NOT LIKE '%whatsapp%'
                   AND IFNULL(j.url, '') NOT LIKE '%wa.me%'
                   AND IFNULL(j.url, '') NOT LIKE '%api.whatsapp.com%'
-                  AND j.first_seen_at >= %s
+                  AND j.first_seen_at >= UTC_TIMESTAMP() - INTERVAL 6 HOUR
+                  AND (a.id IS NULL OR IFNULL(a.message, '') = '')
                 ORDER BY j.first_seen_at DESC
                 LIMIT %s
                 """,
-                (channel[:64], _GROUP_NOT_BEFORE, limit),
+                (channel[:64], limit),
             )
             fetched = list(cur.fetchall() or [])
             rows = []
@@ -307,11 +307,17 @@ def queue_unsent_group_jobs(limit: int | None = None) -> None:
                 # next sweep is not stuck re-reading the same unusable rows.
                 try:
                     cur.connection.ping(reconnect=True)
-                    _mark_sent(cur, channel[:64], job["source_id"], job=job, message="")
+                    _mark_sent(cur, channel[:64], job["source_id"], job=job, message="skipped")
                     skipped += 1
                 except Exception as exc:
                     code = exc.args[0] if getattr(exc, "args", None) else None
-                    if code != 1062:
+                    if code == 1062:
+                        cur.execute(
+                            f"UPDATE {ALERTS_TABLE} SET message = 'skipped' "
+                            "WHERE phone = %s AND source_id = %s AND IFNULL(message, '') = ''",
+                            (channel[:64], job["source_id"]),
+                        )
+                    else:
                         log.exception("WhatsApp group sweep could not skip unusable job")
     except Exception:
         log.exception("WhatsApp group sweep query failed")
@@ -479,13 +485,10 @@ def _display_title(job: dict) -> str:
     if not title or _is_junk_title(title):
         return ""
     # Scrapes sometimes store a description sentence in title.
-    if title[:1].islower() and len(title) > 50:
+    # A long lowercase sentence is body text. A short lowercase title is still a job.
+    if title[:1].islower() and (len(title) > 60 or len(title.split()) > 8 or "." in title or "!" in title):
         return ""
-    if " " in title and not any(ch.isupper() for ch in title[1:]):
-        # All-lowercase multi-word strings are almost always body text.
-        if title[:1].islower():
-            return ""
-    if "whatsapp" in title.lower() or "wa.me" in title.lower():
+    if "wa.me" in title.lower() or "api.whatsapp.com" in title.lower():
         return ""
     return title
 
@@ -557,16 +560,22 @@ def _group_urls_already_sent(cur, channel: str, urls: list[str]) -> set[str]:
 
 
 def _group_message_ok(text: str) -> bool:
-    """Reject the bad bubbles that were already posted to the group."""
-    low = text.lower()
-    if "whatsapp" in low or "wa.me" in low or "api.whatsapp.com" in low:
-        return False
-    if low.count("new job in saudi") != 1:
-        return False
+    """Reject pasted WhatsApp bubbles. A real apply link may stay."""
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     if len(lines) < 2 or lines[0].lower() != "new job in saudi":
         return False
     if _is_junk_title(lines[1]):
+        return False
+    body: list[str] = []
+    for line in lines[1:]:
+        low = line.lower()
+        if low.startswith("http://") or low.startswith("https://"):
+            if "wa.me" in low or "api.whatsapp.com" in low:
+                return False
+            continue
+        body.append(low)
+    content = "\n".join(body)
+    if "wa.me" in content or "api.whatsapp.com" in content or "new job in saudi" in content:
         return False
     return True
 
@@ -911,13 +920,14 @@ def _cached_recipients() -> list[dict]:
     return list(rows)
 
 
-def _sent_ids(cur, phone: str, source_ids: list[str]) -> set[str]:
+def _sent_ids(cur, phone: str, source_ids: list[str], *, require_message: bool = False) -> set[str]:
     found: set[str] = set()
+    posted = " AND IFNULL(message, '') <> ''" if require_message else ""
     for start in range(0, len(source_ids), 200):
         chunk = source_ids[start : start + 200]
         marks = ", ".join(["%s"] * len(chunk))
         cur.execute(
-            f"SELECT source_id FROM {ALERTS_TABLE} WHERE phone = %s AND source_id IN ({marks})",
+            f"SELECT source_id FROM {ALERTS_TABLE} WHERE phone = %s AND source_id IN ({marks}){posted}",
             [phone, *chunk],
         )
         for hit in cur.fetchall() or []:
@@ -1023,6 +1033,12 @@ def _record_group_send(cur, channel: str, job: dict, message: str) -> bool:
         except Exception as exc:
             code = exc.args[0] if getattr(exc, "args", None) else None
             if code == 1062:
+                if message:
+                    cur.execute(
+                        f"UPDATE {ALERTS_TABLE} SET message = %s, sent_at = UTC_TIMESTAMP(6) "
+                        "WHERE phone = %s AND source_id = %s AND IFNULL(message, '') = ''",
+                        ((message or "")[:65000], channel, job["source_id"]),
+                    )
                 return True
             log.exception("WhatsApp group alert row was not saved")
     return False
@@ -1041,7 +1057,12 @@ def _post_new_jobs_to_group(cur, jobs: list[dict]) -> tuple[int, list[dict], boo
         _note("WhatsApp group send skipped: WHATSAPP_GROUP_ID is not a group id")
         return 0, [], False
     group_jobs = [job for job in jobs if job.get("_group", True)]
-    already = _sent_ids(cur, channel[:64], [job["source_id"] for job in group_jobs])
+    already = _sent_ids(
+        cur,
+        channel[:64],
+        [job["source_id"] for job in group_jobs],
+        require_message=True,
+    )
     posted_urls = _group_urls_already_sent(
         cur,
         channel[:64],
@@ -1055,7 +1076,7 @@ def _post_new_jobs_to_group(cur, jobs: list[dict]) -> tuple[int, list[dict], boo
         url = _job_link(str(job.get("url") or ""))
         key = _group_repeat_key(job)
         if (url and url in posted_urls) or key in seen_keys:
-            _record_group_send(cur, channel[:64], job, "")
+            _record_group_send(cur, channel[:64], job, "skipped")
             continue
         seen_keys.add(key)
         if url:
@@ -1074,12 +1095,12 @@ def _post_new_jobs_to_group(cur, jobs: list[dict]) -> tuple[int, list[dict], boo
     try:
         for index, job in enumerate(window):
             if not job_is_alertable(job):
-                _record_group_send(cur, channel[:64], job, "")
+                _record_group_send(cur, channel[:64], job, "skipped")
                 consecutive_fails = 0
                 continue
             text = group_message_for(job)
             if not text or not _group_message_ok(text):
-                _record_group_send(cur, channel[:64], job, "")
+                _record_group_send(cur, channel[:64], job, "skipped")
                 consecutive_fails = 0
                 continue
             if send_whatsapp_group(text):
