@@ -961,6 +961,15 @@ def backfill_compensation() -> int:
 def _startup_maintenance() -> None:
     """Backfill and cleanup after uvicorn is already listening."""
     try:
+        from jobscraper.whatsapp_alerts import queue_unsent_group_jobs, start_group_sweep
+
+        # Do this before the description backfill. That work can take many
+        # minutes, and the group should not wait for it.
+        queue_unsent_group_jobs()
+        start_group_sweep()
+    except Exception:
+        log.exception("WhatsApp group sweep failed to start")
+    try:
         repair_placeholder_urls()
         delete_placeholder_jobs()
         fill_descriptions_from_raw()
