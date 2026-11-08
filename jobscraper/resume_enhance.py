@@ -49,42 +49,55 @@ _ROLE_RE = re.compile(
 )
 
 
-def enhance_profile_for_job(profile: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
-    """Keep the original resume sections. Do not invent experience or paste the job onto the CV."""
+def enhance_profile_for_job(profile: dict[str, Any], job: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Download the user's own resume/profile as-is. Do not rewrite it for the job."""
     document = compose_resume_document(profile)
-    source = dict(profile)
-    if len(document) >= 40:
-        source["resume_text"] = document
-        source["resume_document"] = document
-    resume = resume_from_profile(source)
-    if not _has_content(resume) and len(document) < 40:
-        raise JobToCvError("This user has no resume, skills, or work history to enhance.")
-    payload = build_cv_from_job(
-        str(job.get("description") or ""),
-        job_title=job.get("title"),
-        company=job.get("company"),
-        location=job.get("location"),
-        job_skills=list(job.get("skills") or []) or None,
-        resume=resume,
-        include_cv_text=True,
-    )
-    if len(document) >= 40:
-        payload["cv_text"] = document
-        payload["mode"] = "tailored"
-    elif not (payload.get("cv_text") or "").strip() or payload.get("mode") != "tailored":
-        raise JobToCvError("This user has no resume content to enhance for this job.")
-    else:
-        payload["cv_text"] = _strip_tailor_suffix(payload.get("cv_text") or "")
-    return payload
+    if len(document.strip()) < 40:
+        raise JobToCvError("This user has no resume or profile content to download.")
+    resume = resume_from_profile({**profile, "resume_text": document, "resume_document": document})
+    job = job or {}
+    match = {
+        "score": None,
+        "matched_skills": [],
+        "missing_skills": [],
+        "extra_skills": [],
+    }
+    # Optional overlap report only. The file content stays the profile resume.
+    if job.get("skills") or job.get("description") or job.get("title"):
+        try:
+            tailored = build_cv_from_job(
+                str(job.get("description") or ""),
+                job_title=job.get("title"),
+                company=job.get("company"),
+                location=job.get("location"),
+                job_skills=list(job.get("skills") or []) or None,
+                resume=resume,
+                include_cv_text=False,
+            )
+            match = tailored.get("match") or match
+        except JobToCvError:
+            pass
+    return {
+        "ok": True,
+        "mode": "profile",
+        "job": {
+            "title": job.get("title"),
+            "company": job.get("company"),
+            "location": job.get("location"),
+        },
+        "match": match,
+        "cv": resume,
+        "cv_text": document,
+    }
 
 
 def compose_resume_document(profile: dict[str, Any]) -> str:
-    """Prefer the uploaded resume. If only a summary is stored, rebuild from profile sections."""
+    """Use the uploaded/saved resume as-is. Rebuild from profile only when that text is incomplete."""
     preserved = preserved_resume_text(profile)
     if _heading_count(preserved) >= 3 or _has_named_sections(preserved):
         return preserved
     rebuilt = rebuild_resume_from_profile(profile)
-    if _heading_count(rebuilt) > _heading_count(preserved) or len(rebuilt) > len(preserved) + 80:
+    if _section_richness(rebuilt) > _section_richness(preserved):
         return rebuilt
     return preserved or rebuilt
 
@@ -94,12 +107,16 @@ def preserved_resume_text(profile: dict[str, Any]) -> str:
     file_text = str(profile.get("resume_document") or "").strip()
     saved = str(profile.get("resume_text") or "").strip()
     summary = str(profile.get("professional_summary") or "").strip()
-    file_body = _restore_resume(file_text) if file_text else ""
-    saved_body = _restore_resume(saved) if saved else ""
-    summary_body = _restore_resume(summary) if summary else ""
-    candidates = [file_body, saved_body, summary_body]
+    # Full uploaded resume first. Light-clean only when job-board junk is mixed in.
+    candidates = []
+    for raw in (file_text, saved, summary):
+        if not raw:
+            continue
+        body = _restore_resume(raw) if _needs_resume_cleanup(raw) else _light_normalize(raw)
+        if body:
+            candidates.append(body)
     ranked = sorted(
-        [item for item in candidates if item],
+        candidates,
         key=lambda item: (_heading_count(item), _has_named_sections(item), len(item)),
         reverse=True,
     )
@@ -107,7 +124,7 @@ def preserved_resume_text(profile: dict[str, Any]) -> str:
 
 
 def rebuild_resume_from_profile(profile: dict[str, Any]) -> str:
-    """Build a full sectioned resume from saved profile fields when the uploaded file is missing."""
+    """Build a sectioned resume from saved profile fields when the uploaded file is missing."""
     source = dict(profile)
     summary = str(profile.get("professional_summary") or "").strip()
     if summary and len(summary) >= 40:
@@ -119,6 +136,35 @@ def rebuild_resume_from_profile(profile: dict[str, Any]) -> str:
         return ""
     text = render_cv_text(resume)
     return _normalize_section_titles(text)
+
+
+def _section_richness(text: str) -> tuple[int, int, int]:
+    return (_heading_count(text), 1 if _has_named_sections(text) else 0, len(text or ""))
+
+
+def _needs_resume_cleanup(text: str) -> bool:
+    lowered = text.lower()
+    if "$" in text and "bonus" in lowered:
+        return True
+    if "free plan monthly credits" in lowered or "mid-senior" in lowered:
+        return True
+    if _UUID_RE.search(text):
+        return True
+    title_lines = sum(
+        1
+        for line in text.splitlines()
+        if _is_posting_title(re.sub(r"[ \t]{2,}", " ", line).strip())
+    )
+    return title_lines >= 3
+
+
+def _light_normalize(text: str) -> str:
+    cleaned = text.replace("\r\n", "\n").replace("\r", "\n").replace("\u00a0", " ")
+    cleaned = cleaned.replace("\u2022", "- ").replace("•", "- ")
+    cleaned = _separate_headings(cleaned)
+    lines = [re.sub(r"[ \t]{2,}", " ", line).rstrip() for line in cleaned.splitlines()]
+    lines = [line for line in lines if line.strip()]
+    return "\n".join(lines).strip() + ("\n" if lines else "")
 
 
 def _has_named_sections(text: str) -> bool:

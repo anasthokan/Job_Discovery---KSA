@@ -2268,14 +2268,14 @@ def _enhanced_filename(profile: dict, job: dict, extension: str, cv_text: str = 
 
 @app.post(
     "/api/resume/enhance",
-    summary="Enhance a saved user's resume for one job and download it",
+    summary="Download the user's saved resume/profile as-is for a job",
     response_class=Response,
 )
 def enhance_user_resume(
     body: ResumeEnhanceRequest,
     file_format: str = Query("pdf", alias="format", description="Download format: pdf or docx"),
 ):
-    """Uses the user's saved resume and the job posting. Does not change /api/ats/score-file."""
+    """Returns the profile resume as stored. Job id is only for naming/match metadata."""
     fmt = (file_format or "pdf").strip().lower()
     if fmt not in {"pdf", "docx"}:
         raise HTTPException(status_code=400, detail="format must be pdf or docx.")
