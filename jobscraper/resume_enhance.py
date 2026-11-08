@@ -95,9 +95,14 @@ def compose_resume_document(profile: dict[str, Any]) -> str:
     """Use the uploaded/saved resume as-is. Rebuild from profile only when that text is incomplete."""
     preserved = preserved_resume_text(profile)
     sections = _original_sections(_profile_blob(profile))
-    if _heading_count(preserved) >= 2 or _has_named_sections(preserved) or len(sections) >= 2:
+    if len(preserved) >= 500 and (
+        _heading_count(preserved) >= 2 or _has_named_sections(preserved) or len(sections) >= 2
+    ):
         return _polish_document(preserved, profile, sections)
     rebuilt = rebuild_resume_from_profile(profile)
+    # A longer original resume wins. Rebuilding must not shrink it.
+    if len(preserved) > max(len(rebuilt), 500):
+        return _polish_document(preserved, profile, sections)
     if _section_richness(rebuilt) > _section_richness(preserved):
         return _polish_document(rebuilt, profile, sections)
     return _polish_document(preserved or rebuilt, profile, sections)
@@ -226,14 +231,15 @@ def tailor_document_for_job(document: str, job: dict[str, Any]) -> str:
     for heading, body in sections:
         key = heading.upper()
         if key in summary_keys:
-            body = _aim_summary(body, job)
+            body = _enhance_summary(body, job, text)
+        elif key in {"KEY ACHIEVEMENTS", "PROFESSIONAL EXPERIENCE", "EXPERIENCE", "WORK EXPERIENCE", "WORK HISTORY"}:
+            body = _promote_complete_bullets(body, keywords)
         elif key in {"CORE COMPETENCIES", "SKILLS", "TECHNICAL SKILLS", "CORE SKILLS"}:
             body = _promote_skill_items(body, keywords)
         if heading:
             lines.append(heading)
         lines.extend(body)
-        if not heading and not has_summary:
-            lines.extend(["", "PROFESSIONAL SUMMARY", *_aim_summary([], job)])
+        if not heading and not has_summary and any(line.strip() for line in body):
             has_summary = True
     rendered = "\n".join(line for line in lines if line is not None).strip()
     return rendered + "\n"
@@ -273,41 +279,97 @@ def _job_keywords(job: dict[str, Any]) -> list[str]:
     return found[:40]
 
 
-def _resume_overlap(body: str, job: dict[str, Any]) -> str:
-    """Job skills that are already written in the resume. Never invent the rest."""
-    lowered = (body or "").lower()
-    hits: list[str] = []
-    seen: set[str] = set()
-    for skill in job.get("skills") or []:
-        text = str(skill or "").strip()
-        key = text.lower()
-        if len(text) < 2 or key in seen or key in _TAILOR_STOP or key not in lowered:
-            continue
-        seen.add(key)
-        hits.append(text)
-        if len(hits) == 3:
-            break
-    if not hits:
-        return ""
-    if len(hits) == 1:
-        return hits[0]
-    return ", ".join(hits[:-1]) + " and " + hits[-1]
+_ADDED_SUMMARY_RE = re.compile(
+    r"(?i)^(aligned to|targeting the|this experience is aimed at|bringing this record to)\b"
+)
+_GENERIC_STRENGTH = {
+    "product", "products", "digital", "platform", "platforms", "data", "build", "building",
+    "senior", "engineer", "manager", "leader", "team", "teams", "experience", "role",
+    "insurance", "market", "business", "solutions", "development",
+}
 
 
-def _aim_summary(lines: list[str], job: dict[str, Any]) -> list[str]:
-    body = " ".join(line.strip() for line in lines if line.strip())
+def _enhance_summary(lines: list[str], job: dict[str, Any], document: str) -> list[str]:
+    """Keep the original summary and close it with the job, using only real overlap."""
+    kept = [line for line in lines if line.strip() and not _ADDED_SUMMARY_RE.match(line.strip())]
+    if not kept:
+        return [line for line in lines if line.strip()]
     title = str(job.get("title") or "").strip()
+    if not title:
+        return kept
     company = str(job.get("company") or "").strip()
-    if not title or title.lower() in body.lower():
-        return lines
-    target = f"{title} at {company}" if company else title
-    overlap = _resume_overlap(body, job)
-    if overlap:
-        lead = f"Aligned to {target}, drawing on {overlap}."
+    target = f"{title} role at {company}" if company else f"{title} role"
+    blob = " ".join(kept)
+    if title.lower() in blob.lower() and (not company or company.lower() in blob.lower()):
+        return kept
+    strengths = _strengths_for_job(document, job)
+    if strengths:
+        close = f"Bringing this record to the {target}, with direct experience in {strengths}."
     else:
-        lead = f"Aligned to {target}."
-    kept = [line for line in lines if line.strip()]
-    return [lead, *kept]
+        close = f"Bringing this record to the {target}."
+    return [*kept, close]
+
+
+def _strengths_for_job(document: str, job: dict[str, Any]) -> str:
+    """Phrases the job asks for that are already written in the resume."""
+    resume = (document or "").lower()
+    if len(resume) < 40:
+        return ""
+    found: list[str] = []
+    seen: set[str] = set()
+
+    def add(phrase: str) -> None:
+        text = re.sub(r"\s+", " ", phrase).strip(" .,-")
+        key = text.lower()
+        if len(text) < 3 or key in seen or key in _TAILOR_STOP or key in _GENERIC_STRENGTH:
+            return
+        if key not in resume:
+            return
+        if all(word in _GENERIC_STRENGTH or word in _TAILOR_STOP for word in key.split()):
+            return
+        seen.add(key)
+        found.append(text)
+
+    skills = [str(skill).strip() for skill in (job.get("skills") or []) if str(skill).strip()]
+    for skill in sorted(skills, key=len, reverse=True):
+        add(skill)
+    job_blob = " ".join(
+        str(part or "")
+        for part in (job.get("title"), job.get("description"), *skills)
+    )
+    for phrase in re.findall(r"[A-Za-z][A-Za-z0-9+#.]{2,}(?:\s+[A-Za-z][A-Za-z0-9+#.]{2,}){1,3}", job_blob):
+        add(phrase)
+        if len(found) >= 3:
+            break
+    found = found[:3]
+    if not found:
+        return ""
+    if len(found) == 1:
+        return found[0]
+    return ", ".join(found[:-1]) + " and " + found[-1]
+
+
+def _promote_complete_bullets(lines: list[str], keywords: list[str]) -> list[str]:
+    """Move finished bullets that match the job ahead of the others. Keep every line."""
+    result: list[str] = []
+    index = 0
+    while index < len(lines):
+        if not _is_complete_bullet(lines[index]):
+            result.append(lines[index])
+            index += 1
+            continue
+        end = index
+        while end < len(lines) and _is_complete_bullet(lines[end]):
+            end += 1
+        block = lines[index:end]
+        ranked = sorted(enumerate(block), key=lambda item: (-_keyword_hits(item[1], keywords), item[0]))
+        result.extend(line for _, line in ranked)
+        index = end
+    return result
+
+
+def _is_complete_bullet(line: str) -> bool:
+    return bool(re.match(r"^\s*[-•]\s+\S.{24,}", line or ""))
 
 
 def _promote_skill_items(lines: list[str], keywords: list[str]) -> list[str]:
