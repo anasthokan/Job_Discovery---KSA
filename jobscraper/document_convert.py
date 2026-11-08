@@ -150,20 +150,150 @@ def _page_text(page) -> str:
 
 
 def _add_docx_block(document, text: str, kind: str) -> None:
-    from docx.shared import Pt
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.shared import Pt, RGBColor
 
+    navy = RGBColor(0x1B, 0x3A, 0x6B)
+    blue = RGBColor(0x2E, 0x75, 0xB6)
+    ink = RGBColor(0x33, 0x33, 0x33)
+    gray = RGBColor(0x55, 0x55, 0x55)
     if kind == "h1":
-        document.add_heading(text, level=0)
+        paragraph = _styled_paragraph(document, "Resume Name", text, 26, navy, bold=True)
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        _space(paragraph, before=0, after=2)
+        return
+    if kind == "subtitle":
+        paragraph = _styled_paragraph(document, "Resume Headline", text, 12, blue, italic=True)
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        _space(paragraph, before=0, after=2)
+        return
+    if kind == "contact":
+        paragraph = _styled_paragraph(document, "Resume Contact", text, 10, gray)
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        _space(paragraph, before=0, after=10)
         return
     if kind == "h2":
-        document.add_heading(text.rstrip(":"), level=1)
+        paragraph = _styled_paragraph(document, "Resume Section", text.rstrip(":"), 11, navy, bold=True)
+        _space(paragraph, before=12, after=2)
+        _bottom_border(paragraph, "2E75B6")
         return
-    if kind == "li":
-        document.add_paragraph(_strip_bullet(text), style="List Bullet")
+    if kind == "role":
+        paragraph = document.add_paragraph(style=_style(document, "Resume Role"))
+        for value, bold, color in _docx_role_runs(text, blue, gray):
+            _add_run(paragraph, value, 10, color, bold=bold)
+        _space(paragraph, before=8, after=1)
         return
-    paragraph = document.add_paragraph(text)
-    if paragraph.runs:
-        paragraph.runs[0].font.size = Pt(11)
+    if kind == "blurb":
+        paragraph = _styled_paragraph(document, "Resume Blurb", text, 10, gray, italic=True)
+        _space(paragraph, before=0, after=2)
+        return
+    if kind == "date":
+        paragraph = _styled_paragraph(document, "Resume Date", text, 10, gray)
+        _space(paragraph, before=0, after=2)
+        return
+    if kind == "skill":
+        paragraph = document.add_paragraph(style=_style(document, "Resume Skill"))
+        split = _label_split(text)
+        if split:
+            _add_run(paragraph, split[0] + ":  ", 10, navy, bold=True)
+            _add_run(paragraph, split[1], 10, ink)
+        else:
+            _add_run(paragraph, text, 10, ink)
+        _space(paragraph, before=1, after=1)
+        return
+    if kind == "edu":
+        paragraph = document.add_paragraph(style=_style(document, "Resume Education"))
+        if "|" in text:
+            degree, school = [part.strip() for part in text.split("|", 1)]
+            _add_run(paragraph, degree + "   |   ", 11, navy, bold=True)
+            _add_run(paragraph, school, 11, ink)
+        else:
+            _add_run(paragraph, text, 11, navy, bold=True)
+        _space(paragraph, before=2, after=2)
+        return
+    if kind in {"li", "label-li"}:
+        paragraph = document.add_paragraph(style=_style(document, "Resume Bullet"))
+        paragraph.paragraph_format.left_indent = Pt(12)
+        body = _strip_bullet(text)
+        _add_run(paragraph, "•   ", 10, ink)
+        split = _label_split(body) if kind == "label-li" else None
+        if split:
+            _add_run(paragraph, split[0] + ":  ", 10, ink, bold=True)
+            _add_run(paragraph, split[1], 10, ink)
+        else:
+            _add_run(paragraph, body, 10, ink)
+        _space(paragraph, before=1, after=1)
+        return
+    paragraph = _styled_paragraph(document, "Normal", text, 10, ink)
+    _space(paragraph, before=0, after=2)
+
+
+def _styled_paragraph(document, style_name: str, text: str, size: int, color, bold: bool = False, italic: bool = False):
+    paragraph = document.add_paragraph(text, style=_style(document, style_name) if style_name != "Normal" else None)
+    _run_font(paragraph, size, color, bold=bold, italic=italic)
+    return paragraph
+
+
+def _add_run(paragraph, text: str, size: int, color, bold: bool = False, italic: bool = False) -> None:
+    from docx.shared import Pt
+
+    run = paragraph.add_run(text)
+    run.font.name = "Calibri"
+    run.font.size = Pt(size)
+    run.font.color.rgb = color
+    run.bold = bold
+    run.italic = italic
+
+
+def _docx_role_runs(text: str, blue, gray) -> list[tuple[str, bool, object]]:
+    pieces = _role_pieces(text, (0, 0, 0), (0, 0, 0))
+    runs = []
+    for value, style, _color in pieces:
+        runs.append((value, style == "B", blue if style == "B" else gray))
+    return runs
+
+
+def _style(document, name: str):
+    from docx.enum.style import WD_STYLE_TYPE
+
+    try:
+        return document.styles[name]
+    except KeyError:
+        style = document.styles.add_style(name, WD_STYLE_TYPE.PARAGRAPH)
+        style.base_style = document.styles["Normal"]
+        return style
+
+
+def _run_font(paragraph, size: int, color, bold: bool = False, italic: bool = False) -> None:
+    from docx.shared import Pt
+
+    for run in paragraph.runs:
+        run.font.name = "Calibri"
+        run.font.size = Pt(size)
+        run.font.color.rgb = color
+        run.bold = bold
+        run.italic = italic
+
+
+def _space(paragraph, before: int, after: int) -> None:
+    from docx.shared import Pt
+
+    paragraph.paragraph_format.space_before = Pt(before)
+    paragraph.paragraph_format.space_after = Pt(after)
+
+
+def _bottom_border(paragraph, color: str) -> None:
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    border = OxmlElement("w:pBdr")
+    bottom = OxmlElement("w:bottom")
+    bottom.set(qn("w:val"), "single")
+    bottom.set(qn("w:sz"), "8")
+    bottom.set(qn("w:space"), "1")
+    bottom.set(qn("w:color"), color)
+    border.append(bottom)
+    paragraph._p.get_or_add_pPr().append(border)
 
 
 def _blocks_from_docx(document) -> list[tuple[str, str]]:
@@ -246,18 +376,23 @@ def _unique_cells(row):
 
 def _heading_kind(text: str, style_name: str = "") -> str:
     style_name = (style_name or "").lower()
-    if "heading 1" in style_name or style_name == "title":
-        return "h1"
-    if "heading" in style_name:
-        return "h2"
+    if "resume headline" in style_name or style_name == "subtitle":
+        return "subtitle"
+    if "resume contact" in style_name:
+        return "contact"
     compact = re.sub(r"[\s|:.\-]+$", "", text or "").strip()
     if compact.lower() in SECTION_HEADINGS:
         return "h2"
+    words = [word for word in re.split(r"\s+", compact) if word]
     letters = re.sub(r"[^A-Za-z ]", "", compact)
-    if letters.isupper() and 3 <= len(letters) <= 36:
+    if letters.isupper() and len(words) >= 2 and 3 <= len(letters) <= 40:
         return "h2"
     if _strip_bullet(text) != (text or "").strip():
         return "li"
+    if "resume name" in style_name or style_name == "title" or "heading 1" in style_name:
+        return "h1"
+    if "heading" in style_name:
+        return "h2"
     return "p"
 
 
@@ -270,32 +405,313 @@ def cv_text_to_docx(text: str) -> bytes:
     from docx import Document
     from docx.shared import Inches, Pt, RGBColor
 
-    lines = _split_lines(text)
-    if not lines:
+    blocks = _cv_blocks(text)
+    if not blocks:
         raise ConvertError("Resume has no text to download.")
 
     document = Document()
     section = document.sections[0]
-    section.top_margin = Inches(0.7)
-    section.bottom_margin = Inches(0.7)
-    section.left_margin = Inches(0.8)
-    section.right_margin = Inches(0.8)
+    section.top_margin = Inches(0.65)
+    section.bottom_margin = Inches(0.65)
+    section.left_margin = Inches(0.75)
+    section.right_margin = Inches(0.75)
     style = document.styles["Normal"]
     style.font.name = "Calibri"
     style.font.size = Pt(11)
-    style.font.color.rgb = RGBColor(15, 23, 42)
+    style.font.color.rgb = RGBColor(30, 41, 59)
 
-    first = True
-    for line in lines:
-        kind = "h1" if first else _heading_kind(line)
-        first = False
+    for line, kind in blocks:
         _add_docx_block(document, line, kind)
     return _save_docx(document)
 
 
 def cv_text_to_pdf(text: str) -> bytes:
     """Turn plain CV text into a PDF download."""
-    return docx_to_pdf(cv_text_to_docx(text), "resume.docx")
+    blocks = _cv_blocks(text)
+    if not blocks:
+        raise ConvertError("Resume has no text to download.")
+    try:
+        return _render_pdf(blocks)
+    except Exception as exc:
+        raise ConvertError(f"Could not build the resume PDF: {exc}", 422) from exc
+
+
+def _cv_blocks(text: str) -> list[tuple[str, str]]:
+    """Name, headline, contact, then each resume section in the original structure."""
+    lines = _reflow_lines(_split_lines(text))
+    blocks: list[tuple[str, str]] = []
+    header = True
+    section = ""
+    for line in lines:
+        if header and not blocks:
+            blocks.append((line, "h1"))
+            continue
+        if header and _is_headline_line(line):
+            blocks.append((line, "subtitle"))
+            continue
+        if header and _is_contact_line(line):
+            blocks.append((_pretty_contact(line), "contact"))
+            header = False
+            continue
+        header = False
+        kind = _heading_kind(line)
+        if kind == "h2":
+            section = line.strip().upper()
+            blocks.append((line, "h2"))
+            continue
+        blocks.append((line, _body_kind(line, section)))
+    return blocks
+
+
+_EXPERIENCE_SECTIONS = {"PROFESSIONAL EXPERIENCE", "EXPERIENCE", "WORK EXPERIENCE", "WORK HISTORY"}
+_SKILL_SECTIONS = {"CORE COMPETENCIES", "SKILLS", "TECHNICAL SKILLS", "CORE SKILLS", "COMPETENCIES"}
+_ROLE_WORD_RE = re.compile(
+    r"(?i)\b(manager|leader|lead|head|engineer|director|consultant|officer|specialist|analyst)\b"
+)
+
+
+def _body_kind(line: str, section: str) -> str:
+    kind = _heading_kind(line)
+    if kind == "li":
+        body = _strip_bullet(line)
+        if _label_split(body):
+            return "label-li"
+        return "li"
+    if section in _EXPERIENCE_SECTIONS:
+        if _is_role_line(line):
+            return "role"
+        if _is_date_line(line):
+            return "date"
+        if _is_company_blurb(line):
+            return "blurb"
+    if section in _SKILL_SECTIONS and _label_split(line):
+        return "skill"
+    if section == "EDUCATION":
+        return "edu"
+    return "p"
+
+
+_LABEL_VERBS = {
+    "delivered", "own", "owned", "led", "lead", "built", "managed", "improved",
+    "launched", "drove", "drive", "define", "defined", "align", "aligned",
+}
+
+
+def _label_split(line: str) -> tuple[str, str] | None:
+    if ":" not in (line or ""):
+        return None
+    label, rest = line.split(":", 1)
+    label = label.strip(" -•")
+    if not rest.strip() or not (2 <= len(label) <= 42):
+        return None
+    words = label.split()
+    if len(words) > 5 or words[0].lower() in _LABEL_VERBS:
+        return None
+    return label, rest.strip()
+
+
+def _is_role_line(line: str) -> bool:
+    text = (line or "").strip()
+    if not text or "@" in text or len(text) > 160 or text.endswith("."):
+        return False
+    if "|" in text and _ROLE_WORD_RE.search(text):
+        return True
+    return bool(_ROLE_WORD_RE.search(text) and len(text) <= 80)
+
+
+_MONTH_ONLY_RE = re.compile(
+    r"(?i)^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\.?$"
+)
+
+
+def _is_date_line(line: str) -> bool:
+    text = (line or "").strip(" -–—")
+    if not text or len(text) > 40:
+        return False
+    if _MONTH_ONLY_RE.match(text):
+        return True
+    return bool(
+        re.search(
+            r"(?i)^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|\d{4}).{0,24}(present|current|now|\d{4})$",
+            text,
+        )
+    )
+
+
+def _reflow_lines(lines: list[str]) -> list[str]:
+    """Join PDF line breaks so a job, bullet, or competency is one line again."""
+    merged: list[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if line in {"-", "•", "●"} and index + 1 < len(lines):
+            index += 1
+            chunk = [lines[index]]
+            index += 1
+            while index < len(lines) and not _starts_new_item(lines[index]):
+                chunk.append(lines[index])
+                index += 1
+            merged.append("- " + " ".join(chunk))
+            continue
+        if _is_role_line(line):
+            parts = [line]
+            index += 1
+            while index < len(lines) and _role_continuation(lines[index]):
+                parts.append(lines[index])
+                index += 1
+            merged.append(re.sub(r"\s*\|\s*", " | ", " ".join(parts)))
+            continue
+        if line.endswith(":") and _label_split(line + " x"):
+            parts = [line]
+            index += 1
+            while index < len(lines) and not _starts_new_item(lines[index]) and not lines[index].endswith(":"):
+                parts.append(lines[index])
+                index += 1
+            merged.append(" ".join(parts))
+            continue
+        if index + 1 < len(lines) and lines[index + 1].startswith("|"):
+            parts = [line, lines[index + 1].lstrip("|").strip()]
+            index += 2
+            while index < len(lines) and (
+                _is_date_line(lines[index])
+                or lines[index].lower() in {"in progress", "present", "university", "college"}
+            ):
+                parts.append(lines[index])
+                index += 1
+            merged.append(parts[0] + " | " + " ".join(part for part in parts[1:] if part))
+            continue
+        if line.endswith("|") or line == "|" or line.startswith("|"):
+            parts = [line]
+            index += 1
+            while index < len(lines) and index < len(parts) + 4 and not _starts_new_item(lines[index]):
+                parts.append(lines[index])
+                if _is_date_line(lines[index]) or lines[index].endswith("."):
+                    index += 1
+                    break
+                index += 1
+            merged.append(re.sub(r"\s*\|\s*", " | ", " ".join(parts)))
+            continue
+        merged.append(line)
+        index += 1
+    return merged
+
+
+def _starts_new_item(line: str) -> bool:
+    return line in {"-", "•", "●"} or _heading_kind(line) == "h2" or _is_role_line(line)
+
+
+def _role_continuation(line: str) -> bool:
+    text = (line or "").strip()
+    if not text or text.endswith(".") or _heading_kind(text) == "h2" or text in {"-", "•", "●"}:
+        return False
+    if text == "|" or text.startswith("|"):
+        return True
+    if _is_date_line(text) or _MONTH_ONLY_RE.match(text.strip(" -–—")):
+        return True
+    return len(text) <= 40 and not _is_role_line(text)
+
+
+def _is_company_blurb(line: str) -> bool:
+    text = (line or "").strip()
+    if len(text) < 40 or text.startswith("-"):
+        return False
+    return bool(re.match(r"^[A-Z][\w&.'-]+(?:\s+[A-Z][\w&.'-]+){0,4}\s+is\b", text))
+
+
+def _role_pieces(line: str, blue: tuple[int, int, int], gray: tuple[int, int, int]) -> list[tuple[str, str, tuple[int, int, int]]]:
+    text = line.strip()
+    date = ""
+    match = re.search(
+        r"(?i)((?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{4}.*|\b(?:19|20)\d{2}\b.*)$",
+        text,
+    )
+    if match and len(match.group(1)) <= 40:
+        date = match.group(1).strip()
+        text = text[: match.start()].strip(" |-")
+    if "|" in text:
+        left, right = [part.strip() for part in text.split("|", 1)]
+        pieces = [(f"{left}  |  {right}", "B", blue)]
+    else:
+        pieces = [(text, "B", blue)]
+    if date:
+        pieces.append(("  " + date, "", gray))
+    return pieces
+
+
+def _label_pieces(line: str, label_color: tuple[int, int, int], ink: tuple[int, int, int], bold_rest: bool = False) -> list[tuple[str, str, tuple[int, int, int]]]:
+    split = _label_split(line)
+    if not split:
+        return [(line, "B" if bold_rest else "", ink)]
+    return [(split[0] + ":  ", "B", label_color), (split[1], "B" if bold_rest else "", ink)]
+
+
+def _edu_pieces(line: str, navy: tuple[int, int, int], ink: tuple[int, int, int]) -> list[tuple[str, str, tuple[int, int, int]]]:
+    if "|" not in line:
+        return [(line, "B", navy)]
+    degree, school = [part.strip() for part in line.split("|", 1)]
+    return [(degree + "   |   ", "B", navy), (school, "", ink)]
+
+
+def _is_headline_line(line: str) -> bool:
+    text = (line or "").strip()
+    if not text or "@" in text or _heading_kind(text) == "h2":
+        return False
+    if not ("|" in text or "•" in text):
+        return False
+    digits = re.sub(r"\D", "", text)
+    return len(digits) < 8 and len(text) <= 120
+
+
+def _is_contact_line(line: str) -> bool:
+    text = (line or "").strip()
+    if "@" in text or re.search(r"(?i)\biqama\b", text):
+        return True
+    digits = re.sub(r"\D", "", text)
+    return len(digits) >= 8 and ("|" in text or "•" in text or "," in text)
+
+
+def _pretty_contact(line: str) -> str:
+    parts = [part.strip() for part in re.split(r"\s*(?:\||•|·)\s*", line) if part.strip()]
+    if len(parts) < 2:
+        return _pretty_phone_text(line, assume_ksa=_saudi_context(line))
+    saudi = _saudi_context(line)
+    places: list[str] = []
+    phones: list[str] = []
+    emails: list[str] = []
+    extras: list[str] = []
+    for part in parts:
+        digits = re.sub(r"\D", "", part)
+        if "@" in part:
+            emails.append(part)
+        elif len(digits) >= 8 and sum(char.isalpha() for char in part) < 3:
+            phones.append(_pretty_phone_text(part, assume_ksa=saudi))
+        elif re.search(r"(?i)\biqama\b", part):
+            extras.append(part)
+        else:
+            places.append(part)
+    return "  •  ".join([*places, *phones, *emails, *extras])
+
+
+def _saudi_context(text: str) -> bool:
+    lowered = (text or "").lower()
+    return any(token in lowered for token in ("riyadh", "saudi", "ksa", "iqama", "jeddah", "dammam"))
+
+
+def _pretty_phone_text(text: str, assume_ksa: bool = False) -> str:
+    def repl(match: re.Match[str]) -> str:
+        digits = re.sub(r"\D", "", match.group(0))
+        if digits.startswith("00"):
+            digits = digits[2:]
+        local = ""
+        if digits.startswith("966") and len(digits) >= 12:
+            local = digits[-9:]
+        elif assume_ksa and len(digits) == 9 and digits.startswith("5"):
+            local = digits
+        if not local:
+            return match.group(0)
+        return f"+966 {local[:2]} {local[2:5]} {local[5:]}"
+
+    return re.sub(r"(?:\+|00)?\d[\d\s\-()]{7,}\d", repl, text)
 
 
 def preview_text_from_docx(data: bytes) -> str:
@@ -375,55 +791,115 @@ def _render_pdf(blocks: list[tuple[str, str]]) -> bytes:
         return _fallback_pdf(blocks)
 
     pdf = FPDF(format="Letter", unit="mm")
-    pdf.set_auto_page_break(auto=True, margin=16)
+    pdf.set_auto_page_break(auto=True, margin=18)
     pdf.add_page()
-    pdf.set_margins(16, 16, 16)
+    pdf.set_margins(19, 16, 19)
 
     font_path = _font_file()
     family = "Helvetica"
+    has_italic = False
     if font_path is not None:
         try:
             family = "Body"
             pdf.add_font("Body", "", str(font_path))
             bold_path = _bold_companion(font_path)
             pdf.add_font("Body", "B", str(bold_path or font_path))
+            italic_path = _italic_companion(font_path)
+            if italic_path is not None:
+                pdf.add_font("Body", "I", str(italic_path))
+                has_italic = True
         except Exception:
             family = "Helvetica"
             font_path = None
 
-    def write(text: str, size: int, style: str = "", space_after: float = 3, color=(15, 23, 42)) -> None:
+    navy = (0x1B, 0x3A, 0x6B)
+    blue = (0x2E, 0x75, 0xB6)
+    gray = (0x55, 0x55, 0x55)
+    ink = (0x33, 0x33, 0x33)
+
+    def use_font(style: str, size: float) -> None:
+        chosen = style
+        if chosen == "I" and not has_italic:
+            chosen = ""
+        try:
+            pdf.set_font(family, style=chosen, size=size)
+        except Exception:
+            pdf.set_font("Helvetica", size=size)
+
+    def write(text: str, size: float, style: str = "", space_after: float = 1.0, color=ink, indent: float = 0, align: str = "L") -> None:
         payload = _pdf_text(text)
         if font_path is None:
             payload = _latin1(payload)
         pdf.set_text_color(*color)
+        pdf.set_x(pdf.l_margin + indent)
+        use_font(style, size)
+        width = pdf.w - pdf.l_margin - pdf.r_margin - indent
         try:
-            pdf.set_font(family, style=style, size=size)
-            pdf.multi_cell(0, max(size * 0.42 + 2, 5), payload)
+            pdf.multi_cell(width, max(size * 0.42, 4.4), payload, align=align)
         except Exception:
             pdf.set_font("Helvetica", size=size)
-            pdf.multi_cell(0, 6, _latin1(payload))
+            pdf.multi_cell(width, 5, _latin1(payload), align=align)
         pdf.ln(space_after)
+
+    def rich(pieces: list[tuple[str, str, tuple[int, int, int]]], size: float, space_after: float = 0.8, indent: float = 0) -> None:
+        line_h = max(size * 0.42, 4.4)
+        pdf.set_x(pdf.l_margin + indent)
+        for text, style, color in pieces:
+            payload = _pdf_text(text)
+            if font_path is None:
+                payload = _latin1(payload)
+            pdf.set_text_color(*color)
+            use_font(style, size)
+            pdf.write(line_h, payload)
+        pdf.ln(line_h + space_after)
 
     for text, kind in blocks:
         if kind == "blank":
-            pdf.ln(2)
+            pdf.ln(1.5)
             continue
         if kind == "h1":
-            write(text, 20, "B", 2)
+            write(text, 26, "B", 1.5, navy, align="C")
+            continue
+        if kind == "subtitle":
+            write(text, 12, "I", 1.2, blue, align="C")
+            continue
+        if kind == "contact":
+            write(text, 9.5, "", 4, gray, align="C")
             continue
         if kind == "h2":
-            pdf.ln(2)
-            write(text.rstrip(":").upper(), 12, "B", 1, (37, 99, 235))
-            pdf.set_draw_color(37, 99, 235)
-            pdf.set_line_width(0.3)
+            pdf.ln(2.5)
+            write(text.rstrip(":"), 11, "B", 0.6, navy)
+            pdf.set_draw_color(*blue)
+            pdf.set_line_width(0.26)
             y = pdf.get_y()
-            pdf.line(16, y, 216 - 16, y)
-            pdf.ln(2)
+            pdf.line(pdf.l_margin, y, pdf.w - pdf.r_margin, y)
+            pdf.ln(1.6)
             continue
-        if kind == "li":
-            write(f"- {_strip_bullet(text)}", 11, "", 1.5)
+        if kind == "role":
+            rich(_role_pieces(text, blue, gray), 10, 0.8)
             continue
-        write(text, 11, "", 1.5)
+        if kind == "date":
+            write(text, 10, "", 0.6, gray)
+            continue
+        if kind == "blurb":
+            write(text, 9.5, "I", 0.8, gray)
+            continue
+        if kind == "skill":
+            rich(_label_pieces(text, navy, ink, bold_rest=False), 10, 0.7)
+            continue
+        if kind == "edu":
+            rich(_edu_pieces(text, navy, ink), 10.5, 1.0)
+            continue
+        if kind in {"li", "label-li"}:
+            body = _strip_bullet(text)
+            split = _label_split(body) if kind == "label-li" else None
+            if split:
+                pieces = [(f"•  {split[0]}: ", "B", ink), (split[1], "", ink)]
+            else:
+                pieces = [(f"•  {body}", "", ink)]
+            rich(pieces, 10, 0.7, indent=2)
+            continue
+        write(text, 10, "", 0.8, ink)
 
     output = pdf.output()
     return bytes(output)
@@ -507,6 +983,22 @@ def _fallback_pdf(blocks: list[tuple[str, str]]) -> bytes:
         f"trailer\n<< /Size {max_id + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n"
     ).encode("ascii")
     return bytes(out)
+
+
+def _italic_companion(regular: Path) -> Path | None:
+    name = regular.name.lower()
+    mapping = {
+        "arial.ttf": "ariali.ttf",
+        "calibri.ttf": "calibrii.ttf",
+        "segoeui.ttf": "segoeuii.ttf",
+        "dejavusans.ttf": "DejaVuSans-Oblique.ttf",
+        "liberationsans-regular.ttf": "LiberationSans-Italic.ttf",
+    }
+    italic_name = mapping.get(name)
+    if not italic_name:
+        return None
+    candidate = regular.with_name(italic_name)
+    return candidate if candidate.exists() else None
 
 
 def _bold_companion(regular: Path) -> Path | None:

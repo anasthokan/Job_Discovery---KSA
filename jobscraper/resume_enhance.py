@@ -653,11 +653,48 @@ def _polish_document(document: str, profile: dict[str, Any], sections: dict[str,
     headline = _usable_headline(str(profile.get("headline") or ""))
     if headline and headline.lower() not in "\n".join(lines).lower():
         lines.insert(1, headline)
+    source_header = _source_header(_profile_blob(profile), name or lines[0])
+    if len(source_header) >= 2:
+        body = lines
+        while body and not _HEADING_LINE_RE.match(body[0]):
+            body = body[1:]
+        lines = source_header + body
     city = str(profile.get("city") or "").strip()
     if city:
         lines = [_replace_fake_location(line, city) for line in lines]
     rendered = _replace_weak_sections("\n".join(lines), sections, profile)
     return rendered.strip() + "\n"
+
+
+def _source_header(blob: str, name: str) -> list[str]:
+    """The original name, headline, and contact lines when the saved resume has them."""
+    lines = [re.sub(r"\s+", " ", line).strip() for line in (blob or "").splitlines() if line.strip()]
+    if not lines:
+        return []
+    start = 0
+    wanted = (name or "").strip().lower()
+    if wanted:
+        for index, line in enumerate(lines[:12]):
+            if wanted in line.lower() and len(line) <= 60:
+                start = index
+                break
+    header = [lines[start]]
+    for line in lines[start + 1 : start + 4]:
+        if _HEADING_LINE_RE.match(line) or _PLAN_CREDITS_RE.search(line):
+            break
+        if _usable_headline(line) or _source_contact_line(line):
+            header.append(line)
+            continue
+        break
+    return header if len(header) >= 2 else []
+
+
+def _source_contact_line(line: str) -> bool:
+    text = (line or "").strip()
+    if "@" in text or re.search(r"(?i)\biqama\b", text):
+        return True
+    digits = re.sub(r"\D", "", text)
+    return len(digits) >= 8 and any(mark in text for mark in ("|", "•", "·", ","))
 
 
 def _replace_fake_location(line: str, city: str) -> str:
