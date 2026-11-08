@@ -2252,8 +2252,15 @@ def _job_for_enhance(job_id: str) -> dict:
     raise HTTPException(status_code=404, detail=f"No job found for id '{ref}'.")
 
 
-def _enhanced_filename(profile: dict, job: dict, extension: str) -> str:
-    who = " ".join(part for part in (profile.get("first_name"), profile.get("last_name")) if part).strip() or "resume"
+def _enhanced_filename(profile: dict, job: dict, extension: str, cv_text: str = "") -> str:
+    who = ""
+    for line in (cv_text or "").splitlines()[:4]:
+        cleaned = line.strip()
+        if cleaned and len(cleaned.split()) <= 5 and "@" not in cleaned and not cleaned.isupper():
+            who = cleaned
+            break
+    if not who:
+        who = " ".join(part for part in (profile.get("first_name"), profile.get("last_name")) if part).strip() or "resume"
     role = str(job.get("title") or "job")
     stem = re.sub(r"[^\w.\-]+", "_", f"{who}_{role}").strip("._")[:80] or "resume"
     return f"{stem}_enhanced.{extension}"
@@ -2278,7 +2285,9 @@ def enhance_user_resume(
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Could not load resume file: {exc}") from exc
     if file_text and file_text.strip():
-        profile = {**profile, "resume_document": file_text}
+        existing = str(profile.get("resume_document") or "")
+        if len(file_text) >= len(existing):
+            profile = {**profile, "resume_document": file_text}
     job = _job_for_enhance(body.job_id)
     try:
         built = enhance_profile_for_job(profile, job)
@@ -2294,7 +2303,7 @@ def enhance_user_resume(
         raise HTTPException(status_code=status, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Resume enhance failed: {exc}") from exc
-    return _file_download(content, _enhanced_filename(profile, job, fmt), media)
+    return _file_download(content, _enhanced_filename(profile, job, fmt, cv_text), media)
 
 
 class ProfileJob(BaseModel):

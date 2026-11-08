@@ -1958,23 +1958,23 @@ def load_app_user(candidate_id: str) -> dict | None:
             certifications.extend(_user_labeled_values(cur, user_id, profile_id, "license"))
             certifications.extend(_linked_names(cur, user_id, profile_id, tokens=("certif", "license")))
             work_history = _user_experience(cur, user_id, profile_id)
+            education = _user_education(cur, user_id, profile_id)
+            file_text = _resume_text_from_stored_files(cur, user_id, profile_row.get("profile_id"))
             extra_text = _user_text(cur, user_id, profile_id)
-            extra_text = "\n".join(
-                part for part in (extra_text, _resume_text_from_stored_files(cur, user_id, profile_row.get("profile_id"))) if part
-            )
     except Exception:
         log.exception("load_app_user failed for %s", candidate_id)
         close_conn()
         raise
-    summary = " ".join(
-        part
-        for part in (
-            profile_row.get("headline") or "",
-            profile_row.get("professional_summary") or "",
-            extra_text,
+    professional_summary = str(profile_row.get("professional_summary") or "").strip()
+    headline = str(profile_row.get("headline") or "").strip()
+    # Prefer the uploaded resume file. Do not merge saved job titles into the resume body.
+    if _resume_section_count(file_text) >= 2:
+        resume_body = file_text
+    else:
+        extras = "" if _looks_like_job_title_dump(extra_text) else extra_text
+        resume_body = "\n".join(
+            part for part in (headline, professional_summary, file_text, extras) if part
         )
-        if part
-    )
     return {
         "first_name": user.get("first_name") or "",
         "last_name": user.get("last_name") or "",
@@ -1985,7 +1985,11 @@ def load_app_user(candidate_id: str) -> dict | None:
         "skills": skills,
         "certifications": certifications,
         "work_history": work_history,
-        "resume_text": summary,
+        "education": education,
+        "professional_summary": professional_summary,
+        "headline": headline,
+        "resume_document": file_text,
+        "resume_text": resume_body,
     }
 
 
@@ -2337,6 +2341,129 @@ def _user_text(cur, user_id: int, profile_id) -> str:
     return "\n".join(chunks)[:20000]
 
 
+_RESUME_PATH_COLUMNS = (
+    "file",
+    "file_path",
+    "path",
+    "resume",
+    "resume_path",
+    "resume_file",
+    "resume_url",
+    "document",
+    "document_path",
+    "upload",
+    "attachment",
+    "storage_path",
+    "disk_path",
+    "original_path",
+    "url",
+)
+_RESUME_SECTION_MARKERS = (
+    "professional summary",
+    "key achievements",
+    "professional experience",
+    "work experience",
+    "core competencies",
+    "certifications",
+    "education",
+    "experience",
+    "skills",
+)
+_JOB_TITLE_ROLE_RE = re.compile(
+    r"(?i)\b(engineers?|developers?|managers?|analysts?|architects?|interns?|consultants?|specialists?)\b"
+)
+
+
+def _resume_section_count(text: str) -> int:
+    lowered = (text or "").lower()
+    return sum(1 for marker in _RESUME_SECTION_MARKERS if marker in lowered)
+
+
+def _looks_like_job_title_dump(text: str) -> bool:
+    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    if len(lines) < 4:
+        return False
+    titles = sum(1 for line in lines if _JOB_TITLE_ROLE_RE.search(line) and len(line) < 120)
+    dated = sum(1 for line in lines if re.search(r"(?i)\b(?:19|20)\d{2}\b|present", line))
+    return titles >= 4 and dated <= 1 and titles >= max(3, len(lines) // 3)
+
+
+def _user_education(cur, user_id: int, profile_id) -> list[dict]:
+    """School / degree rows for the user when an education table exists."""
+    try:
+        links = _owner_links(cur, column_like="%educ%")
+        links.extend(_owner_links(cur, column_names=("school", "degree", "field_of_study", "institution")))
+    except Exception:
+        log.exception("education lookup failed")
+        return []
+    found: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for link in links:
+        table = str(link.get("table_name") or "")
+        owner = str(link.get("owner_column") or "")
+        if (table, owner) in seen or not _IDENT_RE.fullmatch(table) or not _IDENT_RE.fullmatch(owner):
+            continue
+        if not re.search(r"educ|school|academic", table, re.I):
+            continue
+        seen.add((table, owner))
+        key = {"user_id": user_id, "profile_id": profile_id, "candidate_id": user_id}.get(owner)
+        if key is None:
+            continue
+        try:
+            cur.execute(
+                f"""
+                SELECT COLUMN_NAME AS column_name
+                FROM information_schema.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s
+                """,
+                (table,),
+            )
+            columns = {str(row.get("column_name") or "") for row in cur.fetchall() or []}
+        except Exception:
+            continue
+        school_col = next((name for name in ("school", "institution", "university", "college") if name in columns), None)
+        degree_col = next((name for name in ("degree", "qualification") if name in columns), None)
+        field_col = next((name for name in ("field_of_study", "field", "major") if name in columns), None)
+        year_col = next((name for name in ("graduation_year", "end_year", "year") if name in columns), None)
+        if not school_col and not degree_col:
+            continue
+        selected = []
+        if school_col:
+            selected.append(f"{_quote_ident(school_col)} AS school")
+        if degree_col:
+            selected.append(f"{_quote_ident(degree_col)} AS degree")
+        if field_col:
+            selected.append(f"{_quote_ident(field_col)} AS field_of_study")
+        if year_col:
+            selected.append(f"{_quote_ident(year_col)} AS graduation_year")
+        try:
+            cur.execute(
+                f"SELECT {', '.join(selected)} FROM {_quote_ident(table)} "
+                f"WHERE {_quote_ident(owner)} = %s LIMIT 10",
+                (key,),
+            )
+            rows = cur.fetchall() or []
+        except Exception:
+            continue
+        for row in rows:
+            school = str(row.get("school") or "").strip()
+            degree = str(row.get("degree") or "").strip()
+            field = str(row.get("field_of_study") or "").strip()
+            if not school and not degree and not field:
+                continue
+            found.append(
+                {
+                    "school": school,
+                    "degree": degree,
+                    "field_of_study": field,
+                    "graduation_year": str(row.get("graduation_year") or "").strip(),
+                }
+            )
+            if len(found) >= 10:
+                return found
+    return found
+
+
 def _resume_text_from_stored_files(cur, user_id: int, profile_id) -> str:
     """Parse a resume file or blob saved on the user or profile row."""
     try:
@@ -2345,10 +2472,7 @@ def _resume_text_from_stored_files(cur, user_id: int, profile_id) -> str:
         return ""
     texts: list[str] = []
     try:
-        links = _owner_links(
-            cur,
-            column_names=("file", "file_path", "path", "resume", "document", "upload", "attachment"),
-        )
+        links = _owner_links(cur, column_names=_RESUME_PATH_COLUMNS)
     except Exception:
         log.exception("resume path lookup failed")
         links = []
@@ -2357,9 +2481,12 @@ def _resume_text_from_stored_files(cur, user_id: int, profile_id) -> str:
         key = {"user_id": user_id, "profile_id": profile_id, "candidate_id": user_id}.get(owner)
         if key is None:
             continue
+        table = str(link.get("table_name") or "")
+        if table in _CATALOG_SKIP_TABLES or table == JOBS_TABLE:
+            continue
         for row in _rows_for_owner(
             cur,
-            str(link.get("table_name") or ""),
+            table,
             str(link.get("value_column") or ""),
             owner,
             key,
@@ -2368,7 +2495,7 @@ def _resume_text_from_stored_files(cur, user_id: int, profile_id) -> str:
             if text:
                 texts.append(text)
     if texts:
-        return "\n".join(texts)[:20000]
+        return max(texts, key=lambda item: (_resume_section_count(item), len(item)))[:20000]
     try:
         cur.execute(
             """
@@ -2411,19 +2538,84 @@ def _resume_text_from_stored_files(cur, user_id: int, profile_id) -> str:
         text = _text_from_resume_value(row.get("value"), parse_resume_bytes)
         if text:
             texts.append(text)
-    return "\n".join(texts)[:20000]
+    if not texts:
+        return ""
+    return max(texts, key=lambda item: (_resume_section_count(item), len(item)))[:20000]
+
+
+def _resume_storage_roots() -> list[Path]:
+    roots: list[Path] = []
+    env_root = (os.getenv("RESUME_STORAGE_ROOT") or "").strip()
+    if env_root:
+        roots.append(Path(env_root))
+    roots.extend(
+        [
+            _ROOT,
+            _ROOT / "uploads",
+            _ROOT / "storage",
+            _ROOT / "storage" / "app",
+            _ROOT / "storage" / "app" / "public",
+            _ROOT / "public",
+            _ROOT / "public" / "uploads",
+            _ROOT / "media",
+            _ROOT / "resumes",
+            Path(r"C:\inetpub\wwwroot"),
+            Path(r"C:\Projects"),
+        ]
+    )
+    found = []
+    seen = set()
+    for root in roots:
+        key = str(root).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        found.append(root)
+    return found
+
+
+def _resolve_resume_path(raw: str) -> Path | None:
+    value = (raw or "").strip().replace("\\", "/")
+    if not value:
+        return None
+    if "://" in value:
+        value = value.split("://", 1)[1]
+        value = value.split("/", 1)[1] if "/" in value else value
+    candidates = [Path(value)]
+    if not Path(value).is_absolute():
+        for root in _resume_storage_roots():
+            candidates.append(root / value)
+            candidates.append(root / value.lstrip("/"))
+            name = Path(value).name
+            if name and name != value:
+                candidates.append(root / "resumes" / name)
+                candidates.append(root / "uploads" / name)
+                candidates.append(root / "storage" / "app" / "public" / name)
+    for path in candidates:
+        try:
+            if path.suffix.lower() in {".pdf", ".docx", ".txt"} and path.is_file():
+                return path
+        except Exception:
+            continue
+    return None
 
 
 def _text_from_resume_value(value, parse_resume_bytes) -> str:
     if isinstance(value, str):
-        path = Path(value.strip())
-        if path.suffix.lower() in {".pdf", ".docx", ".txt"} and path.is_file():
-            try:
-                parsed = parse_resume_bytes(path.read_bytes(), filename=path.name)
-            except Exception:
-                return ""
-            return str(parsed.get("raw_text") or "")[:20000]
-        return ""
+        cleaned = value.strip()
+        if not cleaned:
+            return ""
+        # Some apps store the extracted resume text itself.
+        if len(cleaned) > 200 and _resume_section_count(cleaned) >= 2:
+            return cleaned[:20000]
+        path = _resolve_resume_path(cleaned)
+        if path is None:
+            return ""
+        try:
+            parsed = parse_resume_bytes(path.read_bytes(), filename=path.name)
+        except Exception:
+            return ""
+        return str(parsed.get("raw_text") or "")[:20000]
     if isinstance(value, (bytes, bytearray)) and len(value) > 100:
         try:
             parsed = parse_resume_bytes(bytes(value), filename="resume.pdf")

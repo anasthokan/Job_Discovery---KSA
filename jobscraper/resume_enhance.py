@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from jobscraper.jd_to_cv import JobToCvError, build_cv_from_job
+from jobscraper.jd_to_cv import JobToCvError, build_cv_from_job, render_cv_text
 from jobscraper.resume_parser import ResumeParseError, parse_resume_text
 
 
@@ -50,8 +50,8 @@ _ROLE_RE = re.compile(
 
 
 def enhance_profile_for_job(profile: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
-    """Keep the original resume wording and layout. Do not invent skills or replace the person."""
-    document = preserved_resume_text(profile)
+    """Keep the original resume sections. Do not invent experience or paste the job onto the CV."""
+    document = compose_resume_document(profile)
     source = dict(profile)
     if len(document) >= 40:
         source["resume_text"] = document
@@ -68,8 +68,6 @@ def enhance_profile_for_job(profile: dict[str, Any], job: dict[str, Any]) -> dic
         resume=resume,
         include_cv_text=True,
     )
-    # The rebuilt CV drops sections and pastes the job onto the summary.
-    # The download is the cleaned original resume instead.
     if len(document) >= 40:
         payload["cv_text"] = document
         payload["mode"] = "tailored"
@@ -80,22 +78,69 @@ def enhance_profile_for_job(profile: dict[str, Any], job: dict[str, Any]) -> dic
     return payload
 
 
+def compose_resume_document(profile: dict[str, Any]) -> str:
+    """Prefer the uploaded resume. If only a summary is stored, rebuild from profile sections."""
+    preserved = preserved_resume_text(profile)
+    if _heading_count(preserved) >= 3 or _has_named_sections(preserved):
+        return preserved
+    rebuilt = rebuild_resume_from_profile(profile)
+    if _heading_count(rebuilt) > _heading_count(preserved) or len(rebuilt) > len(preserved) + 80:
+        return rebuilt
+    return preserved or rebuilt
+
+
 def preserved_resume_text(profile: dict[str, Any]) -> str:
     """Resume file text when we have it, otherwise the saved resume with job-ad junk removed."""
     file_text = str(profile.get("resume_document") or "").strip()
     saved = str(profile.get("resume_text") or "").strip()
+    summary = str(profile.get("professional_summary") or "").strip()
     file_body = _restore_resume(file_text) if file_text else ""
     saved_body = _restore_resume(saved) if saved else ""
-    file_headings = _heading_count(file_body)
-    saved_headings = _heading_count(saved_body)
-    if file_body and (
-        file_headings > saved_headings
-        or (file_headings == saved_headings and len(file_body) >= max(len(saved_body), 40))
-    ):
-        return file_body
-    if len(saved_body) >= 40:
-        return saved_body
-    return file_body or saved_body
+    summary_body = _restore_resume(summary) if summary else ""
+    candidates = [file_body, saved_body, summary_body]
+    ranked = sorted(
+        [item for item in candidates if item],
+        key=lambda item: (_heading_count(item), _has_named_sections(item), len(item)),
+        reverse=True,
+    )
+    return ranked[0] if ranked else ""
+
+
+def rebuild_resume_from_profile(profile: dict[str, Any]) -> str:
+    """Build a full sectioned resume from saved profile fields when the uploaded file is missing."""
+    source = dict(profile)
+    summary = str(profile.get("professional_summary") or "").strip()
+    if summary and len(summary) >= 40:
+        source["resume_text"] = summary
+    resume = resume_from_profile(source)
+    if summary and not (resume.get("profile") or {}).get("summary"):
+        resume.setdefault("profile", {})["summary"] = summary
+    if not _has_content(resume):
+        return ""
+    text = render_cv_text(resume)
+    return _normalize_section_titles(text)
+
+
+def _has_named_sections(text: str) -> bool:
+    lowered = f"\n{(text or '').lower()}\n"
+    needed = (
+        "professional experience" in lowered or "work experience" in lowered or "\nexperience\n" in lowered,
+        "\neducation\n" in lowered,
+        "certification" in lowered or "competenc" in lowered or "\nskills\n" in lowered,
+    )
+    return sum(1 for item in needed if item) >= 2
+
+
+def _normalize_section_titles(text: str) -> str:
+    replacements = {
+        r"(?im)^SUMMARY$": "PROFESSIONAL SUMMARY",
+        r"(?im)^EXPERIENCE$": "PROFESSIONAL EXPERIENCE",
+        r"(?im)^SKILLS$": "CORE COMPETENCIES",
+    }
+    out = text
+    for pattern, title in replacements.items():
+        out = re.sub(pattern, title, out)
+    return out
 
 
 def _restore_resume(text: str) -> str:
@@ -247,20 +292,26 @@ def _strip_tailor_suffix(text: str) -> str:
 
 def resume_from_profile(profile: dict[str, Any]) -> dict[str, Any]:
     """Shape a stored user profile into the resume JSON the tailor expects."""
-    parsed = _parsed_resume_text(profile.get("resume_text") or "")
+    source_text = str(profile.get("resume_document") or profile.get("resume_text") or "").strip()
+    parsed = _parsed_resume_text(source_text)
     parsed_profile = (parsed or {}).get("profile") or {}
     name = parsed_profile.get("full_name") or _join_name(profile.get("first_name"), profile.get("last_name"))
     location = parsed_profile.get("location") or _join_place(profile.get("city"), profile.get("state"), profile.get("country"))
     history = _experience_from_history(profile.get("work_history") or [])
+    history = [item for item in history if _looks_like_real_job(item)]
     parsed_jobs = list((parsed or {}).get("experience") or [])
     experience = _richer_experience(history, parsed_jobs)
     schools = _education_from_profile(profile.get("education") or [])
     if not schools and parsed:
         schools = list(parsed.get("education") or [])
-    summary = parsed_profile.get("summary")
+    summary = (
+        parsed_profile.get("summary")
+        or _or_none(profile.get("professional_summary"))
+        or None
+    )
     if not summary:
-        text = str(profile.get("resume_text") or "").strip()
-        if text and parsed is None:
+        text = str(profile.get("professional_summary") or profile.get("resume_text") or "").strip()
+        if text and (parsed is None or not parsed_profile.get("summary")):
             summary = text[:600]
     return {
         "profile": {
@@ -291,6 +342,14 @@ def _parsed_resume_text(text: str) -> dict[str, Any] | None:
         return parse_resume_text(cleaned)
     except ResumeParseError:
         return None
+
+
+def _looks_like_real_job(item: dict) -> bool:
+    """Keep real work history. Drop bare job-board titles with no company, dates, or bullets."""
+    if item.get("company") or item.get("start_date") or item.get("bullets"):
+        return True
+    title = str(item.get("title") or "").strip()
+    return bool(title) and not _is_posting_title(title)
 
 
 def _experience_from_history(rows: list[dict]) -> list[dict]:
