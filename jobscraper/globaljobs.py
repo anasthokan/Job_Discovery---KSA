@@ -192,7 +192,7 @@ def sync_global_jobs() -> dict:
         from jobscraper.db import mysql_configured, upsert_jobs
 
         if jobs and mysql_configured():
-            saved = upsert_jobs(jobs)
+            saved = upsert_jobs(jobs).saved
         elif jobs:
             log.warning("Dev Global Jobs fetched %s rows but MySQL is not configured", fetched)
         _LAST.update(

@@ -105,6 +105,7 @@ from jobscraper.db import (
     save_candidate as save_candidate_mysql,
     note_scrape_progress,
     read_scrape_progress,
+    read_scrape_progress_stats,
     reset_scrape_progress,
     start_scrape_run,
     start_dice_description_backfill,
@@ -1114,18 +1115,53 @@ def _recommend_payload(
     return payload
 
 
-def _saved_before_stop() -> int:
+def _saved_before_stop() -> dict:
     """Jobs already written by the spider, plus any feed file left after a kill."""
-    saved = read_scrape_progress()
+    stats = read_scrape_progress_stats()
     partial = load_jobs_json()
     if not partial:
-        return saved
+        return stats
     try:
-        upsert_jobs(partial)
-        saved = max(saved, len(partial))
-        note_scrape_progress(saved)
+        # Mid-scrape rows are usually already in MySQL. Only count listings that
+        # were not part of the running progress total.
+        result = upsert_jobs(partial)
+        if stats["saved"] <= 0:
+            stats = {
+                "saved": result.saved,
+                "new": result.new,
+                "duplicates": result.duplicates,
+            }
+        else:
+            stats = {
+                "saved": max(stats["saved"], len(partial)),
+                "new": stats["new"],
+                "duplicates": stats["duplicates"],
+            }
+        note_scrape_progress(
+            stats["saved"],
+            new=stats["new"],
+            duplicates=stats["duplicates"],
+        )
     except Exception:
         log.exception("Could not save the jobs collected before the scrape stopped")
+    return stats
+
+
+def _finish_scrape_stats(
+    run_id: int | None,
+    stats: dict | None = None,
+    *,
+    error: str | None = None,
+) -> int:
+    stats = stats or read_scrape_progress_stats()
+    saved = int(stats.get("saved") or 0)
+    finish_scrape_run(
+        run_id,
+        job_count_value=saved,
+        new_count=int(stats.get("new") or 0),
+        duplicate_count=int(stats.get("duplicates") or 0),
+        error=error,
+    )
     return saved
 
 
@@ -1176,11 +1212,16 @@ def run_spider(keywords: str, location: str, platform: str, city: str = "", targ
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
         )
     except subprocess.TimeoutExpired:
-        saved = _saved_before_stop()
-        if saved:
-            finish_scrape_run(run_id, job_count_value=saved)
+        stats = _saved_before_stop()
+        if stats["saved"]:
+            saved = _finish_scrape_stats(run_id, stats)
             start_dice_description_backfill()
-            log.warning("Scrape hit the time limit after saving %s jobs", saved)
+            log.warning(
+                "Scrape hit the time limit after saving %s jobs (new=%s duplicates=%s)",
+                saved,
+                stats["new"],
+                stats["duplicates"],
+            )
             return saved
         finish_scrape_run(run_id, job_count_value=0, error="timeout")
         raise
@@ -1188,19 +1229,19 @@ def run_spider(keywords: str, location: str, platform: str, city: str = "", targ
         finish_scrape_run(run_id, job_count_value=0, error=str(exc)[:2000])
         raise
     if result.returncode != 0:
-        saved = _saved_before_stop()
-        if saved:
-            finish_scrape_run(run_id, job_count_value=saved)
+        stats = _saved_before_stop()
+        if stats["saved"]:
+            saved = _finish_scrape_stats(run_id, stats)
             start_dice_description_backfill()
             return saved
         detail = (result.stderr or result.stdout or "Scrapy crawl failed").strip()
         finish_scrape_run(run_id, job_count_value=0, error=detail[-2000:])
         raise HTTPException(status_code=502, detail=detail[-2000:])
     this_run = load_jobs_json()
+    progress = read_scrape_progress_stats()
     if not this_run:
-        saved = read_scrape_progress()
-        if saved:
-            finish_scrape_run(run_id, job_count_value=saved)
+        if progress["saved"]:
+            saved = _finish_scrape_stats(run_id, progress)
             start_dice_description_backfill()
             return saved
         detail = "\n".join(part.strip() for part in (result.stderr, result.stdout) if part and part.strip())
@@ -1208,18 +1249,36 @@ def run_spider(keywords: str, location: str, platform: str, city: str = "", targ
         finish_scrape_run(run_id, job_count_value=0, error=detail[-2000:])
         raise HTTPException(status_code=502, detail=detail[-2000:])
     try:
-        saved = upsert_jobs(this_run)
+        # Prefer mid-scrape progress for new/duplicate counts. A final upsert of
+        # the same feed would mark almost every row as a duplicate.
+        if progress["saved"] <= 0:
+            result_stats = upsert_jobs(this_run)
+            progress = {
+                "saved": result_stats.saved or len(this_run),
+                "new": result_stats.new,
+                "duplicates": result_stats.duplicates,
+            }
+            note_scrape_progress(
+                progress["saved"],
+                new=progress["new"],
+                duplicates=progress["duplicates"],
+            )
+        else:
+            upsert_jobs(this_run, notify=False)
+            progress = {
+                "saved": max(progress["saved"], len(this_run)),
+                "new": progress["new"],
+                "duplicates": progress["duplicates"],
+            }
     except Exception as exc:
-        saved_now = read_scrape_progress()
-        if saved_now:
-            finish_scrape_run(run_id, job_count_value=saved_now)
+        if progress["saved"]:
+            saved = _finish_scrape_stats(run_id, progress)
             start_dice_description_backfill()
-            return saved_now
+            return saved
         detail = f"MySQL save failed: {exc}"
         finish_scrape_run(run_id, job_count_value=0, error=detail[:2000])
         raise HTTPException(status_code=502, detail=detail[:2000]) from exc
-    kept = len(this_run) or saved
-    finish_scrape_run(run_id, job_count_value=kept)
+    kept = _finish_scrape_stats(run_id, progress)
     # The startup refill has already finished by the time a scheduled scrape
     # saves new LinkedIn rows. Run it again for the rows that arrived with no body.
     start_dice_description_backfill()
@@ -1687,10 +1746,13 @@ def _scrape_background(keywords: str, state: str, platform: str, city: str, targ
 
 @app.get("/api/scrape/status")
 def scrape_status():
+    progress = read_scrape_progress_stats()
     return {
         "ok": True,
         "running": SCRAPE_LOCK.locked(),
-        "saved_so_far": read_scrape_progress(),
+        "saved_so_far": progress["saved"],
+        "new_so_far": progress["new"],
+        "duplicates_so_far": progress["duplicates"],
         "last_scrape": _LAST_SCRAPE,
         "mysql": mysql_health(),
         "schedule": {

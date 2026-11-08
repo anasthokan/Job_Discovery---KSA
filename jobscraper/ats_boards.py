@@ -648,7 +648,7 @@ def sync_ats_boards() -> dict:
         from jobscraper.db import mysql_configured, upsert_jobs
 
         if jobs and mysql_configured():
-            saved = upsert_jobs(jobs)
+            saved = upsert_jobs(jobs).saved
         elif jobs:
             log.warning("ATS boards fetched %s Saudi jobs but MySQL is not configured", fetched)
         _LAST.update(

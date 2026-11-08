@@ -683,7 +683,10 @@ def sync_headcount() -> dict:
 
         if jobs and mysql_configured():
             for start in range(0, len(jobs), 400):
-                saved += upsert_jobs(jobs[start : start + 400], notify=not (mode == "full" and first_load))
+                saved += upsert_jobs(
+                    jobs[start : start + 400],
+                    notify=not (mode == "full" and first_load),
+                ).saved
         elif jobs:
             log.warning("Headcount fetched %s rows but MySQL is not configured", fetched)
         if complete:

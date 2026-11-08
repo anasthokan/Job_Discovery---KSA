@@ -14,6 +14,7 @@ import re
 import threading
 from datetime import date, datetime, timezone
 from pathlib import Path
+from typing import NamedTuple
 from urllib.parse import urlparse
 
 from dotenv import load_dotenv
@@ -108,6 +109,8 @@ CREATE TABLE IF NOT EXISTS {RUNS_TABLE} (
   started_at DATETIME NOT NULL,
   finished_at DATETIME NULL,
   job_count INT NOT NULL DEFAULT 0,
+  new_count INT NOT NULL DEFAULT 0,
+  duplicate_count INT NOT NULL DEFAULT 0,
   keywords VARCHAR(512) NULL,
   state VARCHAR(128) NULL,
   platform VARCHAR(128) NULL,
@@ -117,6 +120,20 @@ CREATE TABLE IF NOT EXISTS {RUNS_TABLE} (
   KEY idx_jd_scrape_runs_started (started_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 """
+
+
+class UpsertStats(NamedTuple):
+    """How many listings a save wrote, split into first-time vs already-known."""
+
+    saved: int = 0
+    new: int = 0
+    duplicates: int = 0
+
+    def __bool__(self) -> bool:
+        return self.saved > 0
+
+    def __int__(self) -> int:
+        return self.saved
 
 # Columns this scraper writes. Other NOT NULL columns on the shared jobs table
 # (for example sponsors_work_visa) still need a default or MySQL error 1364 aborts the save.
@@ -611,6 +628,16 @@ def _ensure_job_columns(cur) -> None:
     _default_omitted_columns(cur)
 
 
+def _ensure_run_columns(cur) -> None:
+    for name, ddl in (
+        ("new_count", "INT NOT NULL DEFAULT 0"),
+        ("duplicate_count", "INT NOT NULL DEFAULT 0"),
+    ):
+        cur.execute(f"SHOW COLUMNS FROM {RUNS_TABLE} LIKE '{name}'")
+        if not cur.fetchone():
+            cur.execute(f"ALTER TABLE {RUNS_TABLE} ADD COLUMN {name} {ddl}")
+
+
 def init_db() -> bool:
     cfg = mysql_config()
     if not cfg:
@@ -632,6 +659,7 @@ def init_db() -> bool:
             cur.execute(CREATE_SOURCES_SQL)
             cur.execute(CREATE_ALERTS_SQL)
             _ensure_job_columns(cur)
+            _ensure_run_columns(cur)
         log.info("MySQL ready (%s/%s)", cfg["host"], cfg["database"])
         return True
     except Exception:
@@ -1656,12 +1684,12 @@ def _known_listings(cur, rows: list[dict]) -> tuple[set[str], set[str]]:
     return known_ids, known_urls
 
 
-def upsert_jobs(jobs: list[dict], *, notify: bool = True) -> int:
+def upsert_jobs(jobs: list[dict], *, notify: bool = True) -> UpsertStats:
     if not jobs or not mysql_configured():
-        return 0
+        return UpsertStats()
     rows = [row for row in (_row_from_item(job) for job in jobs) if row]
     if not rows:
-        return 0
+        return UpsertStats()
     unique = {}
     for row in rows:
         unique[row["source_id"]] = row
@@ -1671,18 +1699,21 @@ def upsert_jobs(jobs: list[dict], *, notify: bool = True) -> int:
     rows = list(by_url.values())
     conn = get_conn()
     if conn is None:
-        return 0
+        return UpsertStats()
     fresh: list[dict] = []
+    duplicate_count = 0
     try:
         with _LOCK:
             with conn.cursor() as cur:
-                if notify:
-                    try:
-                        known_ids, _known_urls = _known_listings(cur, rows)
-                        fresh = [row for row in rows if row["source_id"] not in known_ids]
-                    except Exception:
-                        log.exception("Could not detect new jobs for WhatsApp alerts")
-                        fresh = []
+                try:
+                    known_ids, _known_urls = _known_listings(cur, rows)
+                    fresh = [row for row in rows if row["source_id"] not in known_ids]
+                    duplicate_count = len(rows) - len(fresh)
+                except Exception:
+                    log.exception("Could not detect new vs duplicate jobs")
+                    # Fail closed for alerts: never treat unknown rows as brand new.
+                    fresh = []
+                    duplicate_count = 0
                 _default_omitted_columns(cur)
                 company_ids = _company_ids(
                     cur,
@@ -1722,14 +1753,16 @@ def upsert_jobs(jobs: list[dict], *, notify: bool = True) -> int:
         close_conn()
         log.exception("MySQL upsert failed")
         raise
-    if fresh:
+    if notify and fresh:
         try:
             from jobscraper.whatsapp_alerts import queue_job_alerts
 
             queue_job_alerts(fresh)
         except Exception:
             log.exception("Could not queue WhatsApp alerts")
-    return len(rows)
+    saved = len(rows)
+    new_count = max(0, saved - duplicate_count)
+    return UpsertStats(saved=saved, new=new_count, duplicates=duplicate_count)
 
 
 def _parse_skills(value) -> list[str]:
@@ -3527,21 +3560,41 @@ def _scrape_progress_path() -> Path:
 def reset_scrape_progress() -> None:
     path = _scrape_progress_path()
     path.parent.mkdir(exist_ok=True)
-    path.write_text('{"saved": 0}', encoding="utf-8")
+    path.write_text('{"saved": 0, "new": 0, "duplicates": 0}', encoding="utf-8")
 
 
-def note_scrape_progress(saved: int) -> None:
+def note_scrape_progress(
+    saved: int,
+    *,
+    new: int | None = None,
+    duplicates: int | None = None,
+) -> None:
     path = _scrape_progress_path()
     path.parent.mkdir(exist_ok=True)
-    path.write_text(json.dumps({"saved": int(saved)}), encoding="utf-8")
+    current = read_scrape_progress_stats()
+    payload = {
+        "saved": int(saved),
+        "new": int(current["new"] if new is None else new),
+        "duplicates": int(current["duplicates"] if duplicates is None else duplicates),
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
 
 
 def read_scrape_progress() -> int:
+    return int(read_scrape_progress_stats()["saved"])
+
+
+def read_scrape_progress_stats() -> dict:
+    empty = {"saved": 0, "new": 0, "duplicates": 0}
     try:
         payload = json.loads(_scrape_progress_path().read_text(encoding="utf-8"))
-        return max(0, int(payload.get("saved") or 0))
+        return {
+            "saved": max(0, int(payload.get("saved") or 0)),
+            "new": max(0, int(payload.get("new") or 0)),
+            "duplicates": max(0, int(payload.get("duplicates") or 0)),
+        }
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
-        return 0
+        return empty
 
 
 def start_scrape_run(keywords: str, state: str, platform: str) -> int | None:
@@ -3552,6 +3605,7 @@ def start_scrape_run(keywords: str, state: str, platform: str) -> int | None:
         if conn is None:
             return None
         with conn.cursor() as cur:
+            _ensure_run_columns(cur)
             cur.execute(
                 f"INSERT INTO {RUNS_TABLE} (started_at, keywords, state, platform, status) "
                 "VALUES (UTC_TIMESTAMP(), %s, %s, %s, 'running')",
@@ -3564,19 +3618,40 @@ def start_scrape_run(keywords: str, state: str, platform: str) -> int | None:
         return None
 
 
-def finish_scrape_run(run_id: int | None, *, job_count_value: int, error: str | None = None) -> None:
+def finish_scrape_run(
+    run_id: int | None,
+    *,
+    job_count_value: int,
+    new_count: int = 0,
+    duplicate_count: int = 0,
+    error: str | None = None,
+) -> None:
     if not run_id or not mysql_configured():
         return
     status = "error" if error else "ok"
+    job_count_value = max(0, int(job_count_value or 0))
+    new_count = max(0, int(new_count or 0))
+    duplicate_count = max(0, int(duplicate_count or 0))
+    if new_count + duplicate_count == 0 and job_count_value:
+        # Older callers only pass the total; keep columns consistent.
+        new_count = job_count_value
     try:
         conn = get_conn()
         if conn is None:
             return
         with conn.cursor() as cur:
+            _ensure_run_columns(cur)
             cur.execute(
                 f"UPDATE {RUNS_TABLE} SET finished_at = UTC_TIMESTAMP(), job_count = %s, "
-                "status = %s, error = %s WHERE id = %s",
-                (job_count_value, status, (error or "")[:4000] or None, run_id),
+                "new_count = %s, duplicate_count = %s, status = %s, error = %s WHERE id = %s",
+                (
+                    job_count_value,
+                    new_count,
+                    duplicate_count,
+                    status,
+                    (error or "")[:4000] or None,
+                    run_id,
+                ),
             )
     except Exception:
         log.exception("Could not record scrape finish")
@@ -3584,7 +3659,14 @@ def finish_scrape_run(run_id: int | None, *, job_count_value: int, error: str | 
 
 
 def last_scrape_meta() -> dict:
-    empty = {"scraped_at": None, "age_seconds": None, "job_count": 0, "status": None}
+    empty = {
+        "scraped_at": None,
+        "age_seconds": None,
+        "job_count": 0,
+        "new_count": 0,
+        "duplicate_count": 0,
+        "status": None,
+    }
     if not mysql_configured():
         return empty
     try:
@@ -3592,8 +3674,9 @@ def last_scrape_meta() -> dict:
         if conn is None:
             return empty
         with conn.cursor() as cur:
+            _ensure_run_columns(cur)
             cur.execute(
-                f"SELECT finished_at, job_count, status FROM {RUNS_TABLE} "
+                f"SELECT finished_at, job_count, new_count, duplicate_count, status FROM {RUNS_TABLE} "
                 "WHERE status = 'ok' AND finished_at IS NOT NULL "
                 "ORDER BY finished_at DESC LIMIT 1"
             )
@@ -3613,6 +3696,8 @@ def last_scrape_meta() -> dict:
             "scraped_at": scraped_at,
             "age_seconds": age,
             "job_count": int(row.get("job_count") or 0),
+            "new_count": int(row.get("new_count") or 0),
+            "duplicate_count": int(row.get("duplicate_count") or 0),
             "status": row.get("status"),
         }
     except Exception:
@@ -3661,7 +3746,13 @@ def import_json_if_empty(path: Path) -> int:
     except (OSError, json.JSONDecodeError):
         return 0
     jobs = payload if isinstance(payload, list) else []
-    saved = upsert_jobs(jobs, notify=False)
-    if saved:
-        log.info("Imported %s jobs from %s", saved, path)
-    return saved
+    stats = upsert_jobs(jobs, notify=False)
+    if stats.saved:
+        log.info(
+            "Imported %s jobs from %s (new=%s duplicates=%s)",
+            stats.saved,
+            path,
+            stats.new,
+            stats.duplicates,
+        )
+    return stats.saved

@@ -43,7 +43,12 @@ class MysqlPipeline:
         try:
             from jobscraper.db import upsert_jobs
 
-            saved = upsert_jobs(self.jobs)
-            spider.logger.info("Saved %s jobs to MySQL", saved)
+            stats = upsert_jobs(self.jobs)
+            spider.logger.info(
+                "Saved %s jobs to MySQL (new=%s duplicates=%s)",
+                stats.saved,
+                stats.new,
+                stats.duplicates,
+            )
         except Exception:
             spider.logger.exception("MySQL upsert failed")

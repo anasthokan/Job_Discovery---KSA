@@ -227,6 +227,8 @@ class JobsSpider(scrapy.Spider):
             self.target,
         )
         saved = 0
+        new_total = 0
+        duplicate_total = 0
         seen: set[str] = set()
         for index, term in enumerate(queries, start=1):
             for place_index, where in enumerate(places):
@@ -291,15 +293,23 @@ class JobsSpider(scrapy.Spider):
                     try:
                         from jobscraper.db import note_scrape_progress, upsert_jobs
 
-                        upsert_jobs(batch)
-                        saved += len(batch)
-                        note_scrape_progress(saved)
+                        stats = upsert_jobs(batch)
+                        saved += stats.saved
+                        new_total += stats.new
+                        duplicate_total += stats.duplicates
+                        note_scrape_progress(
+                            saved,
+                            new=new_total,
+                            duplicates=duplicate_total,
+                        )
                         self.logger.info(
-                            "Saved %s jobs for %s at %s (running total %s)",
-                            len(batch),
+                            "Saved %s jobs for %s at %s (running total %s, new %s, duplicates %s)",
+                            stats.saved,
                             term,
                             where,
                             saved,
+                            new_total,
+                            duplicate_total,
                         )
                     except Exception:
                         self.logger.exception("MySQL save failed for %s", term)
