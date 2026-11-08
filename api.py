@@ -85,6 +85,7 @@ from jobscraper.profile_autofill import autofill_from_parsed
 from jobscraper.resume_enhance import enhance_profile_for_job
 from jobscraper.resume_parser import ResumeParseError, parse_resume_bytes, parse_resume_text
 from jobscraper.db import (
+    close_abandoned_scrape_runs,
     close_conn as close_mysql,
     finish_scrape_run,
     health as mysql_health,
@@ -318,6 +319,9 @@ def _boot() -> None:
     global _SCHEDULER
     try:
         init_mysql()
+        closed = close_abandoned_scrape_runs()
+        if closed:
+            log.info("Closed %s scrape runs left on running", closed)
         import_json_if_empty(DATA_FILE)
         start_startup_maintenance()
     except Exception:

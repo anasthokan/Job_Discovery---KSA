@@ -3597,10 +3597,43 @@ def read_scrape_progress_stats() -> dict:
         return empty
 
 
+def close_abandoned_scrape_runs(except_id: int | None = None) -> int:
+    """Mark leftover running rows finished.
+
+    finish_scrape_run only runs if this process is still alive at the end.
+    An IIS recycle or a restart leaves the row on running forever.
+    """
+    if not mysql_configured():
+        return 0
+    try:
+        conn = get_conn()
+        if conn is None:
+            return 0
+        with conn.cursor() as cur:
+            _ensure_run_columns(cur)
+            sql = (
+                f"UPDATE {RUNS_TABLE} SET finished_at = UTC_TIMESTAMP(), status = 'stopped', "
+                "error = %s WHERE status = 'running' AND finished_at IS NULL"
+            )
+            params: list = [
+                "Scrape stopped before it finished. The API restarted or the process was killed."
+            ]
+            if except_id:
+                sql += " AND id <> %s"
+                params.append(int(except_id))
+            cur.execute(sql, tuple(params))
+            return int(cur.rowcount or 0)
+    except Exception:
+        log.exception("Could not close abandoned scrape runs")
+        close_conn()
+        return 0
+
+
 def start_scrape_run(keywords: str, state: str, platform: str) -> int | None:
     if not mysql_configured():
         return None
     try:
+        close_abandoned_scrape_runs()
         conn = get_conn()
         if conn is None:
             return None
