@@ -41,6 +41,12 @@ _UUID_RE = re.compile(r"\b[0-9a-f]{16,}\b", re.I)
 _JOB_AD_RE = re.compile(
     r"(?is)^(.{0,500}?\$\s?\d[\d,\s\-–—]*\d?.{0,80}?(?:benefits|bonus)\s+)"
 )
+_DATE_RE = re.compile(
+    r"(?i)\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{4}\b|\b(?:19|20)\d{2}\s*[-–—]\s*(?:present|current|now|(?:19|20)\d{2})\b"
+)
+_ROLE_RE = re.compile(
+    r"(?i)\b(engineers?|developers?|managers?|analysts?|architects?|interns?|consultants?|specialists?|accountants?|registrars?|designers?|scientists?|administrators?)\b"
+)
 
 
 def enhance_profile_for_job(profile: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
@@ -101,12 +107,16 @@ def _restore_resume(text: str) -> str:
     started = False
     for raw in cleaned.splitlines():
         line = re.sub(r"[ \t]{2,}", " ", raw).strip()
-        if not line or _is_junk_line(line):
+        line = re.sub(r"(?i)\s*free plan monthly credits\.?", "", line).strip()
+        if not line or _is_junk_line(line) or _is_job_ad_line(line) or line.lower() in {"benefits", "bonus"}:
             continue
-        if not started and _is_job_ad_line(line):
+        if not started and _is_posting_title(line):
             continue
         started = True
         lines.append(line)
+    lines = _drop_posting_runs(lines)
+    lines = _drop_repeated_lines(lines)
+    lines = _drop_repeated_passages(lines)
     return "\n".join(lines).strip() + ("\n" if lines else "")
 
 
@@ -150,7 +160,83 @@ def _is_job_ad_line(line: str) -> bool:
         return True
     if "discretionary bonus" in lowered or "mid-senior" in lowered:
         return True
+    if "free plan monthly credits" in lowered:
+        return True
     return False
+
+
+def _is_posting_title(line: str) -> bool:
+    """A bare job-board title, not a resume sentence, date, or bullet."""
+    if _HEADING_LINE_RE.match(line) or _DATE_RE.search(line):
+        return False
+    if line.startswith("-") or len(line) > 140:
+        return False
+    words = line.split()
+    if not (2 <= len(words) <= 16):
+        return False
+    return _ROLE_RE.search(line) is not None
+
+
+def _drop_posting_runs(lines: list[str]) -> list[str]:
+    """Drop a streak of saved job titles. One title next to a date or bullet stays."""
+    kept: list[str] = []
+    index = 0
+    while index < len(lines):
+        if not _is_posting_title(lines[index]):
+            kept.append(lines[index])
+            index += 1
+            continue
+        end = index
+        while end < len(lines) and _is_posting_title(lines[end]):
+            end += 1
+        if end - index >= 3:
+            index = end
+            continue
+        kept.extend(lines[index:end])
+        index = end
+    return kept
+
+
+def _drop_repeated_lines(lines: list[str]) -> list[str]:
+    seen: set[str] = set()
+    kept: list[str] = []
+    for line in lines:
+        key = re.sub(r"\s+", " ", line).strip().lower()
+        if len(key) >= 40 and key in seen:
+            continue
+        if len(key) >= 40:
+            seen.add(key)
+        kept.append(line)
+    return kept
+
+
+def _drop_repeated_passages(lines: list[str]) -> list[str]:
+    """Remove a second copy of the same paragraph when line breaks differ."""
+    words: list[str] = []
+    owners: list[int] = []
+    for index, line in enumerate(lines):
+        for word in line.split():
+            words.append(word)
+            owners.append(index)
+    lower = [word.lower() for word in words]
+    window = 10
+    seen: dict[tuple[str, ...], int] = {}
+    drop_lines: set[int] = set()
+    for index in range(0, max(len(lower) - window + 1, 0)):
+        key = tuple(lower[index : index + window])
+        if key not in seen:
+            seen[key] = index
+            continue
+        start = seen[key]
+        size = 0
+        while start + size < index and index + size < len(lower) and lower[start + size] == lower[index + size]:
+            size += 1
+        if size >= window:
+            drop_lines.update(owners[index : index + size])
+        break
+    if not drop_lines:
+        return lines
+    return [line for index, line in enumerate(lines) if index not in drop_lines]
 
 
 def _strip_tailor_suffix(text: str) -> str:
