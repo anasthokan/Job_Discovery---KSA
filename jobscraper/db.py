@@ -1904,11 +1904,17 @@ def _quote_ident(name: str) -> str:
 
 def load_resume_file_text(candidate_id: str) -> str:
     """Raw text of a resume file saved on the user, without profile or job-ad text."""
+    found = load_resume_file(candidate_id)
+    return str((found or {}).get("text") or "")
+
+
+def load_resume_file(candidate_id: str) -> dict | None:
+    """Original uploaded resume bytes + text when a file is stored for this user."""
     if not mysql_configured():
-        return ""
+        return None
     conn = get_conn()
     if conn is None:
-        return ""
+        return None
     try:
         with conn.cursor() as cur:
             if str(candidate_id).isdigit():
@@ -1917,12 +1923,12 @@ def load_resume_file_text(candidate_id: str) -> str:
                 cur.execute("SELECT id FROM users WHERE public_id = %s LIMIT 1", (candidate_id,))
             user = cur.fetchone()
             if not user:
-                return ""
+                return None
             user_id = int(user["id"])
             profile_row = _profile_row(cur, user_id)
-            return _resume_text_from_stored_files(cur, user_id, profile_row.get("profile_id"))
+            return _resume_file_from_storage(cur, user_id, profile_row.get("profile_id"))
     except Exception:
-        log.exception("load_resume_file_text failed for %s", candidate_id)
+        log.exception("load_resume_file failed for %s", candidate_id)
         close_conn()
         raise
 
@@ -2465,17 +2471,46 @@ def _user_education(cur, user_id: int, profile_id) -> list[dict]:
 
 
 def _resume_text_from_stored_files(cur, user_id: int, profile_id) -> str:
-    """Parse a resume file or blob saved on the user or profile row."""
+    found = _resume_file_from_storage(cur, user_id, profile_id)
+    return str((found or {}).get("text") or "")
+
+
+def _resume_file_from_storage(cur, user_id: int, profile_id) -> dict | None:
+    """Return the best uploaded resume file bytes/text for this user."""
     try:
         from jobscraper.resume_parser import parse_resume_bytes
     except Exception:
-        return ""
-    texts: list[str] = []
+        return None
+    candidates: list[dict] = []
+    for item in _resume_values_from_path_columns(cur, user_id, profile_id):
+        packed = _resume_payload_from_value(item.get("value"), parse_resume_bytes, hint=item.get("hint") or "")
+        if packed:
+            candidates.append(packed)
+    for item in _resume_values_from_blobs(cur, user_id, profile_id):
+        packed = _resume_payload_from_value(item.get("value"), parse_resume_bytes, hint=item.get("hint") or "resume.pdf")
+        if packed:
+            candidates.append(packed)
+    for item in _resume_values_from_media(cur, user_id, profile_id):
+        packed = _resume_payload_from_value(item.get("value"), parse_resume_bytes, hint=item.get("hint") or "resume.pdf")
+        if packed:
+            candidates.append(packed)
+    if not candidates:
+        return None
+    best = max(
+        candidates,
+        key=lambda item: (_resume_section_count(item.get("text") or ""), len(item.get("text") or ""), len(item.get("content") or b"")),
+    )
+    best["text"] = str(best.get("text") or "")[:20000]
+    return best
+
+
+def _resume_values_from_path_columns(cur, user_id: int, profile_id) -> list[dict]:
+    found: list[dict] = []
     try:
         links = _owner_links(cur, column_names=_RESUME_PATH_COLUMNS)
     except Exception:
         log.exception("resume path lookup failed")
-        links = []
+        return found
     for link in links:
         owner = str(link.get("owner_column") or "")
         key = {"user_id": user_id, "profile_id": profile_id, "candidate_id": user_id}.get(owner)
@@ -2484,18 +2519,18 @@ def _resume_text_from_stored_files(cur, user_id: int, profile_id) -> str:
         table = str(link.get("table_name") or "")
         if table in _CATALOG_SKIP_TABLES or table == JOBS_TABLE:
             continue
-        for row in _rows_for_owner(
-            cur,
-            table,
-            str(link.get("value_column") or ""),
-            owner,
-            key,
-        ):
-            text = _text_from_resume_value(row.get("value"), parse_resume_bytes)
-            if text:
-                texts.append(text)
-    if texts:
-        return max(texts, key=lambda item: (_resume_section_count(item), len(item)))[:20000]
+        column = str(link.get("value_column") or "")
+        for row in _rows_for_owner(cur, table, column, owner, key):
+            value = row.get("value")
+            if value is None or value == "":
+                continue
+            hint = str(value) if isinstance(value, str) else f"{table}.{column}"
+            found.append({"value": value, "hint": hint})
+    return found
+
+
+def _resume_values_from_blobs(cur, user_id: int, profile_id) -> list[dict]:
+    found: list[dict] = []
     try:
         cur.execute(
             """
@@ -2516,7 +2551,7 @@ def _resume_text_from_stored_files(cur, user_id: int, profile_id) -> str:
         blobs = list(cur.fetchall() or [])
     except Exception:
         log.exception("resume blob lookup failed")
-        return ""
+        return found
     for link in blobs:
         owner = str(link.get("owner_column") or "")
         key = user_id if owner == "user_id" else profile_id
@@ -2535,12 +2570,151 @@ def _resume_text_from_stored_files(cur, user_id: int, profile_id) -> str:
             row = cur.fetchone() or {}
         except Exception:
             continue
-        text = _text_from_resume_value(row.get("value"), parse_resume_bytes)
-        if text:
-            texts.append(text)
-    if not texts:
-        return ""
-    return max(texts, key=lambda item: (_resume_section_count(item), len(item)))[:20000]
+        value = row.get("value")
+        if value:
+            found.append({"value": value, "hint": f"{table}.{column}.pdf"})
+    return found
+
+
+def _resume_values_from_media(cur, user_id: int, profile_id) -> list[dict]:
+    """Spatie/Laravel-style media rows linked to the user or profile."""
+    found: list[dict] = []
+    try:
+        cur.execute(
+            """
+            SELECT TABLE_NAME AS table_name
+            FROM information_schema.TABLES
+            WHERE TABLE_SCHEMA = DATABASE()
+              AND TABLE_NAME IN ('media', 'files', 'uploads', 'documents', 'attachments', 'user_files', 'profile_files')
+            """
+        )
+        tables = [str(row.get("table_name") or "") for row in cur.fetchall() or []]
+    except Exception:
+        return found
+    for table in tables:
+        if not _IDENT_RE.fullmatch(table):
+            continue
+        try:
+            cur.execute(
+                """
+                SELECT COLUMN_NAME AS column_name
+                FROM information_schema.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s
+                """,
+                (table,),
+            )
+            columns = {str(row.get("column_name") or "") for row in cur.fetchall() or []}
+        except Exception:
+            continue
+        path_col = next((name for name in ("file_name", "filename", "path", "file_path", "url", "name") if name in columns), None)
+        if not path_col:
+            continue
+        where = []
+        params: list = []
+        if "model_id" in columns:
+            where.append("model_id IN (%s, %s)")
+            params.extend([user_id, profile_id if profile_id is not None else user_id])
+        if "user_id" in columns:
+            where.append("user_id = %s")
+            params.append(user_id)
+        if "profile_id" in columns and profile_id is not None:
+            where.append("profile_id = %s")
+            params.append(profile_id)
+        if not where:
+            continue
+        selected = [f"{_quote_ident(path_col)} AS path_value"]
+        if "id" in columns:
+            selected.append("id")
+        if "disk" in columns:
+            selected.append("disk")
+        if "collection_name" in columns:
+            selected.append("collection_name")
+        if "mime_type" in columns:
+            selected.append("mime_type")
+        sql = (
+            f"SELECT {', '.join(selected)} FROM {_quote_ident(table)} "
+            f"WHERE ({' OR '.join(where)}) LIMIT 20"
+        )
+        try:
+            cur.execute(sql, params)
+            rows = cur.fetchall() or []
+        except Exception:
+            continue
+        for row in rows:
+            collection = str(row.get("collection_name") or "").lower()
+            mime = str(row.get("mime_type") or "").lower()
+            path_value = str(row.get("path_value") or "").strip()
+            if not path_value:
+                continue
+            if collection and not any(token in collection for token in ("resume", "cv", "document", "file", "default")):
+                if "pdf" not in path_value.lower() and "word" not in mime and "pdf" not in mime:
+                    continue
+            if not any(path_value.lower().endswith(ext) for ext in (".pdf", ".docx", ".txt")) and "pdf" not in mime:
+                if "id" in row and path_value:
+                    pass
+                else:
+                    continue
+            candidates = [path_value]
+            media_id = row.get("id")
+            disk = str(row.get("disk") or "public")
+            if media_id is not None:
+                candidates.extend(
+                    [
+                        f"{media_id}/{path_value}",
+                        f"{disk}/{media_id}/{path_value}",
+                        f"public/{media_id}/{path_value}",
+                        f"storage/app/public/{media_id}/{path_value}",
+                        f"storage/app/{disk}/{media_id}/{path_value}",
+                    ]
+                )
+            for candidate in candidates:
+                found.append({"value": candidate, "hint": path_value})
+    return found
+
+
+def _resume_payload_from_value(value, parse_resume_bytes, hint: str = "") -> dict | None:
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if not cleaned:
+            return None
+        if len(cleaned) > 200 and _resume_section_count(cleaned) >= 2:
+            return {"text": cleaned[:20000], "content": None, "filename": hint or "resume.txt", "media_type": "text/plain"}
+        path = _resolve_resume_path(cleaned)
+        if path is None:
+            return None
+        try:
+            content = path.read_bytes()
+            parsed = parse_resume_bytes(content, filename=path.name)
+        except Exception:
+            return None
+        return {
+            "text": str(parsed.get("raw_text") or "")[:20000],
+            "content": content,
+            "filename": path.name,
+            "media_type": "application/pdf" if path.suffix.lower() == ".pdf" else (
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                if path.suffix.lower() == ".docx"
+                else "text/plain"
+            ),
+        }
+    if isinstance(value, (bytes, bytearray)) and len(value) > 100:
+        filename = hint if str(hint).lower().endswith((".pdf", ".docx", ".txt")) else "resume.pdf"
+        try:
+            content = bytes(value)
+            parsed = parse_resume_bytes(content, filename=filename)
+        except Exception:
+            return None
+        return {
+            "text": str(parsed.get("raw_text") or "")[:20000],
+            "content": content,
+            "filename": filename,
+            "media_type": "application/pdf" if filename.lower().endswith(".pdf") else (
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                if filename.lower().endswith(".docx")
+                else "application/octet-stream"
+            ),
+        }
+    return None
 
 
 def _resume_storage_roots() -> list[Path]:

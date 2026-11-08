@@ -126,16 +126,43 @@ def preserved_resume_text(profile: dict[str, Any]) -> str:
 def rebuild_resume_from_profile(profile: dict[str, Any]) -> str:
     """Build a sectioned resume from saved profile fields when the uploaded file is missing."""
     source = dict(profile)
-    summary = str(profile.get("professional_summary") or "").strip()
-    if summary and len(summary) >= 40:
-        source["resume_text"] = summary
+    raw_blob = "\n".join(
+        part
+        for part in (
+            str(profile.get("resume_document") or "").strip(),
+            str(profile.get("resume_text") or "").strip(),
+            str(profile.get("professional_summary") or "").strip(),
+            str(profile.get("headline") or "").strip(),
+        )
+        if part
+    )
+    blob = _restore_resume(raw_blob) if _needs_resume_cleanup(raw_blob) else _light_normalize(raw_blob)
+    if len(blob) >= 40:
+        source["resume_text"] = blob
+    # Keep only skills that actually appear in the cleaned resume/profile text.
+    source["skills"] = _skills_grounded_in_text(profile.get("skills") or [], blob)
     resume = resume_from_profile(source)
+    summary = str(profile.get("professional_summary") or "").strip()
     if summary and not (resume.get("profile") or {}).get("summary"):
         resume.setdefault("profile", {})["summary"] = summary
     if not _has_content(resume):
         return ""
     text = render_cv_text(resume)
     return _normalize_section_titles(text)
+
+
+def _skills_grounded_in_text(skills: list[str], text: str) -> list[str]:
+    blob = (text or "").lower()
+    if len(blob) < 40:
+        return []
+    kept = []
+    for skill in skills:
+        name = str(skill or "").strip()
+        if not name or _is_junk_line(name):
+            continue
+        if name.lower() in blob:
+            kept.append(name)
+    return kept
 
 
 def _section_richness(text: str) -> tuple[int, int, int]:
@@ -341,7 +368,10 @@ def resume_from_profile(profile: dict[str, Any]) -> dict[str, Any]:
     source_text = str(profile.get("resume_document") or profile.get("resume_text") or "").strip()
     parsed = _parsed_resume_text(source_text)
     parsed_profile = (parsed or {}).get("profile") or {}
-    name = parsed_profile.get("full_name") or _join_name(profile.get("first_name"), profile.get("last_name"))
+    parsed_name = parsed_profile.get("full_name")
+    if parsed_name and (_is_posting_title(parsed_name) or _is_job_ad_line(parsed_name)):
+        parsed_name = None
+    name = parsed_name or _join_name(profile.get("first_name"), profile.get("last_name"))
     location = parsed_profile.get("location") or _join_place(profile.get("city"), profile.get("state"), profile.get("country"))
     history = _experience_from_history(profile.get("work_history") or [])
     history = [item for item in history if _looks_like_real_job(item)]
