@@ -3658,6 +3658,58 @@ def finish_scrape_run(
         close_conn()
 
 
+def scrape_run_save_stats(run_id: int | None = None) -> dict | None:
+    """Rows this scrape wrote, from first_seen_at / last_seen_at.
+
+    saved = new inserts + rows that were already in the table.
+    The progress file only counts listings the spider handled, so it can
+    climb while both of those stay at 0.
+    """
+    if not mysql_configured():
+        return None
+    try:
+        conn = get_conn()
+        if conn is None:
+            return None
+        with conn.cursor() as cur:
+            if run_id:
+                cur.execute(
+                    f"SELECT started_at FROM {RUNS_TABLE} WHERE id = %s",
+                    (int(run_id),),
+                )
+            else:
+                cur.execute(
+                    f"SELECT started_at FROM {RUNS_TABLE} "
+                    "WHERE status = 'running' AND finished_at IS NULL "
+                    "AND started_at >= UTC_TIMESTAMP() - INTERVAL 1 DAY "
+                    "ORDER BY id DESC LIMIT 1"
+                )
+            run = cur.fetchone()
+            started = run.get("started_at") if run else None
+            if not started:
+                return None
+            cur.execute(
+                f"SELECT "
+                "COALESCE(SUM(CASE WHEN first_seen_at >= %s THEN 1 ELSE 0 END), 0) AS new_count, "
+                "COALESCE(SUM(CASE WHEN last_seen_at >= %s "
+                "AND (first_seen_at IS NULL OR first_seen_at < %s) THEN 1 ELSE 0 END), 0) AS duplicate_count "
+                f"FROM {JOBS_TABLE} WHERE last_seen_at >= %s",
+                (started, started, started, started),
+            )
+            row = cur.fetchone() or {}
+        new_count = int(row.get("new_count") or 0)
+        duplicate_count = int(row.get("duplicate_count") or 0)
+        return {
+            "saved": new_count + duplicate_count,
+            "new": new_count,
+            "duplicates": duplicate_count,
+        }
+    except Exception:
+        log.exception("Could not count new vs duplicate jobs for this scrape")
+        close_conn()
+        return None
+
+
 def last_scrape_meta() -> dict:
     empty = {
         "scraped_at": None,

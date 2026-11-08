@@ -107,6 +107,7 @@ from jobscraper.db import (
     read_scrape_progress,
     read_scrape_progress_stats,
     reset_scrape_progress,
+    scrape_run_save_stats,
     start_scrape_run,
     start_dice_description_backfill,
     start_startup_maintenance,
@@ -1154,6 +1155,9 @@ def _finish_scrape_stats(
     error: str | None = None,
 ) -> int:
     stats = stats or read_scrape_progress_stats()
+    db_stats = scrape_run_save_stats(run_id)
+    if db_stats is not None:
+        stats = db_stats
     saved = int(stats.get("saved") or 0)
     finish_scrape_run(
         run_id,
@@ -1161,6 +1165,11 @@ def _finish_scrape_stats(
         new_count=int(stats.get("new") or 0),
         duplicate_count=int(stats.get("duplicates") or 0),
         error=error,
+    )
+    note_scrape_progress(
+        saved,
+        new=int(stats.get("new") or 0),
+        duplicates=int(stats.get("duplicates") or 0),
     )
     return saved
 
@@ -1746,7 +1755,12 @@ def _scrape_background(keywords: str, state: str, platform: str, city: str, targ
 
 @app.get("/api/scrape/status")
 def scrape_status():
+    # The progress file counts listings the spider handled. During a run that
+    # number can climb while new and duplicates stay 0. Count the rows actually
+    # inserted or updated since the run started instead.
     progress = read_scrape_progress_stats()
+    if SCRAPE_LOCK.locked():
+        progress = scrape_run_save_stats() or progress
     return {
         "ok": True,
         "running": SCRAPE_LOCK.locked(),
