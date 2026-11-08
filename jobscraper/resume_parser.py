@@ -60,6 +60,7 @@ SECTION_ALIASES = {
         "skills",
         "technical skills",
         "core skills",
+        "core competencies",
         "key skills",
         "competencies",
         "technologies",
@@ -78,6 +79,7 @@ SECTION_ALIASES = {
         "professional certifications",
     ),
     "languages": ("languages", "language skills"),
+    "achievements": ("key achievements", "achievements", "selected achievements", "career highlights"),
 }
 
 SECTION_LOOKUP = {
@@ -337,6 +339,7 @@ def parse_resume_text(
         "education": _extract_education(sections.get("education", [])),
         "projects": _extract_projects(sections.get("projects", [])),
         "certifications": _simple_items(sections.get("certifications", [])),
+        "achievements": _simple_items(sections.get("achievements", [])),
         "languages": _simple_items(sections.get("languages", []), split_commas=True),
         "raw_text": cleaned,
     }

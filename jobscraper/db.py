@@ -1960,11 +1960,13 @@ def load_app_user(candidate_id: str) -> dict | None:
             profile_id = profile_row.get("profile_id")
             skills = _user_skill_values(cur, user_id, profile_id)
             skills.extend(_linked_names(cur, user_id, profile_id))
-            certifications = _user_labeled_values(cur, user_id, profile_id, "certif")
+            certifications = _user_certification_entries(cur, user_id, profile_id)
+            certifications.extend(_user_labeled_values(cur, user_id, profile_id, "certif"))
             certifications.extend(_user_labeled_values(cur, user_id, profile_id, "license"))
             certifications.extend(_linked_names(cur, user_id, profile_id, tokens=("certif", "license")))
             work_history = _user_experience(cur, user_id, profile_id)
             education = _user_education(cur, user_id, profile_id)
+            achievements = _user_achievements(cur, user_id, profile_id)
             file_text = _resume_text_from_stored_files(cur, user_id, profile_row.get("profile_id"))
             extra_text = _user_text(cur, user_id, profile_id)
     except Exception:
@@ -1992,6 +1994,7 @@ def load_app_user(candidate_id: str) -> dict | None:
         "certifications": certifications,
         "work_history": work_history,
         "education": education,
+        "achievements": achievements,
         "professional_summary": professional_summary,
         "headline": headline,
         "resume_document": file_text,
@@ -2207,7 +2210,15 @@ def _linked_names(cur, user_id: int, profile_id, tokens: tuple[str, ...] = ("ski
 
 _EXPERIENCE_TABLE = re.compile(r"experience|employment|work_histor|position|career", re.I)
 _TITLE_COLUMNS = ("job_title", "role_title", "position", "title", "role")
-_COMPANY_COLUMNS = ("company", "employer", "organization")
+_COMPANY_COLUMNS = (
+    "company",
+    "company_name",
+    "employer",
+    "employer_name",
+    "organization",
+    "organization_name",
+    "organisation",
+)
 _START_COLUMNS = ("start_date", "started_at", "from_date", "start")
 _END_COLUMNS = ("end_date", "ended_at", "to_date", "end")
 
@@ -2276,7 +2287,7 @@ def _user_experience(cur, user_id: int, profile_id) -> list[dict]:
         if end_col:
             selected.append(f"{_quote_ident(end_col)} AS end_date")
         if desc_col:
-            selected.append(f"LEFT({_quote_ident(desc_col)}, 2000) AS description")
+            selected.append(f"LEFT({_quote_ident(desc_col)}, 8000) AS description")
         try:
             cur.execute(
                 f"SELECT {', '.join(selected)} FROM {_quote_ident(table)} "
@@ -2405,6 +2416,147 @@ def _looks_like_job_title_dump(text: str) -> bool:
     titles = sum(1 for line in lines if _JOB_TITLE_ROLE_RE.search(line) and len(line) < 120)
     dated = sum(1 for line in lines if re.search(r"(?i)\b(?:19|20)\d{2}\b|present", line))
     return titles >= 4 and dated <= 1 and titles >= max(3, len(lines) // 3)
+
+
+def _user_certification_entries(cur, user_id: int, profile_id) -> list[str]:
+    """Certification name and issuer from the same row, so issuers are not separate skills."""
+    try:
+        cur.execute(
+            """
+            SELECT DISTINCT c.TABLE_NAME AS table_name, u.COLUMN_NAME AS owner_column
+            FROM information_schema.COLUMNS c
+            JOIN information_schema.COLUMNS u
+              ON u.TABLE_SCHEMA = c.TABLE_SCHEMA
+             AND u.TABLE_NAME = c.TABLE_NAME
+             AND u.COLUMN_NAME IN ('user_id', 'profile_id')
+            WHERE c.TABLE_SCHEMA = DATABASE()
+              AND (c.TABLE_NAME LIKE %s OR c.TABLE_NAME LIKE %s)
+            """,
+            ("%certif%", "%license%"),
+        )
+        links = list(cur.fetchall() or [])
+    except Exception:
+        log.exception("certification lookup failed")
+        return []
+    found: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    for link in links:
+        table = str(link.get("table_name") or "")
+        owner = str(link.get("owner_column") or "")
+        if (table, owner) in seen or not _IDENT_RE.fullmatch(table) or not _IDENT_RE.fullmatch(owner):
+            continue
+        seen.add((table, owner))
+        key = {"user_id": user_id, "profile_id": profile_id}.get(owner)
+        if key is None:
+            continue
+        try:
+            cur.execute(
+                """
+                SELECT COLUMN_NAME AS column_name
+                FROM information_schema.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s
+                """,
+                (table,),
+            )
+            columns = {str(row.get("column_name") or "") for row in cur.fetchall() or []}
+        except Exception:
+            continue
+        name_col = _first_named_column(columns, ("name", "title", "certificate", "certification", "credential"))
+        issuer_col = _first_named_column(columns, ("issuer", "issuing_organization", "organization", "authority"))
+        if not name_col:
+            continue
+        selected = [f"{_quote_ident(name_col)} AS name"]
+        if issuer_col and issuer_col != name_col:
+            selected.append(f"{_quote_ident(issuer_col)} AS issuer")
+        try:
+            cur.execute(
+                f"SELECT {', '.join(selected)} FROM {_quote_ident(table)} "
+                f"WHERE {_quote_ident(owner)} = %s LIMIT 20",
+                (key,),
+            )
+            rows = cur.fetchall() or []
+        except Exception:
+            continue
+        for row in rows:
+            name = str(row.get("name") or "").strip()
+            issuer = str(row.get("issuer") or "").strip()
+            if not name:
+                continue
+            if issuer and issuer.lower() not in name.lower():
+                found.append(f"{name} — {issuer}")
+            else:
+                found.append(name)
+    return found
+
+
+def _user_achievements(cur, user_id: int, profile_id) -> list[str]:
+    """Achievement rows when the profile stores them apart from the job description."""
+    try:
+        cur.execute(
+            """
+            SELECT DISTINCT c.TABLE_NAME AS table_name, u.COLUMN_NAME AS owner_column
+            FROM information_schema.COLUMNS c
+            JOIN information_schema.COLUMNS u
+              ON u.TABLE_SCHEMA = c.TABLE_SCHEMA
+             AND u.TABLE_NAME = c.TABLE_NAME
+             AND u.COLUMN_NAME IN ('user_id', 'profile_id')
+            WHERE c.TABLE_SCHEMA = DATABASE()
+              AND (c.TABLE_NAME LIKE %s OR c.TABLE_NAME LIKE %s)
+            """,
+            ("%achiev%", "%accomplishment%"),
+        )
+        links = list(cur.fetchall() or [])
+    except Exception:
+        log.exception("achievement lookup failed")
+        return []
+    found: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    for link in links:
+        table = str(link.get("table_name") or "")
+        owner = str(link.get("owner_column") or "")
+        if (table, owner) in seen or not _IDENT_RE.fullmatch(table) or not _IDENT_RE.fullmatch(owner):
+            continue
+        seen.add((table, owner))
+        key = {"user_id": user_id, "profile_id": profile_id}.get(owner)
+        if key is None:
+            continue
+        try:
+            cur.execute(
+                """
+                SELECT COLUMN_NAME AS column_name
+                FROM information_schema.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s
+                """,
+                (table,),
+            )
+            columns = {str(row.get("column_name") or "") for row in cur.fetchall() or []}
+        except Exception:
+            continue
+        title_col = _first_named_column(columns, ("title", "name", "label", "achievement"))
+        detail_col = _first_named_column(columns, ("description", "details", "detail", "body", "summary"))
+        if not title_col and not detail_col:
+            continue
+        selected = []
+        if title_col:
+            selected.append(f"{_quote_ident(title_col)} AS title")
+        if detail_col and detail_col != title_col:
+            selected.append(f"{_quote_ident(detail_col)} AS detail")
+        try:
+            cur.execute(
+                f"SELECT {', '.join(selected)} FROM {_quote_ident(table)} "
+                f"WHERE {_quote_ident(owner)} = %s LIMIT 20",
+                (key,),
+            )
+            rows = cur.fetchall() or []
+        except Exception:
+            continue
+        for row in rows:
+            title = str(row.get("title") or "").strip()
+            detail = str(row.get("detail") or "").strip()
+            line = " — ".join(part for part in (title, detail) if part)
+            if line:
+                found.append(line[:500])
+    return found
 
 
 def _user_education(cur, user_id: int, profile_id) -> list[dict]:

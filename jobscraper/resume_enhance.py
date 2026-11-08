@@ -94,12 +94,13 @@ def enhance_profile_for_job(profile: dict[str, Any], job: dict[str, Any] | None 
 def compose_resume_document(profile: dict[str, Any]) -> str:
     """Use the uploaded/saved resume as-is. Rebuild from profile only when that text is incomplete."""
     preserved = preserved_resume_text(profile)
-    if _heading_count(preserved) >= 3 or _has_named_sections(preserved):
-        return preserved
+    sections = _original_sections(_profile_blob(profile))
+    if _heading_count(preserved) >= 2 or _has_named_sections(preserved) or len(sections) >= 2:
+        return _polish_document(preserved, profile, sections)
     rebuilt = rebuild_resume_from_profile(profile)
     if _section_richness(rebuilt) > _section_richness(preserved):
-        return rebuilt
-    return preserved or rebuilt
+        return _polish_document(rebuilt, profile, sections)
+    return _polish_document(preserved or rebuilt, profile, sections)
 
 
 def preserved_resume_text(profile: dict[str, Any]) -> str:
@@ -173,7 +174,7 @@ def _needs_resume_cleanup(text: str) -> bool:
     lowered = text.lower()
     if "$" in text and "bonus" in lowered:
         return True
-    if "free plan monthly credits" in lowered or "mid-senior" in lowered:
+    if _PLAN_CREDITS_RE.search(lowered) or "mid-senior" in lowered:
         return True
     if _UUID_RE.search(text):
         return True
@@ -194,6 +195,15 @@ def _light_normalize(text: str) -> str:
     return "\n".join(lines).strip() + ("\n" if lines else "")
 
 
+_PLAN_CREDITS_RE = re.compile(
+    r"(?i)\b(?:free|pro|basic|premium|business)\s+plan\s+monthly\s+credits\b\.?"
+)
+_ISSUER_ONLY_RE = re.compile(
+    r"(?i)^(?:project management institute(?:\s*\(pmi\))?|axelos|iiba|pmi)$"
+)
+_COMPANY_LEAD_RE = re.compile(r"^([A-Z][A-Za-z0-9&]{2,40})\s+is\b")
+
+
 _TAILOR_STOP = {
     "the", "and", "for", "with", "you", "our", "this", "that", "from", "your",
     "role", "job", "team", "work", "using", "have", "will", "are", "was",
@@ -210,16 +220,21 @@ def tailor_document_for_job(document: str, job: dict[str, Any]) -> str:
     if not keywords:
         return document if document.endswith("\n") else document + "\n"
     sections = _split_resume_sections(text)
+    summary_keys = {"PROFESSIONAL SUMMARY", "SUMMARY", "CAREER OBJECTIVE", "OBJECTIVE"}
+    has_summary = any(heading.upper() in summary_keys for heading, _body in sections)
     lines: list[str] = []
     for heading, body in sections:
         key = heading.upper()
-        if key in {"PROFESSIONAL SUMMARY", "SUMMARY", "CAREER OBJECTIVE", "OBJECTIVE"}:
+        if key in summary_keys:
             body = _aim_summary(body, job)
         elif key in {"CORE COMPETENCIES", "SKILLS", "TECHNICAL SKILLS", "CORE SKILLS"}:
             body = _promote_skill_items(body, keywords)
         if heading:
             lines.append(heading)
         lines.extend(body)
+        if not heading and not has_summary:
+            lines.extend(["", "PROFESSIONAL SUMMARY", *_aim_summary([], job)])
+            has_summary = True
     rendered = "\n".join(line for line in lines if line is not None).strip()
     return rendered + "\n"
 
@@ -342,7 +357,7 @@ def _restore_resume(text: str) -> str:
     started = False
     for raw in cleaned.splitlines():
         line = re.sub(r"[ \t]{2,}", " ", raw).strip()
-        line = re.sub(r"(?i)\s*free plan monthly credits\.?", "", line).strip()
+        line = _PLAN_CREDITS_RE.sub("", line).strip(" .")
         if not line or _is_junk_line(line) or _is_job_ad_line(line) or line.lower() in {"benefits", "bonus"}:
             continue
         if not started and _is_posting_title(line):
@@ -395,7 +410,7 @@ def _is_job_ad_line(line: str) -> bool:
         return True
     if "discretionary bonus" in lowered or "mid-senior" in lowered:
         return True
-    if "free plan monthly credits" in lowered:
+    if _PLAN_CREDITS_RE.search(lowered):
         return True
     return False
 
@@ -480,16 +495,252 @@ def _strip_tailor_suffix(text: str) -> str:
     return cleaned.strip() + ("\n" if cleaned.strip() else "")
 
 
+def _profile_blob(profile: dict[str, Any]) -> str:
+    return "\n".join(
+        part
+        for part in (
+            str(profile.get("resume_document") or "").strip(),
+            str(profile.get("resume_text") or "").strip(),
+            str(profile.get("professional_summary") or "").strip(),
+            str(profile.get("headline") or "").strip(),
+            "\n".join(str(item) for item in (profile.get("achievements") or []) if item),
+        )
+        if part
+    )
+
+
+def _original_sections(text: str) -> dict[str, str]:
+    """Section bodies from the saved resume, including achievements and competencies."""
+    cleaned = _separate_headings(text or "")
+    found: dict[str, str] = {}
+    aliases = {
+        "PROFESSIONAL SUMMARY": "summary",
+        "SUMMARY": "summary",
+        "CAREER OBJECTIVE": "summary",
+        "OBJECTIVE": "summary",
+        "KEY ACHIEVEMENTS": "achievements",
+        "ACHIEVEMENTS": "achievements",
+        "CORE COMPETENCIES": "competencies",
+        "COMPETENCIES": "competencies",
+        "TECHNICAL SKILLS": "competencies",
+        "CORE SKILLS": "competencies",
+        "SKILLS": "competencies",
+        "CERTIFICATIONS": "certifications",
+        "EDUCATION": "education",
+    }
+    heading = ""
+    body: list[str] = []
+
+    def save() -> None:
+        key = aliases.get(heading.upper())
+        block = "\n".join(line for line in body if line.strip()).strip()
+        if key and block and key not in found:
+            found[key] = block
+
+    for line in cleaned.splitlines():
+        if _HEADING_LINE_RE.match(line.strip()):
+            save()
+            heading = line.strip()
+            body = []
+            continue
+        body.append(line)
+    save()
+    return found
+
+
+def _usable_person_name(value: str) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip(" .")
+    if not text or _PLAN_CREDITS_RE.search(text):
+        return ""
+    words = text.split()
+    if not (2 <= len(words) <= 4):
+        return ""
+    blocked = {"plan", "credits", "monthly", "free", "pro", "profile", "resume", "cv"}
+    if any(word.lower().strip(".") in blocked for word in words):
+        return ""
+    if not all(re.fullmatch(r"[A-Za-z][A-Za-z.'\-]*", word) for word in words):
+        return ""
+    if not all(word[0].isupper() for word in words):
+        return ""
+    return text
+
+
+def _name_from_text(text: str) -> str:
+    for line in (text or "").splitlines()[:12]:
+        found = _usable_person_name(line)
+        if found:
+            return found
+    return ""
+
+
+def _usable_location(location: str, text: str) -> bool:
+    loc = str(location or "").strip()
+    if not loc or _PLAN_CREDITS_RE.search(loc):
+        return False
+    lowered = loc.lower()
+    if "marketplace" in lowered or lowered.startswith("insurance "):
+        return False
+    for line in (text or "").splitlines():
+        if loc in line and line.strip() != loc and len(line) > len(loc) + 8:
+            return False
+    return True
+
+
+def _usable_headline(value: str) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not text or _PLAN_CREDITS_RE.search(text) or _is_posting_title(text):
+        return ""
+    if "|" in text and len(text) <= 120 and "@" not in text:
+        return text
+    return ""
+
+
+def _job_blurbs(experience: list[dict]) -> str:
+    parts = []
+    for item in experience or []:
+        parts.extend(str(bullet) for bullet in (item.get("bullets") or []))
+        if item.get("company"):
+            parts.append(str(item.get("company")))
+    return "\n".join(parts).lower()
+
+
+def _is_job_blurb(text: str, experience: list[dict]) -> bool:
+    sample = re.sub(r"\s+", " ", text or "").strip().lower()
+    if len(sample) < 40:
+        return False
+    blurbs = _job_blurbs(experience)
+    return len(sample) >= 40 and sample[:80] in blurbs
+
+
+def _pick_summary(parsed: str, stored: str, blob: str, experience: list[dict]) -> str:
+    for candidate in (stored, _original_sections(blob).get("summary", ""), parsed):
+        text = re.sub(r"\s+", " ", str(candidate or "")).strip()
+        if text and not _is_job_blurb(text, experience) and not _PLAN_CREDITS_RE.search(text):
+            return text
+    return ""
+
+
+def _company_from_blurb(text: str) -> str:
+    first = str(text or "").strip().split("\n", 1)[0].strip()
+    match = _COMPANY_LEAD_RE.match(first)
+    return match.group(1) if match else ""
+
+
+def _clean_certifications(items: list[str]) -> list[str]:
+    kept = []
+    for item in items:
+        text = re.sub(r"^[\-•]\s*", "", str(item or "")).strip(" .")
+        if not text or _ISSUER_ONLY_RE.match(text) or _PLAN_CREDITS_RE.search(text):
+            continue
+        kept.append(text)
+    return _unique(kept)
+
+
+def _polish_document(document: str, profile: dict[str, Any], sections: dict[str, str]) -> str:
+    """Put the real name and any original sections back onto a rebuilt resume."""
+    text = _PLAN_CREDITS_RE.sub("", document or "")
+    lines = [re.sub(r"[ \t]{2,}", " ", line).rstrip() for line in text.splitlines()]
+    lines = [line for line in lines if line.strip()]
+    if not lines:
+        return document
+    name = (
+        _name_from_text(_profile_blob(profile))
+        or _usable_person_name(_join_name(profile.get("first_name"), profile.get("last_name")) or "")
+        or _usable_person_name(lines[0])
+    )
+    if name and not _usable_person_name(lines[0]):
+        lines[0] = name
+    headline = _usable_headline(str(profile.get("headline") or ""))
+    if headline and headline.lower() not in "\n".join(lines).lower():
+        lines.insert(1, headline)
+    city = str(profile.get("city") or "").strip()
+    if city:
+        lines = [_replace_fake_location(line, city) for line in lines]
+    rendered = _replace_weak_sections("\n".join(lines), sections, profile)
+    return rendered.strip() + "\n"
+
+
+def _replace_fake_location(line: str, city: str) -> str:
+    if "|" not in line:
+        return line
+    parts = [part.strip() for part in line.split("|")]
+    changed = False
+    for index, part in enumerate(parts):
+        lowered = part.lower()
+        if "marketplace" in lowered or lowered.startswith("insurance ") or _PLAN_CREDITS_RE.search(part):
+            parts[index] = city
+            changed = True
+    if not changed:
+        return line
+    return " | ".join(_unique(parts))
+
+
+def _replace_weak_sections(text: str, sections: dict[str, str], profile: dict[str, Any]) -> str:
+    pieces = _split_resume_sections(text)
+    summary = sections.get("summary") or ""
+    achievements = sections.get("achievements") or ""
+    if not achievements:
+        extra = [str(item).strip() for item in (profile.get("achievements") or []) if str(item).strip()]
+        if extra:
+            achievements = "\n".join(f"- {item}" for item in extra)
+    competencies = sections.get("competencies") or ""
+    certifications = sections.get("certifications") or ""
+    output: list[str] = []
+    saw_summary = False
+    inserted_achievements = "KEY ACHIEVEMENTS" in text.upper()
+    for heading, body in pieces:
+        key = heading.upper()
+        if key in {"PROFESSIONAL SUMMARY", "SUMMARY", "CAREER OBJECTIVE", "OBJECTIVE"}:
+            saw_summary = True
+            current = " ".join(line.strip() for line in body if line.strip())
+            if summary and (not current or _summary_is_weaker(current, summary)):
+                body = [summary]
+        elif key in {"CORE COMPETENCIES", "SKILLS", "TECHNICAL SKILLS", "CORE SKILLS"} and competencies:
+            if len(competencies) > len(" ".join(body)) + 20:
+                body = competencies.splitlines()
+        elif key in {"CERTIFICATIONS"} and certifications:
+            if certifications.count("\n") > len([line for line in body if line.strip()]):
+                body = certifications.splitlines()
+            else:
+                body = [line for line in body if not _ISSUER_ONLY_RE.match(re.sub(r"^[\-•]\s*", "", line).strip(" ."))]
+        if heading:
+            output.append(heading)
+        output.extend(body)
+        if saw_summary and achievements and not inserted_achievements:
+            output.extend(["", "KEY ACHIEVEMENTS", *achievements.splitlines()])
+            inserted_achievements = True
+    if achievements and not inserted_achievements:
+        output.extend(["", "KEY ACHIEVEMENTS", *achievements.splitlines()])
+    if competencies and "CORE COMPETENCIES" not in text.upper() and "\nSKILLS\n" not in f"\n{text.upper()}\n":
+        output.extend(["", "CORE COMPETENCIES", *competencies.splitlines()])
+    return "\n".join(output)
+
+
+def _summary_is_weaker(current: str, original: str) -> bool:
+    current_l = current.lower()
+    original_l = original.lower()
+    if original_l[:40] in current_l:
+        return False
+    if "is the leading" in current_l or "is a " in current_l[:80]:
+        return True
+    return "years of experience" in original_l and "years of experience" not in current_l
+
+
 def resume_from_profile(profile: dict[str, Any]) -> dict[str, Any]:
     """Shape a stored user profile into the resume JSON the tailor expects."""
     source_text = str(profile.get("resume_document") or profile.get("resume_text") or "").strip()
     parsed = _parsed_resume_text(source_text)
     parsed_profile = (parsed or {}).get("profile") or {}
-    parsed_name = parsed_profile.get("full_name")
-    if parsed_name and (_is_posting_title(parsed_name) or _is_job_ad_line(parsed_name)):
-        parsed_name = None
-    name = parsed_name or _join_name(profile.get("first_name"), profile.get("last_name"))
-    location = parsed_profile.get("location") or _join_place(profile.get("city"), profile.get("state"), profile.get("country"))
+    parsed_name = _usable_person_name(str(parsed_profile.get("full_name") or ""))
+    name = (
+        _name_from_text(source_text)
+        or parsed_name
+        or _usable_person_name(_join_name(profile.get("first_name"), profile.get("last_name")) or "")
+    )
+    location = _join_place(profile.get("city"), profile.get("state"), profile.get("country"))
+    parsed_location = str(parsed_profile.get("location") or "")
+    if parsed_location and _usable_location(parsed_location, source_text):
+        location = parsed_location
     history = _experience_from_history(profile.get("work_history") or [])
     history = [item for item in history if _looks_like_real_job(item)]
     parsed_jobs = list((parsed or {}).get("experience") or [])
@@ -497,15 +748,12 @@ def resume_from_profile(profile: dict[str, Any]) -> dict[str, Any]:
     schools = _education_from_profile(profile.get("education") or [])
     if not schools and parsed:
         schools = list(parsed.get("education") or [])
-    summary = (
-        parsed_profile.get("summary")
-        or _or_none(profile.get("professional_summary"))
-        or None
-    )
-    if not summary:
-        text = str(profile.get("professional_summary") or profile.get("resume_text") or "").strip()
-        if text and (parsed is None or not parsed_profile.get("summary")):
-            summary = text[:600]
+    summary = _pick_summary(
+        str(parsed_profile.get("summary") or ""),
+        str(profile.get("professional_summary") or ""),
+        source_text,
+        experience,
+    ) or None
     return {
         "profile": {
             "full_name": name,
@@ -522,7 +770,9 @@ def resume_from_profile(profile: dict[str, Any]) -> dict[str, Any]:
         "experience": experience,
         "education": schools,
         "projects": list((parsed or {}).get("projects") or []),
-        "certifications": _unique([*((parsed or {}).get("certifications") or []), *_real_skills(profile.get("certifications") or [])]),
+        "certifications": _clean_certifications(
+            [*((parsed or {}).get("certifications") or []), *_real_skills(profile.get("certifications") or [])]
+        ),
         "languages": list((parsed or {}).get("languages") or []),
     }
 
@@ -552,10 +802,12 @@ def _experience_from_history(rows: list[dict]) -> list[dict]:
             continue
         title = str(row.get("job_title") or row.get("title") or "").strip()
         company = str(row.get("company") or "").strip()
-        if not title and not company:
-            continue
         end = str(row.get("end_date") or "").strip()
         description = str(row.get("description") or row.get("responsibilities") or "").strip()
+        if not company:
+            company = _company_from_blurb(description)
+        if not title and not company:
+            continue
         bullets = [line.lstrip("-• ").strip() for line in description.splitlines() if line.strip()]
         found.append(
             {
@@ -565,7 +817,7 @@ def _experience_from_history(rows: list[dict]) -> list[dict]:
                 "start_date": str(row.get("start_date") or "").strip() or None,
                 "end_date": end or None,
                 "is_current": end.lower() in {"", "present", "current"},
-                "bullets": bullets[:12],
+                "bullets": bullets[:30],
             }
         )
     return found
