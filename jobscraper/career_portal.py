@@ -129,6 +129,91 @@ _RESULT_LINK = re.compile(
 )
 
 
+_AGGREGATOR_HOSTS = (
+    "linkedin.com",
+    "indeed.com",
+    "glassdoor.com",
+    "dice.com",
+    "builtin.com",
+    "gulfhire.com",
+    "emploive.com",
+    "growthroles.com",
+    "bayt.com",
+    "naukrigulf.com",
+    "naukri.com",
+    "ziprecruiter.com",
+    "simplyhired.com",
+    "jooble.org",
+    "talent.com",
+    "bebee.com",
+)
+
+
+def find_company_career_url(company: str, title: str, location: str = "") -> str | None:
+    """Employer posting for this title.
+
+    '' means the search ran and no company career page matched.
+    None means the search itself failed, so the caller should try again later.
+    """
+    title = re.sub(r"\s+", " ", (title or "").strip())
+    company = re.sub(r"\s+", " ", (company or "").strip())
+    if len(title) < 3 or len(company) < 2:
+        return ""
+    city = (location or "").split(",")[0].strip()
+    if city.casefold() in {"saudi arabia", "ksa", "kingdom of saudi arabia", "remote"}:
+        city = ""
+    query = f'"{title}" "{company}"'
+    if city:
+        query = f"{query} {city}"
+    links = _duckduckgo(query)
+    if not links:
+        links = _bing(query)
+    if not links:
+        return None
+    for url in links:
+        cleaned = _clean_url(url)
+        if not cleaned or not _employer_posting_url(cleaned, company, title):
+            continue
+        return cleaned[:1000]
+    return ""
+
+
+def _employer_posting_url(url: str, company: str, title: str) -> bool:
+    if _skipped(url) or _aggregator_host(url):
+        return False
+    if not _is_job_url(url) and "myworkdayjobs.com" not in _host(url):
+        return False
+    if not _company_in_career_url(company, url):
+        return False
+    return _title_in_career_url(title, url)
+
+
+def _aggregator_host(url: str) -> bool:
+    host = _host(url)
+    return any(host == name or host.endswith("." + name) for name in _AGGREGATOR_HOSTS)
+
+
+def _company_in_career_url(company: str, url: str) -> bool:
+    host = _host(url)
+    path = unquote(urlparse(url).path).casefold()
+    for token in _tokens(company):
+        if len(token) < 4:
+            continue
+        if token in host or token in path:
+            return True
+    return False
+
+
+def _title_in_career_url(title: str, url: str) -> bool:
+    path = unquote(urlparse(url).path).casefold().replace("-", " ").replace("_", " ")
+    tokens = [part for part in re.findall(r"[a-z0-9]+", title.casefold()) if len(part) > 3]
+    if not tokens:
+        return False
+    hits = sum(1 for token in tokens if token in path)
+    need = len(tokens) if len(tokens) <= 3 else max(2, (len(tokens) + 1) // 2)
+    return hits >= need
+
+
 def lookup_company_jobs(
     company: str,
     *,

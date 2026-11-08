@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   source_id VARCHAR(255) NULL,
   state VARCHAR(255) NOT NULL,
   url VARCHAR(1000) NOT NULL,
+  company_career_url VARCHAR(1000) NOT NULL DEFAULT '',
   raw_description LONGTEXT NOT NULL,
   job_type VARCHAR(32) NOT NULL DEFAULT 'fulltime',
   work_model VARCHAR(16) NOT NULL DEFAULT 'unknown',

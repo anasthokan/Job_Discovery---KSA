@@ -781,6 +781,12 @@ def _with_time_ago(jobs: list[dict]) -> list[dict]:
     attach_descriptions(presented)
     if len(presented) <= 200:
         attach_raw_descriptions(presented)
+    from jobscraper.agent_reach import company_career_url_for_job
+
+    for row in presented:
+        # Column value, else the offsite apply link saved on the scrape, else the
+        # listing URL when that listing is already the employer career page.
+        row["company_career_url"] = company_career_url_for_job(row) or None
     return presented
 
 

@@ -587,6 +587,149 @@ def linkedin_description_from_html(page: str) -> str:
     return _html_to_text(_inner_html(page, match.start()))
 
 
+# Hosts that are job boards. Their listing URL is not the employer career page.
+_BOARD_HOSTS = (
+    "linkedin.com",
+    "indeed.com",
+    "bayt.com",
+    "glassdoor.com",
+    "dice.com",
+    "google.com",
+    "news.ycombinator.com",
+    "ycombinator.com",
+    "devglobaljobs.com",
+    "example.com",
+)
+_APPLY_URL_CODE_RE = re.compile(
+    r"<code[^>]*\bid=[\"']applyUrl[\"'][^>]*>(.*?)</code>",
+    re.I | re.S,
+)
+_OFFSITE_HREF_RE = re.compile(
+    r'href="([^"]*(?:externalApply|apply-link-offsite)[^"]*)"',
+    re.I,
+)
+_ENCODED_HTTP_RE = re.compile(r"https%3A%2F%2F[^\"'\s<&]+", re.I)
+_DIRECT_HTTP_RE = re.compile(r"https?://[^\s\"'<>]+", re.I)
+
+
+def is_job_board_url(url: str) -> bool:
+    """True when this link is a board listing, not the employer's career page."""
+    host = urlparse(str(url or "").strip()).netloc.lower().split(":")[0]
+    if host.startswith("www."):
+        host = host[4:]
+    if not host:
+        return False
+    return any(host == name or host.endswith("." + name) for name in _BOARD_HOSTS)
+
+
+def employer_career_url(value: object) -> str:
+    """Employer posting link, or '' when the value is empty or still a job board."""
+    target = html.unescape(str(value or "")).strip()
+    if not target.startswith("http"):
+        return ""
+    target = target.split("#")[0].strip().rstrip(".,);")
+    if is_job_board_url(target):
+        return ""
+    return target[:1000]
+
+
+def company_career_url_for_job(job: dict) -> str:
+    """Employer apply link for one job. Board listing URLs are not used."""
+    raw = job.get("raw")
+    if not isinstance(raw, dict):
+        raw = job.get("raw_description")
+    if not isinstance(raw, dict):
+        raw = {}
+    for value in (
+        job.get("company_career_url"),
+        raw.get("job_url_direct"),
+        raw.get("apply_url"),
+        raw.get("applyUrl"),
+        raw.get("careers_apply_url"),
+        job.get("url"),
+    ):
+        found = employer_career_url(value)
+        if found:
+            return found
+    return ""
+
+
+def _unquote_http(value: str) -> str:
+    text = html.unescape(str(value or "")).strip()
+    for _ in range(2):
+        decoded = unquote(text)
+        if decoded == text:
+            break
+        text = decoded
+    return text.strip().rstrip("\\")
+
+
+def _employer_apply_target(blob: str) -> str:
+    """Pull the company URL out of a LinkedIn offsite apply link."""
+    text = html.unescape(str(blob or ""))
+    found = re.search(r"[?&]url=([^\"'\s<&]+)", text, re.I)
+    if found:
+        target = _unquote_http(found.group(1))
+    else:
+        direct = _DIRECT_HTTP_RE.search(text)
+        target = direct.group(0) if direct else ""
+    target = re.split(r"&(urlHash|trk|trackingId|lipi)=", target, maxsplit=1, flags=re.I)[0]
+    return employer_career_url(target.rstrip("&?"))
+
+
+def _linkedin_posting_page(page: str) -> bool:
+    text = page or ""
+    return any(
+        marker in text
+        for marker in (
+            "show-more-less-html__markup",
+            "topcard__",
+            'id="applyUrl"',
+            "public_jobs_apply",
+            "apply-link-offsite",
+        )
+    )
+
+
+def linkedin_career_url_from_html(page: str) -> str | None:
+    """Employer apply URL on a LinkedIn posting page.
+
+    '' means the page loaded and this job has no offsite apply (Easy Apply).
+    None means the HTML is not a posting page, so the caller should try again.
+    """
+    text = page or ""
+    if not _linkedin_posting_page(text):
+        return None
+    chunks: list[str] = []
+    code = _APPLY_URL_CODE_RE.search(text)
+    if code:
+        chunks.append(code.group(1))
+    chunks.extend(_OFFSITE_HREF_RE.findall(text))
+    for chunk in chunks:
+        found = _employer_apply_target(chunk)
+        if found:
+            return found
+    for match in _ENCODED_HTTP_RE.finditer(text):
+        start = max(0, match.start() - 240)
+        window = text[start : match.end()]
+        if "apply" not in window.lower() and "url=" not in window.lower():
+            continue
+        found = _employer_apply_target("?url=" + match.group(0))
+        if found:
+            return found
+    return ""
+
+
+def _linkedin_offsite_page(page: str) -> bool:
+    text = (page or "").lower()
+    return (
+        "apply-link-offsite" in text
+        or "offsite-apply" in text
+        or "externalapply" in text
+        or 'id="applyurl"' in text
+    )
+
+
 def indeed_description_from_html(page: str) -> str:
     match = re.search(
         r'<div[^>]*id="jobDescriptionText"[^>]*>',
@@ -742,9 +885,21 @@ def fetch_posting_details(platform: str, url: str) -> dict:
     if name == "Dice":
         return {"description": dice_description_from_html(page), "platform_posted_at": ""}
     if name == "LinkedIn":
+        parsed = linkedin_career_url_from_html(page)
+        if parsed:
+            career, known = parsed, True
+        elif parsed is None:
+            career, known = "", False
+        elif _linkedin_offsite_page(page):
+            # The Apply button is offsite, but LinkedIn no longer prints that URL for guests.
+            career, known = "", False
+        else:
+            career, known = "", True
         return {
             "description": linkedin_description_from_html(page),
             "platform_posted_at": linkedin_posted_label(page),
+            "company_career_url": career,
+            "career_url_known": known,
         }
     if name == "Bayt":
         return {"description": bayt_description_from_html(page), "platform_posted_at": ""}

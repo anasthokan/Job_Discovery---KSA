@@ -269,6 +269,9 @@ def _fill_short_descriptions(jobs: list[dict]) -> list[dict]:
         time.sleep(0.8)
         full = str(details.get("description") or "")
         platform_posted = str(details.get("platform_posted_at") or "").strip()
+        career = str(details.get("company_career_url") or "").strip()
+        if career:
+            job["company_career_url"] = career
         if platform_posted and needs_posted and not is_date_only_stamp(platform_posted):
             job["platform_posted_at"] = platform_posted
             job["posted_at"] = platform_posted

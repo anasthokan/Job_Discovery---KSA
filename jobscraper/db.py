@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS {JOBS_TABLE} (
   source_id VARCHAR(255) NULL,
   state VARCHAR(255) NOT NULL,
   url VARCHAR(1000) NOT NULL,
+  company_career_url VARCHAR(1000) NOT NULL DEFAULT '',
   raw_description LONGTEXT NOT NULL,
   job_type VARCHAR(32) NOT NULL DEFAULT 'fulltime',
   work_model VARCHAR(16) NOT NULL DEFAULT 'unknown',
@@ -131,6 +132,7 @@ _UPSERT_COLUMNS = {
     "platform",
     "days_ago",
     "url",
+    "company_career_url",
     "description",
     "raw_description",
     "posted_at",
@@ -332,12 +334,12 @@ INSERT INTO {JOBS_TABLE} (
   public_id, source_id, title, company, company_ref_id, skills, state, location,
   platform, days_ago, url, description, raw_description, posted_at, platform_posted_at, is_active,
   job_type, work_model, experience_level, years_experience, visa_sponsorship, clearance_required,
-  saudi_national_required, compensation, compensation_checked, listing_inferred, first_seen_at, last_seen_at, created_at, updated_at
+  saudi_national_required, compensation, company_career_url, compensation_checked, listing_inferred, first_seen_at, last_seen_at, created_at, updated_at
 ) VALUES (
   %s, %s, %s, %s, %s, %s, %s, %s,
   %s, %s, %s, %s, %s, %s, %s, 1,
   %s, %s, %s, %s, %s, %s,
-  %s, %s, 1, 1, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), UTC_TIMESTAMP(6)
+  %s, %s, %s, 1, 1, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), UTC_TIMESTAMP(6)
 ) AS new
 ON DUPLICATE KEY UPDATE
   title = new.title,
@@ -407,6 +409,11 @@ ON DUPLICATE KEY UPDATE
       'salary not disclosed',
       {JOBS_TABLE}.compensation
     )
+  ),
+  company_career_url = IF(
+    TRIM(new.company_career_url) = '',
+    {JOBS_TABLE}.company_career_url,
+    new.company_career_url
   ),
   compensation_checked = 1,
   listing_inferred = 1,
@@ -594,6 +601,13 @@ def _ensure_job_columns(cur) -> None:
             f"ALTER TABLE {JOBS_TABLE} "
             "ADD COLUMN saudi_national_required VARCHAR(16) NOT NULL DEFAULT 'no'"
         )
+    cur.execute(f"SHOW COLUMNS FROM {JOBS_TABLE} LIKE 'company_career_url'")
+    if not cur.fetchone():
+        cur.execute(
+            f"ALTER TABLE {JOBS_TABLE} "
+            "ADD COLUMN company_career_url VARCHAR(1000) NOT NULL DEFAULT ''"
+        )
+        _backfill_company_career_urls(cur)
     _default_omitted_columns(cur)
 
 
@@ -1067,6 +1081,67 @@ def _mark_description_unavailable(cur, row_id: int) -> None:
     )
 
 
+def _backfill_company_career_urls(cur) -> None:
+    """Copy employer posting links that are already stored onto the new column."""
+    board = (
+        "%linkedin.com%",
+        "%indeed.com%",
+        "%bayt.com%",
+        "%glassdoor.%",
+        "%dice.com%",
+        "%google.com%",
+        "%ycombinator.com%",
+        "%devglobaljobs.com%",
+        "%example.com%",
+    )
+    not_board = " AND ".join(["url NOT LIKE %s"] * len(board))
+    cur.execute(
+        f"UPDATE {JOBS_TABLE} SET company_career_url = LEFT(url, 1000) "
+        f"WHERE (company_career_url IS NULL OR company_career_url = '') "
+        f"AND url LIKE 'http%%' AND {not_board}",
+        board,
+    )
+    direct_not_board = " AND ".join(
+        ["JSON_UNQUOTE(JSON_EXTRACT(raw_description, '$.job_url_direct')) NOT LIKE %s"] * len(board)
+    )
+    cur.execute(
+        f"UPDATE {JOBS_TABLE} SET company_career_url = "
+        f"LEFT(JSON_UNQUOTE(JSON_EXTRACT(raw_description, '$.job_url_direct')), 1000) "
+        f"WHERE (company_career_url IS NULL OR company_career_url = '') "
+        f"AND JSON_VALID(raw_description) "
+        f"AND JSON_UNQUOTE(JSON_EXTRACT(raw_description, '$.job_url_direct')) LIKE 'http%%' "
+        f"AND {direct_not_board}",
+        board,
+    )
+
+
+def _store_company_career_url(cur, row_id: int, url: str) -> None:
+    """Save an employer apply link. A later scrape must not wipe one we already have."""
+    from jobscraper.agent_reach import employer_career_url
+
+    career = employer_career_url(url)
+    if not career:
+        return
+    cur.execute(
+        f"UPDATE {JOBS_TABLE} SET company_career_url = %s "
+        f"WHERE id = %s AND (company_career_url IS NULL OR TRIM(company_career_url) = '')",
+        (career, row_id),
+    )
+
+
+def _mark_career_url_checked(cur, row_id: int) -> None:
+    """Remember a LinkedIn page that has no employer apply link (Easy Apply)."""
+    marker = '{"career_url_checked":true}'
+    cur.execute(
+        f"UPDATE {JOBS_TABLE} SET raw_description = IF("
+        f"JSON_VALID(raw_description) AND CHAR_LENGTH(raw_description) > 2 "
+        f"AND CAST(raw_description AS CHAR) NOT LIKE %s, "
+        f"JSON_MERGE_PATCH(raw_description, %s), %s) "
+        f"WHERE id = %s",
+        ('%"api_id"%', marker, marker, row_id),
+    )
+
+
 def _mark_posting_missing(cur, row_id: int) -> None:
     """Remember a removed posting so the refill does not request it every pass."""
     marker = '{"posting_missing":true}'
@@ -1078,6 +1153,59 @@ def _mark_posting_missing(cur, row_id: int) -> None:
         f"WHERE id = %s",
         ('%"api_id"%', marker, marker, row_id),
     )
+
+
+def _fill_missing_career_urls(conn) -> None:
+    """Match board listings to the employer career posting.
+
+    LinkedIn's public page no longer includes the offsite Apply URL. A short
+    batch searches the company career page by title so description refill is
+    not blocked.
+    """
+    from jobscraper.career_portal import find_company_career_url
+
+    if conn is None:
+        return
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT id, title, company, location FROM {JOBS_TABLE} "
+                f"WHERE platform IN ('LinkedIn', 'Indeed') "
+                f"AND (company_career_url IS NULL OR company_career_url = '') "
+                f"AND CHAR_LENGTH(description) >= 400 "
+                f"AND CAST(raw_description AS CHAR) NOT LIKE %s "
+                f"AND CAST(raw_description AS CHAR) NOT LIKE %s "
+                f"ORDER BY id DESC LIMIT 8",
+                ("%career_url_checked%", "%posting_missing%"),
+            )
+            rows = list(cur.fetchall() or [])
+    except Exception:
+        log.exception("Could not list jobs missing a company career URL")
+        return
+    if not rows:
+        return
+    saved = 0
+    for row in rows:
+        try:
+            career = find_company_career_url(
+                str(row.get("company") or ""),
+                str(row.get("title") or ""),
+                str(row.get("location") or ""),
+            )
+        except Exception:
+            log.exception("Company career search failed for %s", row.get("company"))
+            continue
+        try:
+            with conn.cursor() as cur:
+                if career:
+                    _store_company_career_url(cur, int(row["id"]), career)
+                    saved += 1
+                elif career == "":
+                    _mark_career_url_checked(cur, int(row["id"]))
+        except Exception:
+            log.exception("Could not save company career URL for job %s", row.get("id"))
+    if saved:
+        log.info("Saved %s company career URLs", saved)
 
 
 def _fill_short_dice_descriptions() -> tuple[int, int]:
@@ -1119,6 +1247,10 @@ def _fill_short_dice_descriptions() -> tuple[int, int]:
         close_conn()
         log.exception("Could not list short job descriptions")
         return 0, 0
+    try:
+        _fill_missing_career_urls(conn)
+    except Exception:
+        log.exception("Company career URL fill failed")
     if not rows:
         return 0, 0
     log.info("Filling %s short descriptions from posting pages", len(rows))
@@ -1161,6 +1293,16 @@ def _fill_short_dice_descriptions() -> tuple[int, int]:
                 break
         if gone:
             continue
+        career = str(details.get("company_career_url") or "").strip()
+        if career or (platform == "LinkedIn" and details.get("career_url_known")):
+            try:
+                with conn.cursor() as cur:
+                    if career:
+                        _store_company_career_url(cur, int(row["id"]), career)
+                    else:
+                        _mark_career_url_checked(cur, int(row["id"]))
+            except Exception:
+                log.exception("Could not save company career URL for %s", url)
         if platform in {"Headcount Labs", "Greenhouse", "Lever", "SmartRecruiters", "Workday"} and details.get("supported") is False:
             try:
                 with conn.cursor() as cur:
@@ -1299,6 +1441,7 @@ _API_JOB_KEYS = {
     "platform",
     "daysAgo",
     "url",
+    "company_career_url",
     "description",
     "job_type",
     "work_model",
@@ -1406,6 +1549,9 @@ def _row_from_item(job: dict) -> dict | None:
     url = _clip(job.get("url"), 1000)
     if _is_placeholder_url(url) or _is_placeholder_source(source_id):
         return None
+    from jobscraper.agent_reach import company_career_url_for_job
+
+    career_url = _clip(company_career_url_for_job(job), 1000)
     description = str(job.get("description") or job.get("search_text") or "").strip()
     # LinkedIn cards often repeat the title and nothing else. Saving that
     # makes About the Role look filled when the posting was never loaded.
@@ -1428,6 +1574,7 @@ def _row_from_item(job: dict) -> dict | None:
         "platform": _clip(job.get("platform"), 120, "Unknown"),
         "days_ago": max(days_ago, 0),
         "url": url,
+        "company_career_url": career_url,
         "description": description,
         "raw_description": _raw_description_json(job),
         "posted_at": _posted_mysql(
@@ -1566,6 +1713,7 @@ def upsert_jobs(jobs: list[dict], *, notify: bool = True) -> int:
                         row["clearance_required"],
                         row["saudi_national_required"],
                         row["compensation"],
+                        row["company_career_url"],
                     )
                     for row in rows
                 ]
@@ -1647,6 +1795,7 @@ def _job_payload(row: dict, *, include_raw: bool) -> dict:
         "platform": row.get("platform") or "",
         "daysAgo": days,
         "url": row.get("url") or "",
+        "company_career_url": str(row.get("company_career_url") or "").strip() or None,
         "description": row.get("description") or "",
         "job_type": row.get("job_type") or "fulltime",
         "work_model": row.get("work_model") or "unknown",
@@ -1792,7 +1941,7 @@ def load_jobs(description_chars: int = 800) -> list[dict]:
                 f"SELECT id AS api_id, "
                 f"COALESCE(NULLIF(source_id, ''), public_id, CAST(id AS CHAR)) AS id, "
                 f"title, company, skills, state, location, platform, "
-                f"days_ago, url, LEFT(description, %s) AS description, "
+                f"days_ago, url, company_career_url, LEFT(description, %s) AS description, "
                 f"job_type, work_model, experience_level, "
                 f"years_experience, visa_sponsorship, clearance_required, saudi_national_required, "
                 f"compensation, posted_at, platform_posted_at, first_seen_at, created_at "
@@ -1829,7 +1978,7 @@ def load_job(job_ref: str) -> dict | None:
         "SELECT id AS api_id, "
         "COALESCE(NULLIF(source_id, ''), public_id, CAST(id AS CHAR)) AS id, "
         "title, company, skills, state, location, platform, "
-        "days_ago, url, description, "
+        "days_ago, url, company_career_url, description, "
         "job_type, work_model, experience_level, "
         "years_experience, visa_sponsorship, clearance_required, saudi_national_required, "
         "compensation, posted_at, platform_posted_at, first_seen_at, created_at "
