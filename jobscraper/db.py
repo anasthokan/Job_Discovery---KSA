@@ -1973,13 +1973,13 @@ def load_app_user(candidate_id: str) -> dict | None:
         raise
     professional_summary = str(profile_row.get("professional_summary") or "").strip()
     headline = str(profile_row.get("headline") or "").strip()
-    # Prefer the uploaded resume file. Do not merge saved job titles into the resume body.
+    # Keep the uploaded file when it is a real resume. Otherwise keep every text
+    # source so a full CV mixed with saved job titles can still be cleaned later.
     if _resume_section_count(file_text) >= 2:
         resume_body = file_text
     else:
-        extras = "" if _looks_like_job_title_dump(extra_text) else extra_text
         resume_body = "\n".join(
-            part for part in (headline, professional_summary, file_text, extras) if part
+            part for part in (file_text, headline, professional_summary, extra_text) if part
         )
     return {
         "first_name": user.get("first_name") or "",
@@ -2315,8 +2315,14 @@ _TEXT_COLUMNS = (
     "title",
     "resume_text",
     "extracted_text",
+    "raw_text",
+    "parsed_text",
+    "cv_text",
+    "plain_text",
     "content",
     "body",
+    "about",
+    "bio",
     "degree",
     "field_of_study",
 )
@@ -2355,6 +2361,10 @@ _RESUME_PATH_COLUMNS = (
     "resume_path",
     "resume_file",
     "resume_url",
+    "cv",
+    "cv_file",
+    "cv_path",
+    "cv_url",
     "document",
     "document_path",
     "upload",
@@ -2362,6 +2372,9 @@ _RESUME_PATH_COLUMNS = (
     "storage_path",
     "disk_path",
     "original_path",
+    "file_name",
+    "filename",
+    "original_name",
     "url",
 )
 _RESUME_SECTION_MARKERS = (
@@ -2585,8 +2598,13 @@ def _resume_values_from_media(cur, user_id: int, profile_id) -> list[dict]:
             SELECT TABLE_NAME AS table_name
             FROM information_schema.TABLES
             WHERE TABLE_SCHEMA = DATABASE()
-              AND TABLE_NAME IN ('media', 'files', 'uploads', 'documents', 'attachments', 'user_files', 'profile_files')
-            """
+              AND (
+                TABLE_NAME IN ('media', 'files', 'uploads', 'documents', 'attachments', 'user_files', 'profile_files', 'resumes', 'user_resumes')
+                OR TABLE_NAME LIKE %s
+                OR TABLE_NAME LIKE %s
+              )
+            """,
+            ("%resume%", "%cv%"),
         )
         tables = [str(row.get("table_name") or "") for row in cur.fetchall() or []]
     except Exception:

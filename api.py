@@ -2269,14 +2269,14 @@ def _enhanced_filename(profile: dict, job: dict, extension: str, cv_text: str = 
 
 @app.post(
     "/api/resume/enhance",
-    summary="Download the user's saved resume/profile as-is for a job",
+    summary="Download the user's resume, kept intact and aimed at one job",
     response_class=Response,
 )
 def enhance_user_resume(
     body: ResumeEnhanceRequest,
     file_format: str = Query("pdf", alias="format", description="Download format: pdf or docx"),
 ):
-    """Returns the profile resume as stored. Job id is only for naming/match metadata."""
+    """Keeps every section of the saved resume and aims that same content at the job."""
     fmt = (file_format or "pdf").strip().lower()
     if fmt not in {"pdf", "docx"}:
         raise HTTPException(status_code=400, detail="format must be pdf or docx.")
@@ -2290,27 +2290,6 @@ def enhance_user_resume(
         if len(str(stored.get("text") or "")) >= len(existing):
             profile = {**profile, "resume_document": stored.get("text")}
     job = _job_for_enhance(body.job_id)
-    # Prefer the original uploaded PDF/DOCX bytes so the download matches the profile resume as-is.
-    if stored and stored.get("content"):
-        filename = str(stored.get("filename") or "resume.pdf")
-        media = str(stored.get("media_type") or "")
-        content = stored["content"]
-        if fmt == "pdf" and filename.lower().endswith(".pdf") and content.startswith(b"%PDF"):
-            return _file_download(content, _enhanced_filename(profile, job, "pdf", stored.get("text") or ""), PDF_TYPE)
-        if fmt == "docx" and filename.lower().endswith(".docx") and content[:2] == b"PK":
-            return _file_download(content, _enhanced_filename(profile, job, "docx", stored.get("text") or ""), DOCX_TYPE)
-        if fmt == "pdf" and filename.lower().endswith(".docx"):
-            try:
-                converted = docx_to_pdf(content, filename)
-            except ConvertError as exc:
-                raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-            return _file_download(converted, _enhanced_filename(profile, job, "pdf", stored.get("text") or ""), PDF_TYPE)
-        if fmt == "docx" and filename.lower().endswith(".pdf"):
-            try:
-                converted = pdf_to_docx(content, filename)
-            except ConvertError as exc:
-                raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-            return _file_download(converted, _enhanced_filename(profile, job, "docx", stored.get("text") or ""), DOCX_TYPE)
     try:
         built = enhance_profile_for_job(profile, job)
         cv_text = built.get("cv_text") or ""

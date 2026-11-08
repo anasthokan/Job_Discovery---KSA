@@ -50,8 +50,8 @@ _ROLE_RE = re.compile(
 
 
 def enhance_profile_for_job(profile: dict[str, Any], job: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Download the user's own resume/profile as-is. Do not rewrite it for the job."""
-    document = compose_resume_document(profile)
+    """Keep every original resume section, then aim that same content at the job."""
+    document = tailor_document_for_job(compose_resume_document(profile), job or {})
     if len(document.strip()) < 40:
         raise JobToCvError("This user has no resume or profile content to download.")
     resume = resume_from_profile({**profile, "resume_text": document, "resume_document": document})
@@ -192,6 +192,123 @@ def _light_normalize(text: str) -> str:
     lines = [re.sub(r"[ \t]{2,}", " ", line).rstrip() for line in cleaned.splitlines()]
     lines = [line for line in lines if line.strip()]
     return "\n".join(lines).strip() + ("\n" if lines else "")
+
+
+_TAILOR_STOP = {
+    "the", "and", "for", "with", "you", "our", "this", "that", "from", "your",
+    "role", "job", "team", "work", "using", "have", "will", "are", "was",
+    "senior", "junior", "level", "years", "year", "experience",
+}
+
+
+def tailor_document_for_job(document: str, job: dict[str, Any]) -> str:
+    """Aim the existing resume at the job without adding skills or dropping sections."""
+    text = (document or "").strip()
+    if len(text) < 40 or not job:
+        return document
+    keywords = _job_keywords(job)
+    if not keywords:
+        return document if document.endswith("\n") else document + "\n"
+    sections = _split_resume_sections(text)
+    lines: list[str] = []
+    for heading, body in sections:
+        key = heading.upper()
+        if key in {"PROFESSIONAL SUMMARY", "SUMMARY", "CAREER OBJECTIVE", "OBJECTIVE"}:
+            body = _aim_summary(body, job)
+        elif key in {"CORE COMPETENCIES", "SKILLS", "TECHNICAL SKILLS", "CORE SKILLS"}:
+            body = _promote_skill_items(body, keywords)
+        if heading:
+            lines.append(heading)
+        lines.extend(body)
+    rendered = "\n".join(line for line in lines if line is not None).strip()
+    return rendered + "\n"
+
+
+def _split_resume_sections(text: str) -> list[tuple[str, list[str]]]:
+    sections: list[tuple[str, list[str]]] = []
+    heading = ""
+    body: list[str] = []
+    for line in text.splitlines():
+        if _HEADING_LINE_RE.match(line.strip()):
+            sections.append((heading, body))
+            heading = line.strip()
+            body = []
+            continue
+        body.append(line)
+    sections.append((heading, body))
+    return sections
+
+
+def _job_keywords(job: dict[str, Any]) -> list[str]:
+    found: list[str] = []
+    seen: set[str] = set()
+    for skill in job.get("skills") or []:
+        text = str(skill or "").strip()
+        key = text.lower()
+        if len(text) >= 2 and key not in seen and key not in _TAILOR_STOP:
+            seen.add(key)
+            found.append(text)
+    blob = f"{job.get('title') or ''} {job.get('description') or ''}"
+    for word in re.findall(r"[A-Za-z][A-Za-z0-9+#.]{2,}", blob):
+        key = word.lower()
+        if key in seen or key in _TAILOR_STOP:
+            continue
+        seen.add(key)
+        found.append(word)
+    return found[:40]
+
+
+def _resume_overlap(body: str, job: dict[str, Any]) -> str:
+    """Job skills that are already written in the resume. Never invent the rest."""
+    lowered = (body or "").lower()
+    hits: list[str] = []
+    seen: set[str] = set()
+    for skill in job.get("skills") or []:
+        text = str(skill or "").strip()
+        key = text.lower()
+        if len(text) < 2 or key in seen or key in _TAILOR_STOP or key not in lowered:
+            continue
+        seen.add(key)
+        hits.append(text)
+        if len(hits) == 3:
+            break
+    if not hits:
+        return ""
+    if len(hits) == 1:
+        return hits[0]
+    return ", ".join(hits[:-1]) + " and " + hits[-1]
+
+
+def _aim_summary(lines: list[str], job: dict[str, Any]) -> list[str]:
+    body = " ".join(line.strip() for line in lines if line.strip())
+    title = str(job.get("title") or "").strip()
+    company = str(job.get("company") or "").strip()
+    if not title or title.lower() in body.lower():
+        return lines
+    target = f"{title} at {company}" if company else title
+    overlap = _resume_overlap(body, job)
+    if overlap:
+        lead = f"Aligned to {target}, drawing on {overlap}."
+    else:
+        lead = f"Aligned to {target}."
+    kept = [line for line in lines if line.strip()]
+    return [lead, *kept]
+
+
+def _promote_skill_items(lines: list[str], keywords: list[str]) -> list[str]:
+    """Move matching skill lines up only when each line is one skill, not a wrapped paragraph."""
+    items = [line for line in lines if line.strip()]
+    if len(items) < 2:
+        return lines
+    if any(len(line) > 80 or line.rstrip().endswith((",", ".", ":")) for line in items):
+        return lines
+    ranked = sorted(enumerate(items), key=lambda item: (-_keyword_hits(item[1], keywords), item[0]))
+    return [line for _, line in ranked]
+
+
+def _keyword_hits(line: str, keywords: list[str]) -> int:
+    lowered = (line or "").lower()
+    return sum(1 for keyword in keywords if keyword.lower() in lowered)
 
 
 def _has_named_sections(text: str) -> bool:
