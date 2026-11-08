@@ -2,16 +2,56 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from jobscraper.jd_to_cv import JobToCvError, build_cv_from_job
 from jobscraper.resume_parser import ResumeParseError, parse_resume_text
 
 
+_HEADING_LABELS = (
+    "PROFESSIONAL SUMMARY",
+    "CAREER OBJECTIVE",
+    "KEY ACHIEVEMENTS",
+    "PROFESSIONAL EXPERIENCE",
+    "WORK EXPERIENCE",
+    "WORK HISTORY",
+    "CORE COMPETENCIES",
+    "TECHNICAL SKILLS",
+    "CORE SKILLS",
+    "CERTIFICATIONS",
+    "EDUCATION",
+    "PROJECTS",
+    "LANGUAGES",
+    "SUMMARY",
+    "EXPERIENCE",
+    "SKILLS",
+    "OBJECTIVE",
+    "AWARDS",
+    "PUBLICATIONS",
+)
+_HEADING_RE = re.compile(
+    "(" + "|".join(re.escape(item) for item in sorted(_HEADING_LABELS, key=len, reverse=True)) + ")",
+    re.I,
+)
+_HEADING_LINE_RE = re.compile(
+    r"(?i)^(" + "|".join(re.escape(item) for item in _HEADING_LABELS) + r")$"
+)
+_UUID_RE = re.compile(r"\b[0-9a-f]{16,}\b", re.I)
+_JOB_AD_RE = re.compile(
+    r"(?is)^(.{0,500}?\$\s?\d[\d,\s\-–—]*\d?.{0,80}?(?:benefits|bonus)\s+)"
+)
+
+
 def enhance_profile_for_job(profile: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
-    """Reorder the user's own resume toward this job and return cv text plus match."""
-    resume = resume_from_profile(profile)
-    if not _has_content(resume):
+    """Keep the original resume wording and layout. Do not invent skills or replace the person."""
+    document = preserved_resume_text(profile)
+    source = dict(profile)
+    if len(document) >= 40:
+        source["resume_text"] = document
+        source["resume_document"] = document
+    resume = resume_from_profile(source)
+    if not _has_content(resume) and len(document) < 40:
         raise JobToCvError("This user has no resume, skills, or work history to enhance.")
     payload = build_cv_from_job(
         str(job.get("description") or ""),
@@ -22,17 +62,109 @@ def enhance_profile_for_job(profile: dict[str, Any], job: dict[str, Any]) -> dic
         resume=resume,
         include_cv_text=True,
     )
-    if payload.get("mode") != "tailored" or not (payload.get("cv_text") or "").strip():
+    # The rebuilt CV drops sections and pastes the job onto the summary.
+    # The download is the cleaned original resume instead.
+    if len(document) >= 40:
+        payload["cv_text"] = document
+        payload["mode"] = "tailored"
+    elif not (payload.get("cv_text") or "").strip() or payload.get("mode") != "tailored":
         raise JobToCvError("This user has no resume content to enhance for this job.")
+    else:
+        payload["cv_text"] = _strip_tailor_suffix(payload.get("cv_text") or "")
     return payload
+
+
+def preserved_resume_text(profile: dict[str, Any]) -> str:
+    """Resume file text when we have it, otherwise the saved resume with job-ad junk removed."""
+    file_text = str(profile.get("resume_document") or "").strip()
+    saved = str(profile.get("resume_text") or "").strip()
+    file_body = _restore_resume(file_text) if file_text else ""
+    saved_body = _restore_resume(saved) if saved else ""
+    file_headings = _heading_count(file_body)
+    saved_headings = _heading_count(saved_body)
+    if file_body and (
+        file_headings > saved_headings
+        or (file_headings == saved_headings and len(file_body) >= max(len(saved_body), 40))
+    ):
+        return file_body
+    if len(saved_body) >= 40:
+        return saved_body
+    return file_body or saved_body
+
+
+def _restore_resume(text: str) -> str:
+    cleaned = text.replace("\r\n", "\n").replace("\r", "\n").replace("\u00a0", " ")
+    cleaned = cleaned.replace("\u2022", "- ").replace("•", "- ")
+    cleaned = _separate_headings(cleaned)
+    cleaned = _JOB_AD_RE.sub("", cleaned, count=1)
+    lines = []
+    started = False
+    for raw in cleaned.splitlines():
+        line = re.sub(r"[ \t]{2,}", " ", raw).strip()
+        if not line or _is_junk_line(line):
+            continue
+        if not started and _is_job_ad_line(line):
+            continue
+        started = True
+        lines.append(line)
+    return "\n".join(lines).strip() + ("\n" if lines else "")
+
+
+def _separate_headings(text: str) -> str:
+    """Put every resume section title on its own line, even when two titles are glued together."""
+
+    def place(match: re.Match[str]) -> str:
+        raw = match.group(1)
+        letters = [char for char in raw if char.isalpha()]
+        upper = sum(1 for char in letters if char.isupper())
+        mostly_caps = bool(letters) and upper / len(letters) >= 0.6
+        at_line_start = match.start() == 0 or match.string[match.start() - 1] == "\n"
+        rest_of_line = match.string[match.end() :].split("\n", 1)[0].strip()
+        # A title in a sentence stays put. A real section title is its own line, or glued in capitals.
+        if not mostly_caps and not (at_line_start and rest_of_line == ""):
+            return raw
+        return "\n" + raw.upper() + "\n"
+
+    return _HEADING_RE.sub(place, text)
+
+
+def _heading_count(text: str) -> int:
+    return sum(1 for line in (text or "").splitlines() if _HEADING_LINE_RE.match(line.strip()))
+
+
+def _is_junk_line(line: str) -> bool:
+    lowered = line.lower().strip()
+    if lowered in {"intermediate", "beginner", "advanced", "expert", "novice"}:
+        return True
+    if _UUID_RE.fullmatch(lowered):
+        return True
+    ids = _UUID_RE.findall(lowered)
+    if len(ids) >= 2:
+        return True
+    return False
+
+
+def _is_job_ad_line(line: str) -> bool:
+    lowered = line.lower()
+    if "$" in line and re.search(r"\d", line):
+        return True
+    if "discretionary bonus" in lowered or "mid-senior" in lowered:
+        return True
+    return False
+
+
+def _strip_tailor_suffix(text: str) -> str:
+    cleaned = re.sub(r"\s*Core strengths for this role include [^.]*\.", "", text)
+    cleaned = re.sub(r"\s*Prepared for [^.]*\.", "", cleaned)
+    return cleaned.strip() + ("\n" if cleaned.strip() else "")
 
 
 def resume_from_profile(profile: dict[str, Any]) -> dict[str, Any]:
     """Shape a stored user profile into the resume JSON the tailor expects."""
     parsed = _parsed_resume_text(profile.get("resume_text") or "")
     parsed_profile = (parsed or {}).get("profile") or {}
-    name = _join_name(profile.get("first_name"), profile.get("last_name")) or parsed_profile.get("full_name")
-    location = _join_place(profile.get("city"), profile.get("state"), profile.get("country")) or parsed_profile.get("location")
+    name = parsed_profile.get("full_name") or _join_name(profile.get("first_name"), profile.get("last_name"))
+    location = parsed_profile.get("location") or _join_place(profile.get("city"), profile.get("state"), profile.get("country"))
     history = _experience_from_history(profile.get("work_history") or [])
     parsed_jobs = list((parsed or {}).get("experience") or [])
     experience = _richer_experience(history, parsed_jobs)
@@ -47,20 +179,20 @@ def resume_from_profile(profile: dict[str, Any]) -> dict[str, Any]:
     return {
         "profile": {
             "full_name": name,
-            "email": _or_none(profile.get("email")) or parsed_profile.get("email"),
-            "phone": _or_none(profile.get("phone")) or parsed_profile.get("phone"),
+            "email": parsed_profile.get("email") or _or_none(profile.get("email")),
+            "phone": parsed_profile.get("phone") or _or_none(profile.get("phone")),
             "phones": [],
             "location": location,
-            "linkedin": _or_none(profile.get("linkedin_url")) or parsed_profile.get("linkedin"),
-            "github": _or_none(profile.get("github_url")) or parsed_profile.get("github"),
-            "website": _or_none(profile.get("portfolio_url") or profile.get("personal_website")) or parsed_profile.get("website"),
+            "linkedin": parsed_profile.get("linkedin") or _or_none(profile.get("linkedin_url")),
+            "github": parsed_profile.get("github") or _or_none(profile.get("github_url")),
+            "website": parsed_profile.get("website") or _or_none(profile.get("portfolio_url") or profile.get("personal_website")),
             "summary": summary,
         },
-        "skills": _unique([*(profile.get("skills") or []), *((parsed or {}).get("skills") or [])]),
+        "skills": _unique([*((parsed or {}).get("skills") or []), *_real_skills(profile.get("skills") or [])]),
         "experience": experience,
         "education": schools,
         "projects": list((parsed or {}).get("projects") or []),
-        "certifications": _unique([*(profile.get("certifications") or []), *((parsed or {}).get("certifications") or [])]),
+        "certifications": _unique([*((parsed or {}).get("certifications") or []), *_real_skills(profile.get("certifications") or [])]),
         "languages": list((parsed or {}).get("languages") or []),
     }
 
@@ -160,6 +292,16 @@ def _join_place(*parts) -> str | None:
 def _or_none(value) -> str | None:
     text = str(value or "").strip()
     return text or None
+
+
+def _real_skills(values) -> list[str]:
+    kept = []
+    for value in values:
+        text = str(value or "").strip()
+        if not text or _is_junk_line(text):
+            continue
+        kept.append(text)
+    return kept
 
 
 def _unique(values) -> list[str]:

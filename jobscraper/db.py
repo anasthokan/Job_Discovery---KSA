@@ -1902,6 +1902,31 @@ def _quote_ident(name: str) -> str:
     return f"`{name}`"
 
 
+def load_resume_file_text(candidate_id: str) -> str:
+    """Raw text of a resume file saved on the user, without profile or job-ad text."""
+    if not mysql_configured():
+        return ""
+    conn = get_conn()
+    if conn is None:
+        return ""
+    try:
+        with conn.cursor() as cur:
+            if str(candidate_id).isdigit():
+                cur.execute("SELECT id FROM users WHERE id = %s LIMIT 1", (int(candidate_id),))
+            else:
+                cur.execute("SELECT id FROM users WHERE public_id = %s LIMIT 1", (candidate_id,))
+            user = cur.fetchone()
+            if not user:
+                return ""
+            user_id = int(user["id"])
+            profile_row = _profile_row(cur, user_id)
+            return _resume_text_from_stored_files(cur, user_id, profile_row.get("profile_id"))
+    except Exception:
+        log.exception("load_resume_file_text failed for %s", candidate_id)
+        close_conn()
+        raise
+
+
 def load_app_user(candidate_id: str) -> dict | None:
     """Read a users row (numeric id or public_id) into a recommend profile."""
     if not mysql_configured():

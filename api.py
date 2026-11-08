@@ -98,6 +98,7 @@ from jobscraper.db import (
     attach_descriptions,
     attach_raw_descriptions,
     load_job as load_job_mysql,
+    load_resume_file_text,
     load_jobs as load_jobs_mysql,
     mysql_configured,
     save_candidate as save_candidate_mysql,
@@ -2272,6 +2273,12 @@ def enhance_user_resume(
     if fmt not in {"pdf", "docx"}:
         raise HTTPException(status_code=400, detail="format must be pdf or docx.")
     _cid, profile = _require_candidate(body.user_id.strip())
+    try:
+        file_text = load_resume_file_text(body.user_id.strip())
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Could not load resume file: {exc}") from exc
+    if file_text and file_text.strip():
+        profile = {**profile, "resume_document": file_text}
     job = _job_for_enhance(body.job_id)
     try:
         built = enhance_profile_for_job(profile, job)
