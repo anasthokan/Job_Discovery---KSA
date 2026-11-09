@@ -3597,31 +3597,65 @@ def read_scrape_progress_stats() -> dict:
         return empty
 
 
-def close_abandoned_scrape_runs(except_id: int | None = None) -> int:
+def close_abandoned_scrape_runs(
+    except_id: int | None = None,
+    *,
+    job_count_value: int = 0,
+    new_count: int = 0,
+    duplicate_count: int = 0,
+) -> int:
     """Mark leftover running rows finished.
 
     finish_scrape_run only runs if this process is still alive at the end.
     An IIS recycle or a restart leaves the row on running forever.
+    The newest leftover row keeps the progress-file totals when those are passed,
+    so a killed run does not stay at job_count 0 after jobs were already saved.
     """
     if not mysql_configured():
         return 0
+    job_count_value = max(0, int(job_count_value or 0))
+    new_count = max(0, int(new_count or 0))
+    duplicate_count = max(0, int(duplicate_count or 0))
     try:
         conn = get_conn()
         if conn is None:
             return 0
         with conn.cursor() as cur:
             _ensure_run_columns(cur)
-            sql = (
-                f"UPDATE {RUNS_TABLE} SET finished_at = UTC_TIMESTAMP(), status = 'stopped', "
-                "error = %s WHERE status = 'running' AND finished_at IS NULL"
+            select_sql = (
+                f"SELECT id FROM {RUNS_TABLE} "
+                "WHERE status = 'running' AND finished_at IS NULL"
             )
-            params: list = [
-                "Scrape stopped before it finished. The API restarted or the process was killed."
+            params: list = []
+            if except_id:
+                select_sql += " AND id <> %s"
+                params.append(int(except_id))
+            cur.execute(select_sql, tuple(params))
+            ids = [int(row["id"]) for row in (cur.fetchall() or []) if row.get("id")]
+            if not ids:
+                return 0
+            newest = max(ids)
+            update_sql = (
+                f"UPDATE {RUNS_TABLE} SET finished_at = UTC_TIMESTAMP(), status = 'stopped', "
+                "error = %s, "
+                "job_count = CASE WHEN id = %s THEN %s ELSE job_count END, "
+                "new_count = CASE WHEN id = %s THEN %s ELSE new_count END, "
+                "duplicate_count = CASE WHEN id = %s THEN %s ELSE duplicate_count END "
+                "WHERE status = 'running' AND finished_at IS NULL"
+            )
+            update_params: list = [
+                "Scrape stopped before it finished. The API restarted or the process was killed.",
+                newest,
+                job_count_value,
+                newest,
+                new_count,
+                newest,
+                duplicate_count,
             ]
             if except_id:
-                sql += " AND id <> %s"
-                params.append(int(except_id))
-            cur.execute(sql, tuple(params))
+                update_sql += " AND id <> %s"
+                update_params.append(int(except_id))
+            cur.execute(update_sql, tuple(update_params))
             return int(cur.rowcount or 0)
     except Exception:
         log.exception("Could not close abandoned scrape runs")
@@ -3692,11 +3726,12 @@ def finish_scrape_run(
 
 
 def scrape_run_save_stats(run_id: int | None = None) -> dict | None:
-    """Rows this scrape wrote, from first_seen_at / last_seen_at.
+    """Rows whose first_seen_at or last_seen_at moved during this run.
 
     saved = new inserts + rows that were already in the table.
-    The progress file only counts listings the spider handled, so it can
-    climb while both of those stay at 0.
+    Headcount, ATS boards, and Global Jobs also upsert while a scrape is open,
+    so this total can be higher than the listings the job spider itself saved.
+    Use it only when the spider did not record its own new and duplicate counts.
     """
     if not mysql_configured():
         return None
@@ -3739,6 +3774,36 @@ def scrape_run_save_stats(run_id: int | None = None) -> dict | None:
         }
     except Exception:
         log.exception("Could not count new vs duplicate jobs for this scrape")
+        close_conn()
+        return None
+
+
+def latest_finished_scrape() -> dict | None:
+    """Newest job_discovery_scrape_runs row that has already finished."""
+    if not mysql_configured():
+        return None
+    try:
+        conn = get_conn()
+        if conn is None:
+            return None
+        with conn.cursor() as cur:
+            _ensure_run_columns(cur)
+            cur.execute(
+                f"SELECT id, job_count, new_count, duplicate_count, status FROM {RUNS_TABLE} "
+                "WHERE finished_at IS NOT NULL ORDER BY id DESC LIMIT 1"
+            )
+            row = cur.fetchone()
+        if not row:
+            return None
+        return {
+            "id": int(row["id"]),
+            "job_count": int(row.get("job_count") or 0),
+            "new_count": int(row.get("new_count") or 0),
+            "duplicate_count": int(row.get("duplicate_count") or 0),
+            "status": row.get("status"),
+        }
+    except Exception:
+        log.exception("Could not read the latest scrape run")
         close_conn()
         return None
 

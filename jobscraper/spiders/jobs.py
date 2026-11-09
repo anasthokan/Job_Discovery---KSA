@@ -20,6 +20,25 @@ _PAGE_OFFSETS = (0, 100, 200)
 _EXTRA_CITIES = ("Riyadh", "Jeddah", "Dammam", "Khobar")
 _RESULTS_WANTED = 100
 _HOURS_OLD = 24 * 180
+
+
+def take_toward_target(batch: list, saved: int, target: int) -> list:
+    """Keep only the listings that still fit under this run's target.
+
+    A page can return 100 rows. Without this trim a run aimed at 5000
+    keeps the whole last page and finishes a few hundred over.
+    target 0 means there is no cap.
+    """
+    if target <= 0:
+        return batch
+    room = target - max(0, saved)
+    if room <= 0:
+        return []
+    if len(batch) <= room:
+        return batch
+    return batch[:room]
+
+
 SYNONYMS = {
     "developer": ("developer", "engineer", "dev"),
     "engineer": ("engineer", "developer", "dev"),
@@ -230,11 +249,19 @@ class JobsSpider(scrapy.Spider):
         new_total = 0
         duplicate_total = 0
         seen: set[str] = set()
+        reached = False
         for index, term in enumerate(queries, start=1):
+            if reached:
+                break
             for place_index, where in enumerate(places):
+                if reached:
+                    break
                 # Deeper pages for the country search. Cities add a different first page.
                 offsets = _PAGE_OFFSETS if place_index == 0 else (0,)
                 for page_offset in offsets:
+                    if self.target and saved >= self.target:
+                        reached = True
+                        break
                     self.logger.info(
                         "Search %s/%s %r at %s offset %s",
                         index,
@@ -290,6 +317,11 @@ class JobsSpider(scrapy.Spider):
                     if not batch:
                         self.logger.info("No kept jobs for %s at %s offset %s", term, where, page_offset)
                         continue
+                    saved_before = saved
+                    batch = take_toward_target(batch, saved, self.target)
+                    if not batch:
+                        reached = True
+                        break
                     try:
                         from jobscraper.db import note_scrape_progress, upsert_jobs
 
@@ -315,3 +347,13 @@ class JobsSpider(scrapy.Spider):
                         self.logger.exception("MySQL save failed for %s", term)
                     for item in batch:
                         yield item
+                    if self.target and (saved >= self.target or len(batch) >= self.target - saved_before):
+                        self.logger.info(
+                            "Stopped at the target of %s jobs (saved %s, new %s, duplicates %s)",
+                            self.target,
+                            saved,
+                            new_total,
+                            duplicate_total,
+                        )
+                        reached = True
+                        break

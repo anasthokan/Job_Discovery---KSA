@@ -93,6 +93,7 @@ from jobscraper.db import (
     init_db as init_mysql,
     job_count as mysql_job_count,
     last_scrape_meta,
+    latest_finished_scrape,
     catalog_search_terms,
     load_app_user,
     load_candidate as load_candidate_mysql,
@@ -319,7 +320,12 @@ def _boot() -> None:
     global _SCHEDULER
     try:
         init_mysql()
-        closed = close_abandoned_scrape_runs()
+        partial = read_scrape_progress_stats()
+        closed = close_abandoned_scrape_runs(
+            job_count_value=partial["saved"],
+            new_count=partial["new"],
+            duplicate_count=partial["duplicates"],
+        )
         if closed:
             log.info("Closed %s scrape runs left on running", closed)
         import_json_if_empty(DATA_FILE)
@@ -1158,23 +1164,30 @@ def _finish_scrape_stats(
     *,
     error: str | None = None,
 ) -> int:
-    stats = stats or read_scrape_progress_stats()
-    db_stats = scrape_run_save_stats(run_id)
-    if db_stats is not None:
-        stats = db_stats
+    """Store the spider's own saved/new/duplicate totals on the run row.
+
+    Those three numbers are what saved_so_far shows. A timestamp scan of the
+    jobs table also counts Headcount, ATS, and Global Jobs rows touched while
+    this run was open, so that scan is only a fallback.
+    """
+    stats = dict(stats or read_scrape_progress_stats())
     saved = int(stats.get("saved") or 0)
+    new = int(stats.get("new") or 0)
+    duplicates = int(stats.get("duplicates") or 0)
+    if saved and new + duplicates == 0:
+        db_stats = scrape_run_save_stats(run_id)
+        if db_stats is not None:
+            saved = int(db_stats.get("saved") or 0)
+            new = int(db_stats.get("new") or 0)
+            duplicates = int(db_stats.get("duplicates") or 0)
     finish_scrape_run(
         run_id,
         job_count_value=saved,
-        new_count=int(stats.get("new") or 0),
-        duplicate_count=int(stats.get("duplicates") or 0),
+        new_count=new,
+        duplicate_count=duplicates,
         error=error,
     )
-    note_scrape_progress(
-        saved,
-        new=int(stats.get("new") or 0),
-        duplicates=int(stats.get("duplicates") or 0),
-    )
+    note_scrape_progress(saved, new=new, duplicates=duplicates)
     return saved
 
 
@@ -1185,6 +1198,12 @@ def run_spider(keywords: str, location: str, platform: str, city: str = "", targ
             DATA_FILE.unlink()
         except OSError:
             log.warning("jobs.json is open in another process. This scrape still saves each search to MySQL.")
+    partial = read_scrape_progress_stats()
+    close_abandoned_scrape_runs(
+        job_count_value=partial["saved"],
+        new_count=partial["new"],
+        duplicate_count=partial["duplicates"],
+    )
     reset_scrape_progress()
     # The keyword list is long (every database skill and certification).
     # Passing it on the Windows command line gets cut, so the spider starts
@@ -1278,8 +1297,13 @@ def run_spider(keywords: str, location: str, platform: str, city: str = "", targ
             )
         else:
             upsert_jobs(this_run, notify=False)
+            # Keep the spider totals. len(jobs.json) can differ, and that
+            # second number was what made the run row disagree with saved_so_far.
+            saved_count = int(progress["saved"])
+            if target > 0:
+                saved_count = min(saved_count, int(target))
             progress = {
-                "saved": max(progress["saved"], len(this_run)),
+                "saved": saved_count,
                 "new": progress["new"],
                 "duplicates": progress["duplicates"],
             }
@@ -1712,7 +1736,7 @@ def scrape_jobs(
     message = "Scrape started. Poll GET /api/scrape/status until running is false. running stays true while boards are still being searched."
     if response_target >= 1000:
         message = (
-            f"Large scrape started for about {response_target} jobs across database skills and certifications. "
+            f"Large scrape started. It stops at {response_target} jobs across database skills and certifications. "
             "Jobs are saved after each search. Poll GET /api/scrape/status and watch saved_so_far."
         )
     return JSONResponse(
@@ -1759,15 +1783,25 @@ def _scrape_background(keywords: str, state: str, platform: str, city: str, targ
 
 @app.get("/api/scrape/status")
 def scrape_status():
-    # The progress file counts listings the spider handled. During a run that
-    # number can climb while new and duplicates stay 0. Count the rows actually
-    # inserted or updated since the run started instead.
-    progress = read_scrape_progress_stats()
-    if SCRAPE_LOCK.locked():
-        progress = scrape_run_save_stats() or progress
+    # While a scrape is running, saved_so_far is the spider's own total.
+    # When it is idle, report the latest job_discovery_scrape_runs row so
+    # saved_so_far, new_so_far, and duplicates_so_far match that table.
+    running = SCRAPE_LOCK.locked()
+    if running:
+        progress = read_scrape_progress_stats()
+    else:
+        latest = latest_finished_scrape()
+        if latest and int(latest.get("job_count") or 0) > 0:
+            progress = {
+                "saved": int(latest["job_count"]),
+                "new": int(latest["new_count"] or 0),
+                "duplicates": int(latest["duplicate_count"] or 0),
+            }
+        else:
+            progress = read_scrape_progress_stats()
     return {
         "ok": True,
-        "running": SCRAPE_LOCK.locked(),
+        "running": running,
         "saved_so_far": progress["saved"],
         "new_so_far": progress["new"],
         "duplicates_so_far": progress["duplicates"],
