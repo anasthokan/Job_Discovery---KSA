@@ -1765,9 +1765,91 @@ def _known_listings(cur, rows: list[dict]) -> tuple[set[str], set[str]]:
     return known_ids, known_urls
 
 
+def _attach_new_job_career_urls(jobs: list[dict]) -> None:
+    """Look up the employer Apply link before a new board job is stored.
+
+    LinkedIn's guest page no longer includes that URL. Each new LinkedIn or
+    Indeed row is matched to the company career sitemap once, at insert time.
+    """
+    from jobscraper.agent_reach import company_career_url_for_job
+
+    pending = []
+    for job in jobs:
+        if str(job.get("platform") or "") not in {"LinkedIn", "Indeed"}:
+            continue
+        if company_career_url_for_job(job):
+            continue
+        source_id = str(job.get("id") or "").strip()
+        if not source_id or not str(job.get("title") or "").strip() or not str(job.get("company") or "").strip():
+            continue
+        pending.append(job)
+    if not pending:
+        return
+    existing: set[str] = set()
+    conn = get_conn()
+    if conn is not None:
+        try:
+            with conn.cursor() as cur:
+                for chunk in _chunks([str(job.get("id")) for job in pending], 200):
+                    marks = ", ".join(["%s"] * len(chunk))
+                    cur.execute(
+                        f"SELECT source_id FROM {JOBS_TABLE} WHERE source_id IN ({marks})",
+                        chunk,
+                    )
+                    for hit in cur.fetchall() or []:
+                        if hit.get("source_id"):
+                            existing.add(str(hit["source_id"]))
+        except Exception:
+            log.exception("Could not list jobs already stored before career URL lookup")
+    fresh = [job for job in pending if str(job.get("id")) not in existing]
+    if not fresh:
+        return
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout, as_completed
+
+    from jobscraper.career_portal import _career_url_from_sitemaps
+
+    def resolve(job: dict) -> tuple[dict, str]:
+        try:
+            url = _career_url_from_sitemaps(
+                str(job.get("company") or ""),
+                str(job.get("title") or ""),
+                str(job.get("location") or ""),
+            )
+        except Exception:
+            log.exception("Career URL lookup failed for %s", job.get("company"))
+            url = ""
+        return job, url or ""
+
+    filled = 0
+    pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="career-scrape")
+    futures = [pool.submit(resolve, job) for job in fresh]
+    timeout = 25 * max(1, (len(fresh) + 3) // 4)
+    try:
+        for future in as_completed(futures, timeout=timeout):
+            try:
+                job, url = future.result()
+            except Exception:
+                log.exception("Career URL scrape fill failed")
+                continue
+            if not url:
+                continue
+            job["company_career_url"] = url
+            filled += 1
+    except FuturesTimeout:
+        log.info("Career URL scrape fill timed out with %s of %s saved", filled, len(fresh))
+    finally:
+        try:
+            pool.shutdown(wait=False, cancel_futures=True)
+        except TypeError:
+            pool.shutdown(wait=False)
+    if filled:
+        log.info("Saved employer apply links for %s new jobs", filled)
+
+
 def upsert_jobs(jobs: list[dict], *, notify: bool = True) -> UpsertStats:
     if not jobs or not mysql_configured():
         return UpsertStats()
+    _attach_new_job_career_urls(jobs)
     rows = [row for row in (_row_from_item(job) for job in jobs) if row]
     if not rows:
         return UpsertStats()
