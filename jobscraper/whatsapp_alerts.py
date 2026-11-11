@@ -8,6 +8,7 @@ Jobs in Saudi group, and scores those rows with the same matcher as
 
 from __future__ import annotations
 
+import atexit
 import json
 import logging
 import os
@@ -77,6 +78,7 @@ _DIALS = tuple(sorted(set(_DIAL_CODES), key=len, reverse=True))
 _LOCK = threading.Lock()
 _DELIVER_LOCK = threading.Lock()
 _pending: list[dict] = []
+_EXIT_FLUSH_REGISTERED = False
 _inflight: set[str] = set()
 _timer: threading.Timer | None = None
 _recipients: dict = {"at": 0.0, "rows": []}
@@ -203,6 +205,14 @@ def group_sweep_status() -> dict:
     return dict(_SWEEP_STATUS)
 
 
+def _flush_on_exit() -> None:
+    """Send alerts still waiting when a scrape process exits."""
+    try:
+        _flush()
+    except Exception:
+        log.exception("WhatsApp exit flush failed")
+
+
 def queue_job_alerts(rows: list[dict], *, group: bool | None = None, immediate: bool = False) -> None:
     """Hold brand-new jobs briefly so one scrape wave becomes one matching pass."""
     if not alerts_enabled() or not rows:
@@ -221,6 +231,10 @@ def queue_job_alerts(rows: list[dict], *, group: bool | None = None, immediate: 
         prepared.append(job)
     if not prepared:
         return
+    global _EXIT_FLUSH_REGISTERED
+    if not _EXIT_FLUSH_REGISTERED:
+        atexit.register(_flush_on_exit)
+        _EXIT_FLUSH_REGISTERED = True
     with _LOCK:
         known = {item["source_id"] for item in _pending} | _inflight
         _pending.extend(job for job in prepared if job["source_id"] not in known)
@@ -330,6 +344,25 @@ def _attach_short_descriptions(cur, table: str, rows: list[dict]) -> None:
         row["description"] = found.get(str(row.get("source_id") or ""), "")
 
 
+def _attach_career_urls(cur, table: str, rows: list[dict]) -> None:
+    """Career links for the jobs about to be posted. Kept off the wide sweep scan."""
+    ids = [str(row.get("source_id") or "") for row in rows if row.get("source_id")]
+    found: dict[str, str] = {}
+    for start in range(0, len(ids), 200):
+        chunk = ids[start : start + 200]
+        marks = ", ".join(["%s"] * len(chunk))
+        cur.execute(
+            f"SELECT source_id, company_career_url FROM {table} WHERE source_id IN ({marks})",
+            chunk,
+        )
+        for hit in cur.fetchall() or []:
+            source_id = str(hit.get("source_id") or "")
+            if source_id:
+                found[source_id] = str(hit.get("company_career_url") or "")
+    for row in rows:
+        row["company_career_url"] = found.get(str(row.get("source_id") or ""), "")
+
+
 def queue_unsent_group_jobs(limit: int | None = None) -> None:
     """Post group jobs from the last 6 hours that never got a real message.
 
@@ -365,7 +398,7 @@ def queue_unsent_group_jobs(limit: int | None = None) -> None:
             cur.execute(
                 f"""
                 SELECT j.source_id, j.title, j.company, j.skills, j.state, j.location,
-                       j.platform, j.url, j.company_career_url, j.job_type, j.work_model,
+                       j.platform, j.url, j.job_type, j.work_model,
                        j.experience_level, j.years_experience, j.visa_sponsorship,
                        j.saudi_national_required, j.posted_at, j.platform_posted_at,
                        IFNULL(a.message, '') AS alert_message
@@ -421,10 +454,14 @@ def queue_unsent_group_jobs(limit: int | None = None) -> None:
                     _attach_short_descriptions(cur, JOBS_TABLE, rows)
                 except Exception:
                     log.exception("WhatsApp group sweep could not read descriptions")
-    except Exception:
+                try:
+                    _attach_career_urls(cur, JOBS_TABLE, rows)
+                except Exception:
+                    log.exception("WhatsApp group sweep could not read career URLs")
+    except Exception as exc:
         log.exception("WhatsApp group sweep query failed")
-        _note("WhatsApp group sweep query failed")
-        _remember_sweep(error="query failed")
+        _note(f"WhatsApp group sweep query failed: {exc}")
+        _remember_sweep(error=str(exc)[:300] or "query failed")
         return
     _remember_sweep(found=len(fetched), queued=len(rows), skipped=skipped, skipped_titles=skipped_titles)
     _note(

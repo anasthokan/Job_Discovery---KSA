@@ -1824,6 +1824,12 @@ def _scrape_background(keywords: str, state: str, platform: str, city: str, targ
         _store_last_scrape(ok=saved > 0, error=str(detail)[:500], count=saved, db_total=db_total)
         log.exception("Background scrape failed")
     finally:
+        try:
+            from jobscraper.whatsapp_alerts import queue_unsent_group_jobs
+
+            queue_unsent_group_jobs()
+        except Exception:
+            log.exception("Could not send unsent WhatsApp group alerts after scrape")
         SCRAPE_LOCK.release()
 
 
