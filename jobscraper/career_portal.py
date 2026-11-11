@@ -300,9 +300,31 @@ def _career_url_from_sitemaps(company: str, title: str, location: str = "") -> s
     tokens = _career_host_tokens(company)
     if not tokens:
         return ""
-    targets = [pattern.format(token=token) for token in tokens for pattern in _SITEMAP_PATTERNS]
     best = ""
     best_score = -1
+    # career.{company}.sa is the usual Saudi SuccessFactors host. Read it
+    # before fanning out so a hit does not wait on the other guesses.
+    for token in tokens:
+        try:
+            found, score = _best_posting_url(
+                _locs_from_sitemap(f"https://career.{token}.sa/sitemap.xml"),
+                company,
+                title,
+                location,
+            )
+        except Exception:
+            log.info("Career sitemap read failed", exc_info=True)
+            continue
+        if score > best_score:
+            best, best_score = found, score
+        if best_score >= 12:
+            return best
+    targets = [
+        pattern.format(token=token)
+        for token in tokens
+        for pattern in _SITEMAP_PATTERNS
+        if not pattern.startswith("https://career.{token}.sa/")
+    ]
     pool = ThreadPoolExecutor(max_workers=6, thread_name_prefix="career-sitemap")
     futures = [pool.submit(_locs_from_sitemap, url) for url in targets]
     try:

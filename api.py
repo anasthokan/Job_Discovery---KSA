@@ -99,6 +99,7 @@ from jobscraper.db import (
     load_app_user,
     load_candidate as load_candidate_mysql,
     attach_descriptions,
+    attach_missing_career_urls,
     attach_raw_descriptions,
     load_job as load_job_mysql,
     load_resume_file,
@@ -812,6 +813,7 @@ def _with_time_ago(jobs: list[dict]) -> list[dict]:
         # Column value, else the offsite apply link saved on the scrape, else the
         # listing URL when that listing is already the employer career page.
         row["company_career_url"] = company_career_url_for_job(row) or None
+    attach_missing_career_urls(presented)
     return presented
 
 

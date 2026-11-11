@@ -1158,6 +1158,80 @@ def _store_company_career_url(cur, row_id: int, url: str) -> None:
     )
 
 
+def attach_missing_career_urls(jobs: list[dict]) -> None:
+    """Save employer apply links for the LinkedIn and Indeed rows in this response.
+
+    The background pass only stores a few URLs, then stays on description refill.
+    The jobs page asks for the rows it is about to return, so a refresh shows
+    the Apply destination instead of waiting for that queue.
+    """
+    if not jobs or not mysql_configured():
+        return
+    pending = []
+    for job in jobs:
+        if str(job.get("platform") or "") not in {"LinkedIn", "Indeed"}:
+            continue
+        if str(job.get("company_career_url") or "").strip():
+            continue
+        try:
+            int(job.get("job_id"))
+        except (TypeError, ValueError):
+            continue
+        pending.append(job)
+        if len(jobs) > 15 and len(pending) >= 8:
+            break
+    if not pending:
+        return
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout, as_completed
+
+    from jobscraper.career_portal import _career_url_from_sitemaps
+
+    def resolve(job: dict) -> tuple[dict, str]:
+        try:
+            url = _career_url_from_sitemaps(
+                str(job.get("company") or ""),
+                str(job.get("title") or ""),
+                str(job.get("location") or ""),
+            )
+        except Exception:
+            log.exception("Career URL lookup failed for %s", job.get("company"))
+            url = ""
+        return job, url or ""
+
+    found: list[tuple[dict, str]] = []
+    pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="career-page")
+    futures = [pool.submit(resolve, job) for job in pending]
+    try:
+        for future in as_completed(futures, timeout=18):
+            try:
+                found.append(future.result())
+            except Exception:
+                log.exception("Career URL page fill failed")
+    except FuturesTimeout:
+        log.info("Career URL page fill timed out")
+    finally:
+        try:
+            pool.shutdown(wait=False, cancel_futures=True)
+        except TypeError:
+            pool.shutdown(wait=False)
+    conn = get_conn()
+    for job, url in found:
+        if not url:
+            continue
+        job["company_career_url"] = url
+        if conn is None:
+            continue
+        try:
+            row_id = int(job["job_id"])
+        except (TypeError, ValueError):
+            continue
+        try:
+            with conn.cursor() as cur:
+                _store_company_career_url(cur, row_id, url)
+        except Exception:
+            log.exception("Could not save company career URL for job %s", row_id)
+
+
 def _mark_career_url_checked(cur, row_id: int) -> None:
     """Remember a LinkedIn page that has no employer apply link (Easy Apply)."""
     marker = '{"career_url_checked":true,"career_lookup_v2":true}'
@@ -1201,10 +1275,9 @@ def _fill_missing_career_urls(conn) -> None:
                 f"SELECT id, title, company, location FROM {JOBS_TABLE} "
                 f"WHERE platform IN ('LinkedIn', 'Indeed') "
                 f"AND (company_career_url IS NULL OR company_career_url = '') "
-                f"AND CHAR_LENGTH(description) >= 400 "
                 f"AND CAST(raw_description AS CHAR) NOT LIKE %s "
                 f"AND CAST(raw_description AS CHAR) NOT LIKE %s "
-                f"ORDER BY id DESC LIMIT 8",
+                f"ORDER BY id DESC LIMIT 20",
                 ("%career_lookup_v2%", "%posting_missing%"),
             )
             rows = list(cur.fetchall() or [])
@@ -1286,9 +1359,16 @@ def _fill_short_dice_descriptions() -> tuple[int, int]:
     filled = 0
     retryable = 0
     consecutive_failures = 0
+    description_checks = 0
     from jobscraper.sources import is_platform_active
 
     for row in rows:
+        description_checks += 1
+        if description_checks % 20 == 0:
+            try:
+                _fill_missing_career_urls(conn)
+            except Exception:
+                log.exception("Company career URL fill failed")
         platform = str(row.get("platform") or "")
         if not is_platform_active(platform):
             continue
