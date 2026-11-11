@@ -404,7 +404,8 @@ def queue_unsent_group_jobs(limit: int | None = None) -> None:
                        IFNULL(a.message, '') AS alert_message
                 FROM {JOBS_TABLE} j
                 LEFT JOIN {ALERTS_TABLE} a
-                  ON a.source_id = j.source_id AND a.phone = %s
+                  ON a.source_id COLLATE utf8mb4_unicode_ci = j.source_id COLLATE utf8mb4_unicode_ci
+                 AND a.phone COLLATE utf8mb4_unicode_ci = %s
                 WHERE j.title IS NOT NULL AND TRIM(j.title) <> ''
                   AND LOWER(IFNULL(j.platform, '')) NOT LIKE '%%whatsapp%%'
                   AND IFNULL(j.url, '') NOT LIKE '%%wa.me%%'
