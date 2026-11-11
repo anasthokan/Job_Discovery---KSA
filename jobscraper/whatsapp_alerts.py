@@ -406,9 +406,9 @@ def queue_unsent_group_jobs(limit: int | None = None) -> None:
                 LEFT JOIN {ALERTS_TABLE} a
                   ON a.source_id = j.source_id AND a.phone = %s
                 WHERE j.title IS NOT NULL AND TRIM(j.title) <> ''
-                  AND LOWER(IFNULL(j.platform, '')) NOT LIKE '%whatsapp%'
-                  AND IFNULL(j.url, '') NOT LIKE '%wa.me%'
-                  AND IFNULL(j.url, '') NOT LIKE '%api.whatsapp.com%'
+                  AND LOWER(IFNULL(j.platform, '')) NOT LIKE '%%whatsapp%%'
+                  AND IFNULL(j.url, '') NOT LIKE '%%wa.me%%'
+                  AND IFNULL(j.url, '') NOT LIKE '%%api.whatsapp.com%%'
                   AND j.first_seen_at >= UTC_TIMESTAMP() - INTERVAL 6 HOUR
                   AND (a.id IS NULL OR IFNULL(a.message, '') IN ('', 'skipped'))
                 ORDER BY j.first_seen_at DESC
