@@ -162,6 +162,9 @@ def find_company_career_url(company: str, title: str, location: str = "") -> str
     city = (location or "").split(",")[0].strip()
     if city.casefold() in {"saudi arabia", "ksa", "kingdom of saudi arabia", "remote"}:
         city = ""
+    guessed = _career_url_from_sitemaps(company, title, location)
+    if guessed:
+        return guessed
     query = f'"{title}" "{company}"'
     if city:
         query = f"{query} {city}"
@@ -196,22 +199,128 @@ def _aggregator_host(url: str) -> bool:
 def _company_in_career_url(company: str, url: str) -> bool:
     host = _host(url)
     path = unquote(urlparse(url).path).casefold()
+    labels = [part for part in re.split(r"[^a-z0-9]+", f"{host}/{path}") if part]
     for token in _tokens(company):
-        if len(token) < 4:
+        if token in GENERIC_SLUG:
             continue
-        if token in host or token in path:
+        if len(token) >= 4 and (token in host or token in path):
+            return True
+        # "Elm" is the whole company name. Count it only as its own host label,
+        # so a 3-letter token cannot match inside a longer word.
+        if len(token) == 3 and token in labels:
             return True
     return False
 
 
-def _title_in_career_url(title: str, url: str) -> bool:
-    path = unquote(urlparse(url).path).casefold().replace("-", " ").replace("_", " ")
-    tokens = [part for part in re.findall(r"[a-z0-9]+", title.casefold()) if len(part) > 3]
+def _title_path(url: str) -> str:
+    return unquote(urlparse(url).path).casefold().replace("-", " ").replace("_", " ")
+
+
+def _title_tokens(title: str) -> list[str]:
+    return [part for part in re.findall(r"[a-z0-9]+", title.casefold()) if len(part) > 3]
+
+
+def _title_rank(title: str, url: str, location: str = "") -> int:
+    """How closely this career URL is the posting. -1 means it is not."""
+    path = _title_path(url)
+    tokens = _title_tokens(title)
     if not tokens:
-        return False
+        return -1
     hits = sum(1 for token in tokens if token in path)
     need = len(tokens) if len(tokens) <= 3 else max(2, (len(tokens) + 1) // 2)
-    return hits >= need
+    if hits < need:
+        return -1
+    score = hits
+    if " ".join(tokens) in path:
+        score += 10
+    city = (location or "").split(",")[0].strip().casefold()
+    if city and city not in {"saudi arabia", "ksa", "kingdom of saudi arabia", "remote"} and city in path:
+        score += 3
+    return score
+
+
+def _title_in_career_url(title: str, url: str) -> bool:
+    return _title_rank(title, url) >= 0
+
+
+# Public career hosts tried when a board hides the Apply destination.
+# SuccessFactors sites such as career.elm.sa list each posting in sitemap.xml.
+_SITEMAP_PATTERNS = (
+    "https://career.{token}.sa/sitemap.xml",
+    "https://careers.{token}.sa/sitemap.xml",
+    "https://jobs.{token}.sa/sitemap.xml",
+    "https://career.{token}.com.sa/sitemap.xml",
+    "https://careers.{token}.com.sa/sitemap.xml",
+    "https://www.{token}.sa/sitemap.xml",
+    "https://careers.{token}.com/sitemap.xml",
+    "https://career.{token}.com/sitemap.xml",
+)
+
+
+def _career_host_tokens(company: str) -> list[str]:
+    parts = [re.sub(r"[^a-z0-9]", "", part) for part in _tokens(company)]
+    parts = [part for part in parts if part and part not in GENERIC_SLUG and len(part) >= 3]
+    long = [part for part in parts if len(part) >= 4]
+    chosen = long or parts
+    chosen.sort(key=len, reverse=True)
+    return chosen[:2]
+
+
+def _locs_from_sitemap(url: str, depth: int = 0) -> list[str]:
+    page = _fetch(url, timeout=6, accept="application/xml,text/xml,text/html")
+    if not page or page[0] != 200 or not page[2] or "<loc" not in page[2].casefold():
+        return []
+    locs = [html.unescape(item).strip() for item in re.findall(r"<loc>\s*([^<]+)\s*</loc>", page[2], re.I)]
+    children = [loc for loc in locs if urlparse(loc).path.lower().endswith(".xml")]
+    pages = [loc for loc in locs if loc not in children]
+    if depth == 0 and children and not pages:
+        found: list[str] = []
+        for child in children[:3]:
+            found.extend(_locs_from_sitemap(child, 1))
+        return found
+    return pages
+
+
+def _best_posting_url(locs: list[str], company: str, title: str, location: str) -> tuple[str, int]:
+    best = ""
+    best_score = -1
+    for loc in locs:
+        cleaned = _clean_url(loc)
+        if not cleaned or not _employer_posting_url(cleaned, company, title):
+            continue
+        score = _title_rank(title, cleaned, location)
+        if score > best_score:
+            best = cleaned
+            best_score = score
+    return best[:1000], best_score
+
+
+def _career_url_from_sitemaps(company: str, title: str, location: str = "") -> str:
+    """Employer posting from a career host guessed from the company name."""
+    tokens = _career_host_tokens(company)
+    if not tokens:
+        return ""
+    targets = [pattern.format(token=token) for token in tokens for pattern in _SITEMAP_PATTERNS]
+    best = ""
+    best_score = -1
+    pool = ThreadPoolExecutor(max_workers=6, thread_name_prefix="career-sitemap")
+    futures = [pool.submit(_locs_from_sitemap, url) for url in targets]
+    try:
+        for future in as_completed(futures, timeout=14):
+            try:
+                locs = future.result() or []
+            except Exception:
+                log.info("Career sitemap read failed", exc_info=True)
+                continue
+            found, score = _best_posting_url(locs, company, title, location)
+            if score > best_score:
+                best, best_score = found, score
+            if best_score >= 12:
+                break
+    except TimeoutError:
+        log.info("Career sitemap lookup timed out for %s", company)
+    _shutdown(pool)
+    return best
 
 
 def lookup_company_jobs(

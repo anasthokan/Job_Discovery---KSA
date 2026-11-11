@@ -1160,7 +1160,7 @@ def _store_company_career_url(cur, row_id: int, url: str) -> None:
 
 def _mark_career_url_checked(cur, row_id: int) -> None:
     """Remember a LinkedIn page that has no employer apply link (Easy Apply)."""
-    marker = '{"career_url_checked":true}'
+    marker = '{"career_url_checked":true,"career_lookup_v2":true}'
     cur.execute(
         f"UPDATE {JOBS_TABLE} SET raw_description = IF("
         f"JSON_VALID(raw_description) AND CHAR_LENGTH(raw_description) > 2 "
@@ -1205,7 +1205,7 @@ def _fill_missing_career_urls(conn) -> None:
                 f"AND CAST(raw_description AS CHAR) NOT LIKE %s "
                 f"AND CAST(raw_description AS CHAR) NOT LIKE %s "
                 f"ORDER BY id DESC LIMIT 8",
-                ("%career_url_checked%", "%posting_missing%"),
+                ("%career_lookup_v2%", "%posting_missing%"),
             )
             rows = list(cur.fetchall() or [])
     except Exception:
