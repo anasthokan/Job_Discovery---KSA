@@ -183,6 +183,7 @@ def _alert_job(row: dict) -> dict:
         "location": str(row.get("location") or ""),
         "platform": str(row.get("platform") or ""),
         "url": str(row.get("url") or ""),
+        "company_career_url": str(row.get("company_career_url") or ""),
         "description": description[:8000],
         "job_type": row.get("job_type") or "fulltime",
         "work_model": row.get("work_model") or "unknown",
@@ -364,7 +365,7 @@ def queue_unsent_group_jobs(limit: int | None = None) -> None:
             cur.execute(
                 f"""
                 SELECT j.source_id, j.title, j.company, j.skills, j.state, j.location,
-                       j.platform, j.url, j.job_type, j.work_model,
+                       j.platform, j.url, j.company_career_url, j.job_type, j.work_model,
                        j.experience_level, j.years_experience, j.visa_sponsorship,
                        j.saudi_national_required, j.posted_at, j.platform_posted_at,
                        IFNULL(a.message, '') AS alert_message
@@ -549,6 +550,16 @@ def _job_link(url: str) -> str:
     return text
 
 
+def _group_apply_link(job: dict) -> str:
+    """Company career page when we have one, otherwise the board listing."""
+    from jobscraper.agent_reach import employer_career_url
+
+    career = employer_career_url(job.get("company_career_url"))
+    if career:
+        return career
+    return _job_link(str(job.get("url") or ""))
+
+
 def _display_platform(value: str) -> str:
     platform = _clean_field(value)
     if not platform or "whatsapp" in platform.lower():
@@ -685,7 +696,13 @@ def _group_message_ok(text: str) -> bool:
     return True
 
 
-def _format_job_message(job: dict, *, header: str, extra_lines: list[str] | None = None) -> str:
+def _format_job_message(
+    job: dict,
+    *,
+    header: str,
+    extra_lines: list[str] | None = None,
+    prefer_career: bool = False,
+) -> str:
     title = _display_title(job)
     if not title:
         return ""
@@ -699,7 +716,7 @@ def _format_job_message(job: dict, *, header: str, extra_lines: list[str] | None
         if part
     )
     skills = [_clean_field(str(item)) for item in (job.get("skills") or []) if _clean_field(str(item))][:6]
-    url = _job_link(str(job.get("url") or ""))
+    url = _group_apply_link(job) if prefer_career else _job_link(str(job.get("url") or ""))
     description = _clean_description(job, title)
 
     fixed = [header, "", title]
@@ -720,8 +737,12 @@ def _format_job_message(job: dict, *, header: str, extra_lines: list[str] | None
 
 
 def group_message_for(job: dict) -> str:
-    """One job, one short WhatsApp group message."""
-    return _format_job_message(job, header="New job in Saudi")
+    """One job, one short WhatsApp group message.
+
+    The link is the company career page when that was found. Otherwise it is
+    the board listing.
+    """
+    return _format_job_message(job, header="New job in Saudi", prefer_career=True)
 
 
 def message_for(job: dict, match: dict) -> str:
