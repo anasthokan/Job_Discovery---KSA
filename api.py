@@ -47,6 +47,7 @@ from jobscraper.document_convert import (
 from jobscraper.jd_to_cv import JobToCvError, build_cv_from_job
 from jobscraper.ats_boards import ats_boards_status, interval_minutes as ats_boards_interval, sync_ats_boards
 from jobscraper.globaljobs import globaljobs_status, interval_minutes as globaljobs_interval, sync_global_jobs
+from jobscraper.gulfdevjobs import gulfdevjobs_status, interval_minutes as gulfdevjobs_interval, sync_gulf_jobs
 from jobscraper.headcount import headcount_status, interval_minutes as headcount_interval, scheduled as headcount_scheduled, sync_headcount
 from jobscraper.jobspy_source import board_scrape_block
 from jobscraper.sources import (
@@ -284,6 +285,18 @@ def _start_scheduler() -> BackgroundScheduler | None:
             max_instances=1,
             coalesce=True,
             misfire_grace_time=60,
+            next_run_time=datetime.now(tz),
+        )
+    if _truthy("GULFDEVJOBS_ENABLED", "true"):
+        scheduler.add_job(
+            sync_gulf_jobs,
+            "interval",
+            minutes=gulfdevjobs_interval(),
+            id="gulf-dev-jobs",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=300,
             next_run_time=datetime.now(tz),
         )
     if headcount_scheduled():
@@ -1490,6 +1503,7 @@ def health():
             "target": _scrape_target(),
         },
         "globaljobs": globaljobs_status(),
+        "gulfdevjobs": gulfdevjobs_status(),
         "headcount": headcount_status(),
         "ats_boards": ats_boards_status(),
         "inactive_sources": inactive_source_ids(),
@@ -1520,6 +1534,7 @@ def filters():
             "Google Jobs",
             "Bayt",
             "Dev Global Jobs",
+            "Gulf Dev Jobs",
             "Headcount Labs",
             "Greenhouse",
             "Lever",
@@ -1817,6 +1832,7 @@ def scrape_status():
             "platform": _env("SCRAPE_PLATFORM", "All") or "All",
         },
         "globaljobs": globaljobs_status(),
+        "gulfdevjobs": gulfdevjobs_status(),
         "headcount": headcount_status(),
         "ats_boards": ats_boards_status(),
         "inactive_sources": inactive_source_ids(),

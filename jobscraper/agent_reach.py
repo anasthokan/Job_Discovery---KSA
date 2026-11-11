@@ -598,6 +598,7 @@ _BOARD_HOSTS = (
     "news.ycombinator.com",
     "ycombinator.com",
     "devglobaljobs.com",
+    "gulfdevjobs.com",
     "example.com",
 )
 _APPLY_URL_CODE_RE = re.compile(

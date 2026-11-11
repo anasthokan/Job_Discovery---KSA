@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "EzyJob KSA Source Status",
-    "description": "Turn a job source off so the scraper skips it, then turn it back on.\n\nNo auth. Import this collection and set `base_url`.\n\nProduction: https://agentsksa.atozeesolutions.com\nServer local: http://127.0.0.1:9002\n\n`source_id` is `indeed` by default. Other ids: greenhouse, lever, linkedin, workday, yc, google, bayt, smartrecruiters, globaljobs, headcount.\n\nRun the folder from top to bottom. Inactive means the next scrape does not read that source. Jobs already saved stay in the database.\n\nRestart the API after pulling this change, then call List job sources and confirm `success` is true.",
+    "description": "Turn a job source off so the scraper skips it, then turn it back on.\n\nNo auth. Import this collection and set `base_url`.\n\nProduction: https://agentsksa.atozeesolutions.com\nServer local: http://127.0.0.1:9002\n\n`source_id` is `indeed` by default. Other ids: greenhouse, lever, linkedin, workday, yc, google, bayt, smartrecruiters, globaljobs, gulfdevjobs, headcount.\n\nRun the folder from top to bottom. Inactive means the next scrape does not read that source. Jobs already saved stay in the database.\n\nRestart the API after pulling this change, then call List job sources and confirm `success` is true.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [

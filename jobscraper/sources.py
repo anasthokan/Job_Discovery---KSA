@@ -127,6 +127,15 @@ CATALOG = (
         "platform": "Dev Global Jobs",
     },
     {
+        "id": "gulfdevjobs",
+        "name": "Gulf Dev Jobs",
+        "detail": "gulfdevjobs.com",
+        "integration": "Markdown feed",
+        "integrationTone": "pro",
+        "action": "Force Sync",
+        "platform": "Gulf Dev Jobs",
+    },
+    {
         "id": "headcount",
         "name": "Headcount Labs",
         "detail": "api.headcountlabs.com",

@@ -1120,6 +1120,7 @@ def _backfill_company_career_urls(cur) -> None:
         "%google.com%",
         "%ycombinator.com%",
         "%devglobaljobs.com%",
+        "%gulfdevjobs.com%",
         "%example.com%",
     )
     not_board = " AND ".join(["url NOT LIKE %s"] * len(board))
