@@ -124,6 +124,10 @@ DATA_FILE = ROOT / "data" / "jobs.json"
 INDEX_FILE = ROOT / "index.html"
 DASHBOARD_FILE = ROOT / "dashboard.html"
 SCRAPE_LOCK = threading.Lock()
+# Set only after this process has zeroed data/scrape_progress.json for the
+# scrape that currently holds SCRAPE_LOCK. Until then the file still has the
+# previous run, and status must not report those counts.
+_SCRAPE_COUNTS_READY = threading.Event()
 SCRAPE_TIMEOUT = 720
 _LAST_SCRAPE: dict = {"ok": None, "error": None, "count": None, "db_total": None}
 log = logging.getLogger("job-discovery")
@@ -181,6 +185,34 @@ def _store_last_scrape(*, ok: bool, error: str | None, count: int, db_total: int
     _LAST_SCRAPE = {"ok": ok, "error": error, "count": count, "db_total": db_total}
 
 
+def _claim_scrape() -> bool:
+    """Take the scrape lock and hide the previous run's progress counts."""
+    if not SCRAPE_LOCK.acquire(blocking=False):
+        return False
+    _SCRAPE_COUNTS_READY.clear()
+    return True
+
+
+def _arm_scrape_counts() -> None:
+    """Keep a killed run's totals, then zero the progress file for this run.
+
+    The lock is acquired before keyword lookup, which can take a while.
+    Status reads the progress file while the lock is held. Clearing that
+    file here stops the previous run's saved/new/duplicate totals from
+    showing up as this run.
+    """
+    if _SCRAPE_COUNTS_READY.is_set():
+        return
+    partial = read_scrape_progress_stats()
+    close_abandoned_scrape_runs(
+        job_count_value=partial["saved"],
+        new_count=partial["new"],
+        duplicate_count=partial["duplicates"],
+    )
+    reset_scrape_progress()
+    _SCRAPE_COUNTS_READY.set()
+
+
 def _keywords_for_scrape(keywords: str) -> str:
     """Ignore an empty SCRAPE_KEYWORDS value and search the database instead.
 
@@ -199,10 +231,11 @@ def _keywords_for_scrape(keywords: str) -> str:
 
 
 def scheduled_scrape() -> None:
-    if not SCRAPE_LOCK.acquire(blocking=False):
+    if not _claim_scrape():
         log.warning("Scheduled scrape skipped: another scrape is running")
         return
     try:
+        _arm_scrape_counts()
         keywords = _keywords_for_scrape(_env("SCRAPE_KEYWORDS", ""))
         state = _env("SCRAPE_STATE", "All") or "All"
         platform = _env("SCRAPE_PLATFORM", "All") or "All"
@@ -1085,9 +1118,10 @@ def _recommend_payload(
     if refresh:
         terms = _scrape_terms(skills, certifications, experience_titles)
         if terms:
-            if not SCRAPE_LOCK.acquire(blocking=False):
+            if not _claim_scrape():
                 raise HTTPException(status_code=409, detail="A scrape is already running. Try again in a moment.")
             try:
+                _arm_scrape_counts()
                 run_spider(",".join(terms), state, platform, city, _scrape_target())
             except subprocess.TimeoutExpired as exc:
                 raise HTTPException(status_code=504, detail="Job scrape timed out.") from exc
@@ -1213,13 +1247,7 @@ def run_spider(keywords: str, location: str, platform: str, city: str = "", targ
             DATA_FILE.unlink()
         except OSError:
             log.warning("jobs.json is open in another process. This scrape still saves each search to MySQL.")
-    partial = read_scrape_progress_stats()
-    close_abandoned_scrape_runs(
-        job_count_value=partial["saved"],
-        new_count=partial["new"],
-        duplicate_count=partial["duplicates"],
-    )
-    reset_scrape_progress()
+    _arm_scrape_counts()
     # The keyword list is long (every database skill and certification).
     # Passing it on the Windows command line gets cut, so the spider starts
     # with no terms and exits in a couple of seconds with zero jobs.
@@ -1740,7 +1768,7 @@ def scrape_jobs(
     blocked = board_scrape_block(platform)
     if blocked:
         raise HTTPException(status_code=400, detail=blocked)
-    if not SCRAPE_LOCK.acquire(blocking=False):
+    if not _claim_scrape():
         raise HTTPException(status_code=409, detail="A scrape is already running. Try again in a moment.")
     thread = threading.Thread(
         target=_scrape_background,
@@ -1770,6 +1798,7 @@ def scrape_jobs(
 
 def _scrape_background(keywords: str, state: str, platform: str, city: str, target: int = 0) -> None:
     try:
+        _arm_scrape_counts()
         from_database = not (keywords or "").strip()
         keywords = _keywords_for_scrape(keywords)
         if not keywords:
@@ -1801,10 +1830,14 @@ def _scrape_background(keywords: str, state: str, platform: str, city: str, targ
 @app.get("/api/scrape/status")
 def scrape_status():
     # While a scrape is running, saved_so_far is the spider's own total.
-    # When it is idle, report the latest job_discovery_scrape_runs row so
-    # saved_so_far, new_so_far, and duplicates_so_far match that table.
+    # The progress file still holds the previous run until this scrape zeros
+    # it, so those counts stay hidden until then. When the scrape is idle,
+    # report the latest job_discovery_scrape_runs row so saved_so_far,
+    # new_so_far, and duplicates_so_far match that table.
     running = SCRAPE_LOCK.locked()
-    if running:
+    if running and not _SCRAPE_COUNTS_READY.is_set():
+        progress = {"saved": 0, "new": 0, "duplicates": 0}
+    elif running:
         progress = read_scrape_progress_stats()
     else:
         latest = latest_finished_scrape()
