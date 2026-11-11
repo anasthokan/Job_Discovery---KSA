@@ -1264,7 +1264,7 @@ def _fill_short_dice_descriptions() -> tuple[int, int]:
                 f"OR (platform = 'LinkedIn' AND TIME(platform_posted_at) = '00:00:00')"
                 f")"
                 f") OR ("
-                f"platform IN ('Headcount Labs', 'Greenhouse', 'Lever', 'SmartRecruiters', 'Workday') "
+                f"platform IN ('Headcount Labs', 'Greenhouse', 'Lever', 'SmartRecruiters', 'Workday', 'Gulf Dev Jobs') "
                 f"AND (CHAR_LENGTH(description) < 400 OR description = title)"
                 f")"
                 f") "

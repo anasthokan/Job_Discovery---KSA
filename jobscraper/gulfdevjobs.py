@@ -2,8 +2,8 @@
 
 The board publishes each listing page as HTML and the same URL plus ``.md``.
 Saudi jobs are read from /jobs/in/saudi-arabia (about 20 cards per page).
-Full descriptions are loaded from the markdown copy, a few dozen per sync,
-so a first import fills in over later runs without pulling every page at once.
+Each sync loads markdown for every Saudi posting that still has a short
+description, up to the detail budget (enough for the full Saudi list).
 """
 
 from __future__ import annotations
@@ -65,10 +65,10 @@ def interval_minutes() -> int:
 
 def _detail_budget() -> int:
     try:
-        budget = int(_env("GULFDEVJOBS_DETAIL_BUDGET", "60") or "60")
+        budget = int(_env("GULFDEVJOBS_DETAIL_BUDGET", "400") or "400")
     except ValueError:
-        budget = 60
-    return max(0, min(budget, 200))
+        budget = 400
+    return max(0, min(budget, 500))
 
 
 def _max_pages() -> int:
@@ -272,9 +272,13 @@ def _apply_detail(card: dict, markdown: str) -> None:
         lines.append(f"Salary: {salary}")
     if card.get("visa") or "visa sponsorship" in (facts.get("visa") or "").lower():
         lines.append("Mentions visa sponsorship")
-    description = "\n".join(lines)
-    if body:
-        description = f"{description}\n\n{body}".strip() if description else body
+    # Facts alone are not enough for About the Role. Keep the real job body.
+    description = body.strip()
+    if description and lines:
+        description = "\n".join(lines) + "\n\n" + description
+        description = description.strip()
+    elif not description:
+        description = ""
     card["workplace"] = workplace
     card["salary"] = salary
     card["employment_type"] = employment
@@ -283,6 +287,38 @@ def _apply_detail(card: dict, markdown: str) -> None:
         card["posted_label"] = posted.group(1)
     if description:
         card["description"] = description
+
+
+def markdown_url(url: str) -> str:
+    target = (url or "").strip().split("#", 1)[0].split("?", 1)[0].rstrip("/")
+    if not target:
+        return ""
+    if target.endswith(".md"):
+        return target
+    return f"{target}.md"
+
+
+def description_from_markdown(markdown: str) -> str:
+    card: dict = {}
+    _apply_detail(card, markdown or "")
+    return str(card.get("description") or "").strip()
+
+
+def fetch_job_details(url: str) -> dict:
+    """Load one Gulf Dev Jobs posting from its public ``.md`` copy."""
+    target = markdown_url(url)
+    empty = {"description": "", "platform_posted_at": ""}
+    if not target:
+        return empty
+    markdown = _get_text(target)
+    card: dict = {}
+    _apply_detail(card, markdown)
+    posted = _posted_stamp(str(card.get("posted_label") or ""))
+    return {
+        "description": str(card.get("description") or "").strip(),
+        "platform_posted_at": posted,
+        "compensation": str(card.get("salary") or ""),
+    }
 
 
 _WORKPLACE_ONLY = {"on-site", "onsite", "on site", "hybrid", "remote", "fully remote"}
@@ -344,16 +380,9 @@ def _to_job(card: dict) -> dict | None:
     if not location:
         return None
     posted = _posted_stamp(str(card.get("posted_label") or ""))
+    # Leave description empty until markdown is loaded. A short workplace line
+    # makes About the Role look filled when the posting was never opened.
     description = str(card.get("description") or "").strip()
-    if not description:
-        bits = []
-        if card.get("workplace"):
-            bits.append(f"Workplace: {card['workplace']}")
-        if card.get("salary"):
-            bits.append(f"Salary: {card['salary']}")
-        if card.get("visa"):
-            bits.append("Mentions visa sponsorship")
-        description = "\n".join(bits)
     raw = {
         "slug": slug,
         "salary": card.get("salary") or "",
@@ -412,15 +441,17 @@ def pull_records() -> tuple[list[dict], int]:
     cards = list_pages()
     known = _described_ids()
     budget = _detail_budget()
+    pending = [
+        card
+        for card in cards
+        if f"gulfdevjobs-{card.get('id') or card.get('slug')}"[:255] not in known
+    ]
     detailed = 0
-    for card in cards:
+    for card in pending:
         if detailed >= budget:
             break
-        source_id = f"gulfdevjobs-{card.get('id') or card.get('slug')}"[:255]
-        if source_id in known:
-            continue
         try:
-            markdown = _get_text(f"{card['url']}.md")
+            markdown = _get_text(markdown_url(str(card.get("url") or "")))
         except (urllib.error.URLError, TimeoutError, ValueError):
             log.exception("Gulf Dev Jobs detail failed for %s", card.get("slug"))
             continue

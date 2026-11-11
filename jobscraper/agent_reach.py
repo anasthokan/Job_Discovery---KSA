@@ -864,6 +864,13 @@ def fetch_posting_details(platform: str, url: str) -> dict:
         except Exception:
             return {"description": "", "platform_posted_at": "", "supported": True}
         return {"description": text, "platform_posted_at": "", "supported": supported}
+    if name == "Gulf Dev Jobs":
+        from jobscraper.gulfdevjobs import fetch_job_details
+
+        try:
+            return fetch_job_details(target)
+        except Exception:
+            return empty
     if name == "Dice":
         target = dice_detail_url(target)
     if name == "LinkedIn":
