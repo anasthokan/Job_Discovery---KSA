@@ -2,8 +2,10 @@
 
 The board publishes each listing page as HTML and the same URL plus ``.md``.
 Saudi jobs are read from /jobs/in/saudi-arabia (about 20 cards per page).
-Each sync loads markdown for every Saudi posting that still has a short
-description, up to the detail budget (enough for the full Saudi list).
+Listing cards say "2 days ago" or "4 years ago"; the markdown page has the
+calendar date. Each sync keeps the current month only and drops older Gulf
+Dev Jobs rows already stored. The Apply button's redirect is saved as the
+employer career URL.
 """
 
 from __future__ import annotations
@@ -16,8 +18,9 @@ import re
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 log = logging.getLogger("jobscraper.gulfdevjobs")
 
@@ -26,7 +29,15 @@ PLATFORM = "Gulf Dev Jobs"
 _LIST_PATH = "/jobs/in/saudi-arabia"
 _LOCK = threading.Lock()
 _LAST_REQUEST_AT = 0.0
-_LAST: dict = {"ok": None, "saved": 0, "fetched": 0, "detailed": 0, "error": None, "at": None}
+_LAST: dict = {
+    "ok": None,
+    "saved": 0,
+    "fetched": 0,
+    "detailed": 0,
+    "retired": 0,
+    "error": None,
+    "at": None,
+}
 
 _ROW_RE = re.compile(r'<li class="job-row"[\s\S]*?</li>', re.I)
 _SAVE_RE = re.compile(r'data-save-job="([^"]+)"', re.I)
@@ -37,14 +48,29 @@ _SALARY_RE = re.compile(
     r"(?:\s*/\s*(?:year|yr|month|mo|hour|hr|annum))?",
     re.I,
 )
+_RELATIVE_POSTED = (
+    r"today|yesterday|just now|\d+\s+(?:minute|hour|day|week|month|year)s?\s+ago"
+)
 _POSTED_RE = re.compile(
-    r"Posted\s+(today|yesterday|\d{1,2}\s+[A-Za-z]+\s+\d{4})",
+    rf"Posted\s+({_RELATIVE_POSTED}|\d{{1,2}}\s+[A-Za-z]+\s+\d{{4}})",
     re.I,
 )
-_MD_POSTED_RE = re.compile(r"^Posted\s+(\d{1,2}\s+[A-Za-z]+\s+\d{4})", re.M)
+_MD_POSTED_RE = re.compile(
+    rf"^Posted\s+({_RELATIVE_POSTED}|\d{{1,2}}\s+[A-Za-z]+\s+\d{{4}})",
+    re.I | re.M,
+)
 _FACTS_RE = re.compile(r"^## Facts\s*(.*?)(?=^## |\Z)", re.M | re.S)
 _DESCRIPTION_RE = re.compile(r"^## Job description\s*(.*?)(?=^## |\Z)", re.M | re.S)
 _FACT_RE = re.compile(r"^-\s+([^:]+):\s*(.*)$")
+_MONTH_AGO_RE = re.compile(r"\d+\s+months?\s+ago", re.I)
+_YEAR_AGO_RE = re.compile(r"\d+\s+years?\s+ago", re.I)
+_CALENDAR_RE = re.compile(r"\d{1,2}\s+[A-Za-z]+\s+\d{4}")
+_GO_TOKEN_RE = re.compile(r'name="token"\s+value="([^"]+)"', re.I)
+_GO_HREF_RE = re.compile(r'href="/go/([0-9a-f-]{16,})"', re.I)
+# A "1 month ago" or "2 weeks ago" label can still be the current month.
+# Confirm that edge from the posting's calendar date.
+_MONTH_SLACK = timedelta(days=35)
+_EDGE_SLACK = timedelta(days=10)
 
 
 def _env(name: str, default: str) -> str:
@@ -53,14 +79,6 @@ def _env(name: str, default: str) -> str:
 
 def _enabled() -> bool:
     return _env("GULFDEVJOBS_ENABLED", "true").lower() not in {"0", "false", "no", "off"}
-
-
-def interval_minutes() -> int:
-    try:
-        minutes = int(_env("GULFDEVJOBS_INTERVAL_MINUTES", "60") or "60")
-    except ValueError:
-        minutes = 60
-    return max(15, min(minutes, 24 * 60))
 
 
 def _detail_budget() -> int:
@@ -79,6 +97,27 @@ def _max_pages() -> int:
     return max(1, min(pages, 40))
 
 
+def _history_months() -> int:
+    """Whole months before the current one to keep. 0 keeps this month only."""
+    try:
+        months = int(_env("GULFDEVJOBS_HISTORY_MONTHS", "0") or "0")
+    except ValueError:
+        months = 0
+    return max(0, min(months, 24))
+
+
+def oldest_kept(now: datetime | None = None) -> datetime:
+    """First instant still saved. November with no extra history is 1 November."""
+    clock = now or datetime.now(timezone.utc)
+    if clock.tzinfo is None:
+        clock = clock.replace(tzinfo=timezone.utc)
+    else:
+        clock = clock.astimezone(timezone.utc)
+    index = clock.year * 12 + (clock.month - 1) - _history_months()
+    year, month_index = divmod(index, 12)
+    return datetime(year, month_index + 1, 1, tzinfo=timezone.utc)
+
+
 def _gap_seconds() -> float:
     try:
         gap = float(_env("GULFDEVJOBS_REQUEST_GAP_SECONDS", "0.4") or "0.4")
@@ -90,8 +129,10 @@ def _gap_seconds() -> float:
 def gulfdevjobs_status() -> dict:
     return {
         "enabled": _enabled(),
-        "interval_minutes": interval_minutes(),
+        "runs_with_scrape": True,
         "detail_budget": _detail_budget(),
+        "history_months": _history_months(),
+        "oldest_kept": oldest_kept().strftime("%Y-%m-%d"),
         "platform": PLATFORM,
         "attribution": "Source: Gulf Dev Jobs",
         "attribution_url": API_BASE,
@@ -146,14 +187,57 @@ def _posted_stamp(label: str) -> str:
     return absolute_posted_at(text)
 
 
-def _days_ago(posted: str) -> int:
+def _posted_dt(posted: str) -> datetime | None:
     if not posted:
-        return 0
+        return None
     try:
-        stamp = datetime.strptime(posted[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        return datetime.strptime(posted[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
     except ValueError:
+        return None
+
+
+def _days_ago(posted: str) -> int:
+    stamp = _posted_dt(posted)
+    if stamp is None:
         return 0
     return max(0, (datetime.now(timezone.utc) - stamp).days)
+
+
+def _is_recent(posted: str, cutoff: datetime | None = None) -> bool:
+    stamp = _posted_dt(posted)
+    if stamp is None:
+        return False
+    return stamp >= (cutoff or oldest_kept())
+
+
+def _listing_decision(label: str, cutoff: datetime) -> str:
+    """keep, drop, or confirm.
+
+    Day labels inside the month are saved. Year labels are older than the
+    window. A week or month label that might still fall in the current month
+    is confirmed from the markdown calendar date.
+    """
+    text = (label or "").strip()
+    if _YEAR_AGO_RE.search(text):
+        return "drop"
+    stamp = _posted_dt(_posted_stamp(text))
+    if stamp is None:
+        return "confirm"
+    if _MONTH_AGO_RE.search(text):
+        if stamp - _MONTH_SLACK >= cutoff:
+            return "keep"
+        if stamp + _MONTH_SLACK < cutoff:
+            return "drop"
+        return "confirm"
+    if stamp >= cutoff:
+        return "keep"
+    if stamp + _EDGE_SLACK >= cutoff:
+        return "confirm"
+    return "drop"
+
+
+def _source_id(card: dict) -> str:
+    return f"gulfdevjobs-{card.get('id') or card.get('slug')}"[:255]
 
 
 def _has_next(page_html: str, page: int) -> bool:
@@ -205,7 +289,7 @@ def _cards(page_html: str) -> list[dict]:
 
 
 def list_pages() -> list[dict]:
-    """Every Saudi card currently on the board. One HTML request per page."""
+    """Saudi cards from the newest page through the first page that is entirely too old."""
     found: list[dict] = []
     seen: set[str] = set()
     for page in range(1, _max_pages() + 1):
@@ -214,11 +298,16 @@ def list_pages() -> list[dict]:
         batch = _cards(page_html)
         if not batch:
             break
+        page_cards = []
         for card in batch:
             if card["slug"] in seen:
                 continue
             seen.add(card["slug"])
-            found.append(card)
+            page_cards.append(card)
+        found.extend(page_cards)
+        fresh, confirm, _stale = _split_by_age(page_cards)
+        if page_cards and not fresh and not confirm:
+            break
         if not _has_next(page_html, page):
             break
     return found
@@ -304,10 +393,75 @@ def description_from_markdown(markdown: str) -> str:
     return str(card.get("description") or "").strip()
 
 
+def resolve_career_url(job_id: str) -> str:
+    """Follow /go/{id} to the employer posting. The board URL itself is not stored."""
+    from jobscraper.agent_reach import employer_career_url
+
+    posting_id = str(job_id or "").strip()
+    if not posting_id or "/" in posting_id:
+        return ""
+    try:
+        page = _get_text(f"{API_BASE}/go/{posting_id}")
+    except (urllib.error.URLError, TimeoutError, ValueError):
+        log.exception("Gulf Dev Jobs apply page failed for %s", posting_id)
+        return ""
+    token = _GO_TOKEN_RE.search(page or "")
+    if not token:
+        return ""
+    _pace()
+    payload = urllib.parse.urlencode({"token": token.group(1)}).encode()
+    request = urllib.request.Request(
+        f"{API_BASE}/go/{posting_id}",
+        data=payload,
+        headers={
+            "Accept": "text/html",
+            "Content-Type": "application/x-www-form-urlencoded",
+            "User-Agent": "JobDiscoveryKSA/1.0",
+        },
+        method="POST",
+    )
+    opener = urllib.request.build_opener(_StopRedirect())
+    try:
+        with opener.open(request, timeout=25) as response:
+            location = response.geturl()
+    except urllib.error.HTTPError as exc:
+        if exc.code not in {301, 302, 303, 307, 308}:
+            log.warning("Gulf Dev Jobs apply redirect failed for %s (%s)", posting_id, exc.code)
+            return ""
+        location = exc.headers.get("Location") or ""
+    except (urllib.error.URLError, TimeoutError, ValueError):
+        log.exception("Gulf Dev Jobs apply redirect failed for %s", posting_id)
+        return ""
+    if location.startswith("/"):
+        location = f"{API_BASE}{location}"
+    return employer_career_url(location)
+
+
+def career_url_from_posting(url: str) -> str:
+    """Read the Apply button on the public job page and follow it."""
+    target = (url or "").strip()
+    if not target or "gulfdevjobs.com/jobs/" not in target:
+        return ""
+    try:
+        page = _get_text(target)
+    except (urllib.error.URLError, TimeoutError, ValueError):
+        log.exception("Gulf Dev Jobs page failed for career URL %s", target)
+        return ""
+    match = _GO_HREF_RE.search(page or "")
+    if not match:
+        return ""
+    return resolve_career_url(match.group(1))
+
+
+class _StopRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 def fetch_job_details(url: str) -> dict:
     """Load one Gulf Dev Jobs posting from its public ``.md`` copy."""
     target = markdown_url(url)
-    empty = {"description": "", "platform_posted_at": ""}
+    empty = {"description": "", "platform_posted_at": "", "company_career_url": ""}
     if not target:
         return empty
     markdown = _get_text(target)
@@ -318,6 +472,7 @@ def fetch_job_details(url: str) -> dict:
         "description": str(card.get("description") or "").strip(),
         "platform_posted_at": posted,
         "compensation": str(card.get("salary") or ""),
+        "company_career_url": career_url_from_posting(target[:-3] if target.endswith(".md") else target),
     }
 
 
@@ -390,8 +545,11 @@ def _to_job(card: dict) -> dict | None:
         "arabic": card.get("arabic") or "",
         "source": API_BASE,
     }
+    career = str(card.get("career_url") or "").strip()
+    if career:
+        raw["apply_url"] = career
     return {
-        "id": f"gulfdevjobs-{card.get('id') or slug}"[:255],
+        "id": _source_id(card),
         "title": title,
         "company": str(card.get("company") or "Unknown").strip() or "Unknown",
         "skills": [],
@@ -399,6 +557,7 @@ def _to_job(card: dict) -> dict | None:
         "location": location or "Saudi Arabia",
         "platform": PLATFORM,
         "url": str(card.get("url") or f"{API_BASE}/jobs/{slug}"),
+        "company_career_url": career,
         "description": description,
         "compensation": str(card.get("salary") or ""),
         "job_type": str(card.get("employment_type") or ""),
@@ -407,6 +566,33 @@ def _to_job(card: dict) -> dict | None:
         "daysAgo": _days_ago(posted),
         "raw": raw,
     }
+
+
+def _career_ids() -> set[str]:
+    try:
+        from jobscraper.db import JOBS_TABLE, get_conn, mysql_configured
+
+        if not mysql_configured():
+            return set()
+        conn = get_conn()
+        if conn is None:
+            return set()
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT source_id FROM {JOBS_TABLE} "
+                "WHERE platform = %s AND TRIM(company_career_url) <> ''",
+                (PLATFORM,),
+            )
+            rows = cur.fetchall() or []
+    except Exception:
+        log.exception("Could not read stored Gulf Dev Jobs career URLs")
+        return set()
+    found = set()
+    for row in rows:
+        source_id = row.get("source_id") if isinstance(row, dict) else None
+        if source_id:
+            found.add(str(source_id))
+    return found
 
 
 def _described_ids() -> set[str]:
@@ -436,52 +622,134 @@ def _described_ids() -> set[str]:
     return found
 
 
-def pull_records() -> tuple[list[dict], int]:
-    """List Saudi jobs, then load markdown for postings that are still short."""
+def _split_by_age(cards: list[dict]) -> tuple[list[dict], list[dict], list[str]]:
+    """Split cards into save, check-the-calendar-date, and retire."""
+    cutoff = oldest_kept()
+    fresh: list[dict] = []
+    confirm: list[dict] = []
+    stale_ids: list[str] = []
+    for card in cards:
+        decision = _listing_decision(str(card.get("posted_label") or ""), cutoff)
+        if decision == "drop":
+            stale_ids.append(_source_id(card))
+        elif decision == "confirm":
+            confirm.append(card)
+        else:
+            fresh.append(card)
+    return fresh, confirm, stale_ids
+
+
+def _load_detail(card: dict) -> bool:
+    try:
+        markdown = _get_text(markdown_url(str(card.get("url") or "")))
+    except (urllib.error.URLError, TimeoutError, ValueError):
+        log.exception("Gulf Dev Jobs detail failed for %s", card.get("slug"))
+        return False
+    if "## Job description" not in markdown and "## Facts" not in markdown:
+        log.warning("Gulf Dev Jobs markdown missing for %s", card.get("slug"))
+        return False
+    _apply_detail(card, markdown)
+    return True
+
+
+def pull_records() -> tuple[list[dict], int, list[str]]:
+    """List Saudi jobs, then load markdown for recent postings that are still short.
+
+    Year-old cards and month buckets that end before this month are not opened.
+    A label that might still be this month is opened so the calendar date decides.
+    """
     cards = list_pages()
+    fresh, confirm, stale_ids = _split_by_age(cards)
     known = _described_ids()
     budget = _detail_budget()
-    pending = [
-        card
-        for card in cards
-        if f"gulfdevjobs-{card.get('id') or card.get('slug')}"[:255] not in known
-    ]
+    pending = list(confirm)
+    pending.extend(card for card in fresh if _source_id(card) not in known)
     detailed = 0
     for card in pending:
         if detailed >= budget:
             break
-        try:
-            markdown = _get_text(markdown_url(str(card.get("url") or "")))
-        except (urllib.error.URLError, TimeoutError, ValueError):
-            log.exception("Gulf Dev Jobs detail failed for %s", card.get("slug"))
+        if _load_detail(card):
+            detailed += 1
+    cutoff = oldest_kept()
+    filled_career = _career_ids()
+    jobs: list[dict] = []
+    for card in confirm + fresh:
+        label = str(card.get("posted_label") or "")
+        # A month guess such as "2 months ago" must not replace the calendar
+        # date already stored for that posting.
+        if _MONTH_AGO_RE.search(label):
             continue
-        if "## Job description" not in markdown and "## Facts" not in markdown:
-            log.warning("Gulf Dev Jobs markdown missing for %s", card.get("slug"))
+        job = _to_job(card)
+        if not job:
             continue
-        _apply_detail(card, markdown)
-        detailed += 1
-    jobs = [job for job in (_to_job(card) for card in cards) if job]
-    return jobs, detailed
+        posted = str(job.get("posted_at") or "")
+        if _is_recent(posted, cutoff):
+            if _source_id(card) not in filled_career:
+                career = resolve_career_url(str(card.get("id") or ""))
+                if career:
+                    job["company_career_url"] = career
+                    raw = job.get("raw")
+                    if isinstance(raw, dict):
+                        raw["apply_url"] = career
+            jobs.append(job)
+            continue
+        if posted and _CALENDAR_RE.search(label):
+            stale_ids.append(str(job["id"]))
+    return jobs, detailed, stale_ids
+
+
+def _retire_stale(stale_ids: list[str], cutoff: datetime) -> int:
+    """Remove Gulf Dev Jobs rows posted before the history window."""
+    try:
+        from jobscraper.db import JOBS_TABLE, get_conn, mysql_configured
+
+        if not mysql_configured():
+            return 0
+        conn = get_conn()
+        if conn is None:
+            return 0
+        removed = 0
+        unique = list(dict.fromkeys(stale_ids))
+        with conn.cursor() as cur:
+            for start in range(0, len(unique), 100):
+                chunk = unique[start : start + 100]
+                marks = ", ".join(["%s"] * len(chunk))
+                cur.execute(
+                    f"DELETE FROM {JOBS_TABLE} WHERE platform = %s AND source_id IN ({marks})",
+                    [PLATFORM, *chunk],
+                )
+                removed += int(cur.rowcount or 0)
+            cur.execute(
+                f"DELETE FROM {JOBS_TABLE} WHERE platform = %s "
+                "AND platform_posted_at IS NOT NULL AND platform_posted_at < %s",
+                (PLATFORM, cutoff.strftime("%Y-%m-%d %H:%M:%S")),
+            )
+            removed += int(cur.rowcount or 0)
+        return removed
+    except Exception:
+        log.exception("Could not remove old Gulf Dev Jobs rows")
+        return 0
 
 
 def sync_gulf_jobs() -> dict:
-    """Pull Saudi listings and upsert them. Safe to run hourly from the scheduler."""
+    """Pull Saudi listings and upsert them. Called from the main scrape, not its own timer."""
     from jobscraper.sources import is_active, touch_last_sync
 
     if not _enabled():
-        return {"ok": True, "saved": 0, "fetched": 0, "detailed": 0, "skipped": True}
+        return {"ok": True, "saved": 0, "fetched": 0, "detailed": 0, "retired": 0, "skipped": True}
     if not is_active("gulfdevjobs"):
         log.info("Gulf Dev Jobs sync skipped: source is inactive")
-        return {"ok": True, "saved": 0, "fetched": 0, "detailed": 0, "skipped": True}
+        return {"ok": True, "saved": 0, "fetched": 0, "detailed": 0, "retired": 0, "skipped": True}
     if not _LOCK.acquire(blocking=False):
         log.info("Gulf Dev Jobs sync already running")
-        return {"ok": True, "saved": 0, "fetched": 0, "detailed": 0, "skipped": True}
+        return {"ok": True, "saved": 0, "fetched": 0, "detailed": 0, "retired": 0, "skipped": True}
     saved = 0
     fetched = 0
     detailed = 0
+    retired = 0
     try:
         touch_last_sync("gulfdevjobs")
-        jobs, detailed = pull_records()
+        jobs, detailed, stale_ids = pull_records()
         fetched = len(jobs)
         from jobscraper.db import mysql_configured, upsert_jobs
 
@@ -489,18 +757,26 @@ def sync_gulf_jobs() -> dict:
             saved = upsert_jobs(jobs).saved
         elif jobs:
             log.warning("Gulf Dev Jobs fetched %s rows but MySQL is not configured", fetched)
+        retired = _retire_stale(stale_ids, oldest_kept())
         _LAST.update(
             {
                 "ok": True,
                 "saved": saved,
                 "fetched": fetched,
                 "detailed": detailed,
+                "retired": retired,
                 "error": None,
                 "at": datetime.now(timezone.utc).isoformat(),
             }
         )
-        log.info("Gulf Dev Jobs saved %s of %s (%s descriptions)", saved, fetched, detailed)
-        return {"ok": True, "saved": saved, "fetched": fetched, "detailed": detailed}
+        log.info(
+            "Gulf Dev Jobs saved %s of %s (%s descriptions, %s old rows removed)",
+            saved,
+            fetched,
+            detailed,
+            retired,
+        )
+        return {"ok": True, "saved": saved, "fetched": fetched, "detailed": detailed, "retired": retired}
     except Exception as exc:
         _LAST.update(
             {
@@ -508,11 +784,19 @@ def sync_gulf_jobs() -> dict:
                 "saved": saved,
                 "fetched": fetched,
                 "detailed": detailed,
+                "retired": retired,
                 "error": str(exc)[:500],
                 "at": datetime.now(timezone.utc).isoformat(),
             }
         )
         log.exception("Gulf Dev Jobs sync failed")
-        return {"ok": False, "saved": saved, "fetched": fetched, "detailed": detailed, "error": str(exc)[:500]}
+        return {
+            "ok": False,
+            "saved": saved,
+            "fetched": fetched,
+            "detailed": detailed,
+            "retired": retired,
+            "error": str(exc)[:500],
+        }
     finally:
         _LOCK.release()

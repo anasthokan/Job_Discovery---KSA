@@ -47,7 +47,7 @@ from jobscraper.document_convert import (
 from jobscraper.jd_to_cv import JobToCvError, build_cv_from_job
 from jobscraper.ats_boards import ats_boards_status, interval_minutes as ats_boards_interval, sync_ats_boards
 from jobscraper.globaljobs import globaljobs_status, interval_minutes as globaljobs_interval, sync_global_jobs
-from jobscraper.gulfdevjobs import gulfdevjobs_status, interval_minutes as gulfdevjobs_interval, sync_gulf_jobs
+from jobscraper.gulfdevjobs import gulfdevjobs_status, sync_gulf_jobs
 from jobscraper.headcount import headcount_status, interval_minutes as headcount_interval, scheduled as headcount_scheduled, sync_headcount
 from jobscraper.jobspy_source import board_scrape_block
 from jobscraper.sources import (
@@ -319,18 +319,6 @@ def _start_scheduler() -> BackgroundScheduler | None:
             max_instances=1,
             coalesce=True,
             misfire_grace_time=60,
-            next_run_time=datetime.now(tz),
-        )
-    if _truthy("GULFDEVJOBS_ENABLED", "true"):
-        scheduler.add_job(
-            sync_gulf_jobs,
-            "interval",
-            minutes=gulfdevjobs_interval(),
-            id="gulf-dev-jobs",
-            replace_existing=True,
-            max_instances=1,
-            coalesce=True,
-            misfire_grace_time=300,
             next_run_time=datetime.now(tz),
         )
     if headcount_scheduled():
@@ -1254,6 +1242,11 @@ def run_spider(keywords: str, location: str, platform: str, city: str = "", targ
     keyword_file = DATA_FILE.parent / "scrape_keywords.txt"
     keyword_file.write_text(keywords, encoding="utf-8")
     run_id = start_scrape_run(keywords, location, platform)
+    try:
+        result = sync_gulf_jobs()
+        log.info("Gulf Dev Jobs sync during scrape: %s", result)
+    except Exception:
+        log.exception("Gulf Dev Jobs sync failed during scrape")
     cmd = [
         sys.executable,
         "-m",
