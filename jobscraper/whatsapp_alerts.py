@@ -360,7 +360,41 @@ def _attach_career_urls(cur, table: str, rows: list[dict]) -> None:
             if source_id:
                 found[source_id] = str(hit.get("company_career_url") or "")
     for row in rows:
-        row["company_career_url"] = found.get(str(row.get("source_id") or ""), "")
+        source_id = str(row.get("source_id") or "")
+        stored = found.get(source_id, "")
+        # A link saved after this job was queued replaces the listing URL.
+        # An empty column must not wipe an apply link already on the job.
+        if stored:
+            row["company_career_url"] = stored
+
+
+def _ensure_gulf_apply_link(cur, job: dict) -> None:
+    """Follow the Gulf Dev Jobs Apply button when this send still has only the listing."""
+    from jobscraper.agent_reach import employer_career_url
+
+    if employer_career_url(job.get("company_career_url")):
+        return
+    if str(job.get("platform") or "") != "Gulf Dev Jobs":
+        return
+    source_id = str(job.get("source_id") or "")
+    prefix = "gulfdevjobs-"
+    if not source_id.startswith(prefix):
+        return
+    posting_id = source_id[len(prefix) :]
+    if not posting_id or "/" in posting_id:
+        return
+    from jobscraper.db import JOBS_TABLE
+    from jobscraper.gulfdevjobs import resolve_career_url
+
+    career = resolve_career_url(posting_id)
+    if not career:
+        return
+    job["company_career_url"] = career
+    cur.execute(
+        f"UPDATE {JOBS_TABLE} SET company_career_url = %s "
+        f"WHERE source_id = %s AND TRIM(IFNULL(company_career_url, '')) = ''",
+        (career, source_id),
+    )
 
 
 def queue_unsent_group_jobs(limit: int | None = None) -> None:
@@ -1258,11 +1292,21 @@ def _post_new_jobs_to_group(cur, jobs: list[dict]) -> tuple[int, list[dict], boo
     keep_going = False
     index = 0
     try:
+        from jobscraper.db import JOBS_TABLE
+
+        _attach_career_urls(cur, JOBS_TABLE, window)
+    except Exception:
+        log.exception("WhatsApp group could not read company apply links")
+    try:
         for index, job in enumerate(window):
             if not job_is_alertable(job):
                 _record_group_send(cur, channel[:64], job, "skipped")
                 consecutive_fails = 0
                 continue
+            try:
+                _ensure_gulf_apply_link(cur, job)
+            except Exception:
+                log.exception("WhatsApp group could not resolve the company apply link")
             text = group_message_for(job)
             if not text or not _group_message_ok(text):
                 _record_group_send(cur, channel[:64], job, "skipped")
