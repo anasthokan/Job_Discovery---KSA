@@ -125,7 +125,7 @@ class JobsSpider(scrapy.Spider):
 
     name = "jobs"
 
-    def __init__(self, keywords="", keywords_file="", location="All", city="", platform="All", target="0", *args, **kwargs):
+    def __init__(self, keywords="", keywords_file="", location="All", city="", platform="All", target="0", run_id="0", *args, **kwargs):
         super().__init__(*args, **kwargs)
         raw = ""
         if keywords_file:
@@ -143,6 +143,10 @@ class JobsSpider(scrapy.Spider):
             self.target = max(0, int(target or 0))
         except (TypeError, ValueError):
             self.target = 0
+        try:
+            self.run_id = int(run_id or 0) or None
+        except (TypeError, ValueError):
+            self.run_id = None
 
     def _search_queries(self) -> list[str]:
         return list(self.keywords)
@@ -323,16 +327,26 @@ class JobsSpider(scrapy.Spider):
                         reached = True
                         break
                     try:
-                        from jobscraper.db import note_scrape_progress, upsert_jobs
+                        from jobscraper.db import (
+                            note_scrape_progress,
+                            update_running_scrape_counts,
+                            upsert_jobs,
+                        )
 
                         stats = upsert_jobs(batch)
-                        saved += stats.saved
+                        saved += stats.new + stats.duplicates
                         new_total += stats.new
                         duplicate_total += stats.duplicates
                         note_scrape_progress(
                             saved,
                             new=new_total,
                             duplicates=duplicate_total,
+                        )
+                        update_running_scrape_counts(
+                            self.run_id,
+                            job_count_value=saved,
+                            new_count=new_total,
+                            duplicate_count=duplicate_total,
                         )
                         self.logger.info(
                             "Saved %s jobs for %s at %s (running total %s, new %s, duplicates %s)",

@@ -86,6 +86,7 @@ from jobscraper.profile_autofill import autofill_from_parsed
 from jobscraper.resume_enhance import enhance_profile_for_job
 from jobscraper.resume_parser import ResumeParseError, parse_resume_bytes, parse_resume_text
 from jobscraper.db import (
+    balance_scrape_counts,
     close_abandoned_scrape_runs,
     close_conn as close_mysql,
     finish_scrape_run,
@@ -94,6 +95,7 @@ from jobscraper.db import (
     init_db as init_mysql,
     job_count as mysql_job_count,
     last_scrape_meta,
+    current_running_scrape,
     latest_finished_scrape,
     catalog_search_terms,
     load_app_user,
@@ -113,6 +115,7 @@ from jobscraper.db import (
     reset_scrape_progress,
     scrape_run_save_stats,
     start_scrape_run,
+    update_running_scrape_counts,
     start_dice_description_backfill,
     start_startup_maintenance,
     upsert_jobs,
@@ -1263,6 +1266,8 @@ def run_spider(keywords: str, location: str, platform: str, city: str = "", targ
         f"platform={platform}",
         "-a",
         f"target={max(0, int(target or 0))}",
+        "-a",
+        f"run_id={int(run_id or 0)}",
         "-s",
         "LOG_LEVEL=INFO",
     ]
@@ -1826,26 +1831,60 @@ def _scrape_background(keywords: str, state: str, platform: str, city: str, targ
         SCRAPE_LOCK.release()
 
 
+def _counts_from_run(row: dict) -> dict:
+    return {
+        "saved": int(row.get("job_count") or 0),
+        "new": int(row.get("new_count") or 0),
+        "duplicates": int(row.get("duplicate_count") or 0),
+    }
+
+
+def _running_scrape_counts() -> dict:
+    """Counts for the open run. The run row and the progress file stay in step.
+
+    The spider writes both after every search. If the row is still 0 because
+    that write has not landed, the progress file is copied onto the row so
+    Workbench and this response show the same saved, new, and duplicate totals.
+    """
+    file_stats = read_scrape_progress_stats()
+    live = current_running_scrape()
+    if live is None:
+        return file_stats
+    raw = _counts_from_run(live)
+    if raw["saved"] > file_stats["saved"]:
+        chosen = balance_scrape_counts(raw["saved"], raw["new"], raw["duplicates"])
+    else:
+        chosen = file_stats
+    if (chosen["saved"], chosen["new"], chosen["duplicates"]) != (
+        raw["saved"],
+        raw["new"],
+        raw["duplicates"],
+    ):
+        update_running_scrape_counts(
+            live["id"],
+            job_count_value=chosen["saved"],
+            new_count=chosen["new"],
+            duplicate_count=chosen["duplicates"],
+        )
+    return chosen
+
+
 @app.get("/api/scrape/status")
 def scrape_status():
-    # While a scrape is running, saved_so_far is the spider's own total.
-    # The progress file still holds the previous run until this scrape zeros
-    # it, so those counts stay hidden until then. When the scrape is idle,
-    # report the latest job_discovery_scrape_runs row so saved_so_far,
-    # new_so_far, and duplicates_so_far match that table.
+    # saved_so_far, new_so_far, and duplicates_so_far are one total:
+    # saved = new + duplicates. While a scrape is running they are that
+    # run's job_discovery_scrape_runs row. Until the first save, the previous
+    # run's progress file stays hidden. When the scrape is idle, the newest
+    # finished row is the same table the Workbench query shows.
     running = SCRAPE_LOCK.locked()
     if running and not _SCRAPE_COUNTS_READY.is_set():
         progress = {"saved": 0, "new": 0, "duplicates": 0}
     elif running:
-        progress = read_scrape_progress_stats()
+        progress = _running_scrape_counts()
     else:
         latest = latest_finished_scrape()
         if latest and int(latest.get("job_count") or 0) > 0:
-            progress = {
-                "saved": int(latest["job_count"]),
-                "new": int(latest["new_count"] or 0),
-                "duplicates": int(latest["duplicate_count"] or 0),
-            }
+            progress = _counts_from_run(latest)
         else:
             progress = read_scrape_progress_stats()
     return {

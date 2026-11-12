@@ -1738,6 +1738,22 @@ def _chunks(values: list[str], size: int):
         yield values[start : start + size]
 
 
+def _split_new_and_duplicate(
+    rows: list[dict],
+    known_ids: set[str],
+    known_urls: set[str],
+) -> tuple[list[dict], int]:
+    """A listing already stored by source id or URL is a duplicate, not a new job."""
+    fresh: list[dict] = []
+    for row in rows:
+        source_id = str(row.get("source_id") or "")
+        url = str(row.get("url") or "")
+        if (source_id and source_id in known_ids) or (url and url in known_urls):
+            continue
+        fresh.append(row)
+    return fresh, len(rows) - len(fresh)
+
+
 def _known_listings(cur, rows: list[dict]) -> tuple[set[str], set[str]]:
     """Source ids and URLs already stored. A repeat scrape must not alert again."""
     known_ids: set[str] = set()
@@ -1869,14 +1885,13 @@ def upsert_jobs(jobs: list[dict], *, notify: bool = True) -> UpsertStats:
         with _LOCK:
             with conn.cursor() as cur:
                 try:
-                    known_ids, _known_urls = _known_listings(cur, rows)
-                    fresh = [row for row in rows if row["source_id"] not in known_ids]
-                    duplicate_count = len(rows) - len(fresh)
+                    known_ids, known_urls = _known_listings(cur, rows)
+                    fresh, duplicate_count = _split_new_and_duplicate(rows, known_ids, known_urls)
                 except Exception:
                     log.exception("Could not detect new vs duplicate jobs")
-                    # Fail closed for alerts: never treat unknown rows as brand new.
+                    # Fail closed: do not alert, and do not call these rows new.
                     fresh = []
-                    duplicate_count = 0
+                    duplicate_count = len(rows)
                 _default_omitted_columns(cur)
                 company_ids = _company_ids(
                     cur,
@@ -1924,7 +1939,8 @@ def upsert_jobs(jobs: list[dict], *, notify: bool = True) -> UpsertStats:
         except Exception:
             log.exception("Could not queue WhatsApp alerts")
     saved = len(rows)
-    new_count = max(0, saved - duplicate_count)
+    duplicate_count = min(max(0, duplicate_count), saved)
+    new_count = saved - duplicate_count
     return UpsertStats(saved=saved, new=new_count, duplicates=duplicate_count)
 
 
@@ -3720,6 +3736,31 @@ def _scrape_progress_path() -> Path:
     return _ROOT / "data" / "scrape_progress.json"
 
 
+def balance_scrape_counts(saved, new, duplicates) -> dict:
+    """saved, new, and duplicates are one total: saved = new + duplicates.
+
+    A listing counted in saved but missing from the split is a duplicate.
+    Calling it new would send a repeat job out as a first-time alert.
+    """
+    try:
+        saved_n = max(0, int(saved or 0))
+    except (TypeError, ValueError):
+        saved_n = 0
+    try:
+        new_n = max(0, int(new or 0))
+    except (TypeError, ValueError):
+        new_n = 0
+    try:
+        dup_n = max(0, int(duplicates or 0))
+    except (TypeError, ValueError):
+        dup_n = 0
+    if new_n + dup_n < saved_n:
+        dup_n += saved_n - (new_n + dup_n)
+    elif new_n + dup_n > saved_n:
+        saved_n = new_n + dup_n
+    return {"saved": saved_n, "new": new_n, "duplicates": dup_n}
+
+
 def reset_scrape_progress() -> None:
     path = _scrape_progress_path()
     path.parent.mkdir(exist_ok=True)
@@ -3734,12 +3775,12 @@ def note_scrape_progress(
 ) -> None:
     path = _scrape_progress_path()
     path.parent.mkdir(exist_ok=True)
-    current = read_scrape_progress_stats()
-    payload = {
-        "saved": int(saved),
-        "new": int(current["new"] if new is None else new),
-        "duplicates": int(current["duplicates"] if duplicates is None else duplicates),
-    }
+    current = _read_scrape_progress_raw()
+    payload = balance_scrape_counts(
+        saved,
+        current["new"] if new is None else new,
+        current["duplicates"] if duplicates is None else duplicates,
+    )
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
@@ -3747,7 +3788,7 @@ def read_scrape_progress() -> int:
     return int(read_scrape_progress_stats()["saved"])
 
 
-def read_scrape_progress_stats() -> dict:
+def _read_scrape_progress_raw() -> dict:
     empty = {"saved": 0, "new": 0, "duplicates": 0}
     try:
         payload = json.loads(_scrape_progress_path().read_text(encoding="utf-8"))
@@ -3758,6 +3799,11 @@ def read_scrape_progress_stats() -> dict:
         }
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
         return empty
+
+
+def read_scrape_progress_stats() -> dict:
+    current = _read_scrape_progress_raw()
+    return balance_scrape_counts(current["saved"], current["new"], current["duplicates"])
 
 
 def close_abandoned_scrape_runs(
@@ -3776,9 +3822,10 @@ def close_abandoned_scrape_runs(
     """
     if not mysql_configured():
         return 0
-    job_count_value = max(0, int(job_count_value or 0))
-    new_count = max(0, int(new_count or 0))
-    duplicate_count = max(0, int(duplicate_count or 0))
+    counts = balance_scrape_counts(job_count_value, new_count, duplicate_count)
+    job_count_value = counts["saved"]
+    new_count = counts["new"]
+    duplicate_count = counts["duplicates"]
     try:
         conn = get_conn()
         if conn is None:
@@ -3865,6 +3912,10 @@ def finish_scrape_run(
     if new_count + duplicate_count == 0 and job_count_value:
         # Older callers only pass the total; keep columns consistent.
         new_count = job_count_value
+    counts = balance_scrape_counts(job_count_value, new_count, duplicate_count)
+    job_count_value = counts["saved"]
+    new_count = counts["new"]
+    duplicate_count = counts["duplicates"]
     try:
         conn = get_conn()
         if conn is None:
@@ -3937,6 +3988,73 @@ def scrape_run_save_stats(run_id: int | None = None) -> dict | None:
         }
     except Exception:
         log.exception("Could not count new vs duplicate jobs for this scrape")
+        close_conn()
+        return None
+
+
+def update_running_scrape_counts(
+    run_id: int | None,
+    *,
+    job_count_value: int,
+    new_count: int,
+    duplicate_count: int,
+) -> None:
+    """Write this run's saved/new/duplicate totals while it is still open.
+
+    The row used to stay at 0 until the scrape finished, so Workbench and
+    GET /api/scrape/status showed different numbers for the same run.
+    """
+    if not run_id or not mysql_configured():
+        return
+    counts = balance_scrape_counts(job_count_value, new_count, duplicate_count)
+    try:
+        conn = get_conn()
+        if conn is None:
+            return
+        with conn.cursor() as cur:
+            _ensure_run_columns(cur)
+            cur.execute(
+                f"UPDATE {RUNS_TABLE} SET job_count = %s, new_count = %s, duplicate_count = %s "
+                "WHERE id = %s AND finished_at IS NULL",
+                (
+                    counts["saved"],
+                    counts["new"],
+                    counts["duplicates"],
+                    int(run_id),
+                ),
+            )
+    except Exception:
+        log.exception("Could not update the running scrape counts")
+        close_conn()
+
+
+def current_running_scrape() -> dict | None:
+    """Newest job_discovery_scrape_runs row that is still open."""
+    if not mysql_configured():
+        return None
+    try:
+        conn = get_conn()
+        if conn is None:
+            return None
+        with conn.cursor() as cur:
+            _ensure_run_columns(cur)
+            cur.execute(
+                f"SELECT id, job_count, new_count, duplicate_count, status FROM {RUNS_TABLE} "
+                "WHERE status = 'running' AND finished_at IS NULL "
+                "ORDER BY id DESC LIMIT 1"
+            )
+            row = cur.fetchone()
+        if not row:
+            return None
+        return {
+            "id": int(row["id"]),
+            "job_count": int(row.get("job_count") or 0),
+            "new_count": int(row.get("new_count") or 0),
+            "duplicate_count": int(row.get("duplicate_count") or 0),
+            "status": row.get("status"),
+        }
+    except Exception:
+        log.exception("Could not read the running scrape")
         close_conn()
         return None
 
