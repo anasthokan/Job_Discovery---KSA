@@ -9,7 +9,6 @@ import threading
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -1383,13 +1382,27 @@ def _swap_extension(filename: str, extension: str) -> str:
     return f"{stem}{extension}"
 
 
+def _download_filename(filename: str, media_type: str) -> str:
+    """Short ASCII name that always keeps the real extension. Postman drops .pdf on the long filename* form."""
+    if media_type == PDF_TYPE:
+        extension = ".pdf"
+    elif media_type == DOCX_TYPE:
+        extension = ".docx"
+    else:
+        suffix = Path(filename or "").suffix.lower()
+        extension = suffix if re.fullmatch(r"\.[a-z0-9]{1,5}", suffix or "") else ""
+    stem = re.sub(r"[^A-Za-z0-9_-]+", "_", Path(filename or "resume").stem).strip("_")[:40] or "resume"
+    return f"{stem}{extension}"
+
+
 def _file_download(content: bytes, filename: str, media_type: str) -> Response:
-    encoded = quote(filename)
+    safe = _download_filename(filename, media_type)
     return Response(
         content=content,
         media_type=media_type,
         headers={
-            "Content-Disposition": f"attachment; filename=\"{filename}\"; filename*=UTF-8''{encoded}",
+            "Content-Disposition": f'attachment; filename="{safe}"',
+            "X-Content-Type-Options": "nosniff",
         },
     )
 
@@ -2464,18 +2477,9 @@ def _job_for_enhance(job_id: str) -> dict:
     raise HTTPException(status_code=404, detail=f"No job found for id '{ref}'.")
 
 
-def _enhanced_filename(profile: dict, job: dict, extension: str, cv_text: str = "") -> str:
-    who = ""
-    for line in (cv_text or "").splitlines()[:4]:
-        cleaned = line.strip()
-        if cleaned and len(cleaned.split()) <= 5 and "@" not in cleaned and not cleaned.isupper():
-            who = cleaned
-            break
-    if not who:
-        who = " ".join(part for part in (profile.get("first_name"), profile.get("last_name")) if part).strip() or "resume"
-    role = str(job.get("title") or "job")
-    stem = re.sub(r"[^\w.\-]+", "_", f"{who}_{role}").strip("._")[:80] or "resume"
-    return f"{stem}_enhanced.{extension}"
+def _enhanced_filename(job: dict, extension: str) -> str:
+    role = re.sub(r"[^A-Za-z0-9]+", "_", str(job.get("title") or "resume")).strip("_")[:40] or "resume"
+    return f"{role}_enhanced.{extension}"
 
 
 @app.post(
@@ -2515,7 +2519,7 @@ def enhance_user_resume(
         raise HTTPException(status_code=status, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Resume enhance failed: {exc}") from exc
-    return _file_download(content, _enhanced_filename(profile, job, fmt, cv_text), media)
+    return _file_download(content, _enhanced_filename(job, fmt), media)
 
 
 class ProfileJob(BaseModel):
