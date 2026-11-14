@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
 
 from jobscraper.jd_to_cv import JobToCvError, build_cv_from_job, render_cv_text
+from jobscraper.ollama_resume import OllamaError, ollama_enabled, rewrite_resume
 from jobscraper.resume_parser import ResumeParseError, parse_resume_text
+
+log = logging.getLogger("job-discovery")
 
 
 _HEADING_LABELS = (
@@ -51,7 +55,8 @@ _ROLE_RE = re.compile(
 
 def enhance_profile_for_job(profile: dict[str, Any], job: dict[str, Any] | None = None) -> dict[str, Any]:
     """Keep every original resume section, then aim that same content at the job."""
-    document = tailor_document_for_job(compose_resume_document(profile), job or {})
+    base = compose_resume_document(profile)
+    document, mode = _aim_document_at_job(base, job or {})
     if len(document.strip()) < 40:
         raise JobToCvError("This user has no resume or profile content to download.")
     resume = resume_from_profile({**profile, "resume_text": document, "resume_document": document})
@@ -79,7 +84,7 @@ def enhance_profile_for_job(profile: dict[str, Any], job: dict[str, Any] | None 
             pass
     return {
         "ok": True,
-        "mode": "profile",
+        "mode": mode,
         "job": {
             "title": job.get("title"),
             "company": job.get("company"),
@@ -214,6 +219,126 @@ _TAILOR_STOP = {
     "role", "job", "team", "work", "using", "have", "will", "are", "was",
     "senior", "junior", "level", "years", "year", "experience",
 }
+
+
+def _aim_document_at_job(document: str, job: dict[str, Any]) -> tuple[str, str]:
+    """Prefer a local Ollama rewrite from the job title and description."""
+    rewritten = _tailor_with_ollama(document, job)
+    if rewritten:
+        return rewritten, "ollama"
+    return tailor_document_for_job(document, job), "profile"
+
+
+def _tailor_with_ollama(document: str, job: dict[str, Any]) -> str:
+    if not ollama_enabled() or len((document or "").strip()) < 40 or not job:
+        return ""
+    if not (str(job.get("title") or "").strip() or str(job.get("description") or "").strip()):
+        return ""
+    try:
+        raw = rewrite_resume(document, job)
+    except OllamaError as exc:
+        log.warning("Ollama resume enhance skipped: %s", exc)
+        return ""
+    except Exception as exc:
+        log.warning("Ollama resume enhance failed: %s", exc)
+        return ""
+    accepted = _accept_ollama_resume(document, raw, job)
+    if not accepted:
+        log.warning("Ollama resume enhance was rejected; using keyword alignment")
+        return ""
+    return accepted
+
+
+_COMMENTARY_RE = re.compile(
+    r"(?i)^(here is|here's|sure[,.]|tailored resume|updated resume|rewritten resume|the (?:tailored|updated) resume)\b"
+)
+_EXPERIENCE_HEADINGS = {"PROFESSIONAL EXPERIENCE", "EXPERIENCE", "WORK EXPERIENCE", "WORK HISTORY"}
+
+
+def _accept_ollama_resume(original: str, raw: str, job: dict[str, Any]) -> str:
+    """Keep the real header and sections. Drop a rewrite that invents skills or loses the career history."""
+    cleaned = _clean_model_text(raw)
+    if len(cleaned) < 40:
+        return ""
+    header, _body = _header_and_body(original.strip())
+    _new_header, new_body = _header_and_body(cleaned)
+    if not new_body:
+        return ""
+    merged = "\n".join([line for line in header if line.strip()] + [""] + new_body).strip()
+    restored = _restore_missing_sections(merged, original)
+    if restored is None or not _rewrite_keeps_facts(original, restored, job):
+        return ""
+    return restored.strip() + "\n"
+
+
+def _clean_model_text(raw: str) -> str:
+    text = (raw or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    text = re.sub(r"(?is)<think>.*?</think>", "", text).strip()
+    text = re.sub(r"^```[a-zA-Z0-9]*\n", "", text)
+    text = re.sub(r"\n```$", "", text).strip()
+    lines = [line.rstrip() for line in text.splitlines()]
+    while lines and (not lines[0].strip() or _COMMENTARY_RE.match(lines[0].strip())):
+        lines.pop(0)
+    return "\n".join(lines).strip()
+
+
+def _header_and_body(text: str) -> tuple[list[str], list[str]]:
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if _HEADING_LINE_RE.match(line.strip()):
+            return lines[:index], lines[index:]
+    return lines, []
+
+
+def _restore_missing_sections(merged: str, original: str) -> str | None:
+    """Put back any section the model dropped. A missing work history means the rewrite is unusable."""
+    present = {line.strip().upper() for line in merged.splitlines() if _HEADING_LINE_RE.match(line.strip())}
+    extra: list[str] = []
+    for heading, body in _split_resume_sections(original):
+        if not heading or heading.upper() in present:
+            continue
+        if heading.upper() in _EXPERIENCE_HEADINGS:
+            return None
+        extra.extend(["", heading, *body])
+    if not extra:
+        return merged
+    return merged.rstrip() + "\n" + "\n".join(extra).strip() + "\n"
+
+
+def _dated_years(text: str) -> set[str]:
+    """Years that sit on a role date line, not a year mentioned only in prose."""
+    years: set[str] = set()
+    for line in (text or "").splitlines():
+        if not re.search(
+            r"(?i)\b(?:19|20)\d{2}\s*[-–—/]\s*(?:present|current|now|(?:19|20)\d{2})\b",
+            line,
+        ):
+            continue
+        years.update(re.findall(r"\b(?:19|20)\d{2}\b", line))
+    return years
+
+
+def _rewrite_keeps_facts(original: str, rewritten: str, job: dict[str, Any]) -> bool:
+    original_len = len(original.strip())
+    rewritten_len = len(rewritten.strip())
+    if rewritten_len < max(200, int(original_len * 0.45)):
+        return False
+    if rewritten_len > int(original_len * 2.4) + 400:
+        return False
+    dated_years = _dated_years(original)
+    if dated_years and any(year not in rewritten for year in dated_years):
+        return False
+    original_l = original.lower()
+    rewritten_l = rewritten.lower()
+    title = str(job.get("title") or "").strip().lower()
+    company = str(job.get("company") or "").strip().lower()
+    for skill in job.get("skills") or []:
+        key = re.sub(r"\s+", " ", str(skill or "")).strip().lower()
+        if len(key) < 3 or key in {title, company} or key in original_l:
+            continue
+        if key in rewritten_l:
+            return False
+    return True
 
 
 def tailor_document_for_job(document: str, job: dict[str, Any]) -> str:

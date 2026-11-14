@@ -83,6 +83,7 @@ from jobscraper.recommend import (
 from jobscraper.score_config import score_config
 from jobscraper.linkedin_profile import LinkedInProfileError, autofill_from_linkedin
 from jobscraper.profile_autofill import autofill_from_parsed
+from jobscraper.ollama_resume import ollama_status
 from jobscraper.resume_enhance import enhance_profile_for_job
 from jobscraper.resume_parser import ResumeParseError, parse_resume_bytes, parse_resume_text
 from jobscraper.db import (
@@ -1521,6 +1522,7 @@ def health():
         "ats_score": True,
         "cv_from_job": True,
         "resume_enhance": True,
+        "ollama": ollama_status(),
         "pdf_docx_convert": True,
         "resume_formats": ["pdf", "docx", "txt"],
         "mysql": mysql,
@@ -2478,14 +2480,14 @@ def _enhanced_filename(profile: dict, job: dict, extension: str, cv_text: str = 
 
 @app.post(
     "/api/resume/enhance",
-    summary="Download the user's resume, kept intact and aimed at one job",
+    summary="Download the user's resume, rewritten with Ollama for this job title and description",
     response_class=Response,
 )
 def enhance_user_resume(
     body: ResumeEnhanceRequest,
     file_format: str = Query("pdf", alias="format", description="Download format: pdf or docx"),
 ):
-    """Keeps every section of the saved resume and aims that same content at the job."""
+    """Rewrites the saved resume with the local Ollama model so it targets this job title and description."""
     fmt = (file_format or "pdf").strip().lower()
     if fmt not in {"pdf", "docx"}:
         raise HTTPException(status_code=400, detail="format must be pdf or docx.")
