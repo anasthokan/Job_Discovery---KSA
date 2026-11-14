@@ -35,18 +35,17 @@ _SKIP_MODEL = ("embed", "vision", "llava", "bert")
 _STATUS_CACHE: dict = {"at": 0.0, "value": None}
 _MODEL_CACHE: dict = {"at": 0.0, "name": ""}
 
-_SYSTEM = """You rewrite a resume so it reads as a fit for one specific job.
+_SYSTEM = """You write the professional summary for one existing resume.
 Use only facts already written in the resume.
 
 Rules:
-- Do not add employers, job titles, dates, degrees, certifications, tools, or achievements that are not in the resume.
-- Do not add a skill from the job unless that exact skill already appears in the resume.
-- Keep the same section headings. Put each heading on its own line in CAPITAL LETTERS.
-- Keep every role, date, school, and certification.
-- Rewrite the professional summary so it targets the job title, using only overlap already in the resume.
-- Rewrite experience bullets so the wording matches the job description where the resume already shows that work. Start each bullet with "- ".
-- Keep the opening name and contact lines unchanged.
-- Reply with the resume only. No markdown, no commentary, no code fences.
+- Return one paragraph of 5 or 6 sentences. No heading, no bullets, no markdown.
+- Write in the resume's voice: third person, not "I".
+- Open with the person's real seniority, years, and domain from the resume.
+- Aim the paragraph at the target job title, using only overlap the resume already shows.
+- Keep real numbers, employers, and products that support that overlap.
+- Do not add employers, dates, degrees, certifications, tools, or achievements that are not in the resume.
+- Do not say the person already works at the target company.
 """
 
 
@@ -74,15 +73,13 @@ def ollama_status() -> dict:
     return status
 
 
-def rewrite_resume(resume: str, job: dict) -> str:
-    """Ask Ollama for a full resume aimed at this job title and description."""
+def rewrite_summary(resume: str, job: dict) -> str:
+    """Ask Ollama for a job-targeted summary paragraph. The rest of the resume stays untouched."""
     if not ollama_enabled():
         raise OllamaError("Ollama resume enhance is turned off")
     text = (resume or "").strip()
     if len(text) < 40:
         raise OllamaError("Resume is too short to enhance")
-    if len(text) > 12000:
-        raise OllamaError("Resume is too long for one Ollama pass")
     title = str(job.get("title") or "").strip()
     description = _clip_description(str(job.get("description") or ""))
     if not title and not description:
@@ -93,16 +90,16 @@ def rewrite_resume(resume: str, job: dict) -> str:
         "stream": False,
         "messages": [
             {"role": "system", "content": _SYSTEM},
-            {"role": "user", "content": _user_prompt(text, job, title, description)},
+            {"role": "user", "content": _user_prompt(text[:12000], job, title, description)},
         ],
-        "options": {"temperature": 0.2, "num_ctx": 8192, "num_predict": 4096},
+        "options": {"temperature": 0.3, "num_ctx": 8192, "num_predict": 500},
     }
     parsed = _request("/api/chat", payload, _timeout())
     message = parsed.get("message") or {}
-    content = _strip_think(str(message.get("content") or ""))
-    if len(content) < 40:
-        raise OllamaError("Ollama returned an empty resume")
-    log.info("Ollama enhanced resume with model %s for %s", model, title or "untitled job")
+    content = _one_paragraph(_strip_think(str(message.get("content") or "")))
+    if len(content) < 80:
+        raise OllamaError("Ollama returned an empty summary")
+    log.info("Ollama wrote a summary with model %s for %s", model, title or "untitled job")
     return content
 
 
@@ -256,6 +253,14 @@ def _skill_names(value) -> list[str]:
         seen.add(key)
         names.append(text)
     return names
+
+
+def _one_paragraph(text: str) -> str:
+    cleaned = _strip_think(text)
+    cleaned = re.sub(r"^```[a-zA-Z0-9]*\n|\n```$", "", cleaned).strip()
+    cleaned = re.sub(r"(?i)^(professional summary|summary|here is|here's)\s*:?\s*", "", cleaned).strip()
+    lines = [re.sub(r"^[\-•]\s*", "", line).strip() for line in cleaned.splitlines() if line.strip()]
+    return re.sub(r"\s+", " ", " ".join(lines)).strip()
 
 
 def _strip_think(text: str) -> str:

@@ -83,7 +83,7 @@ from jobscraper.score_config import score_config
 from jobscraper.linkedin_profile import LinkedInProfileError, autofill_from_linkedin
 from jobscraper.profile_autofill import autofill_from_parsed
 from jobscraper.ollama_resume import ollama_status
-from jobscraper.resume_enhance import enhance_profile_for_job
+from jobscraper.resume_enhance import enhance_profile_for_job, resume_text_rank
 from jobscraper.resume_parser import ResumeParseError, parse_resume_bytes, parse_resume_text
 from jobscraper.db import (
     balance_scrape_counts,
@@ -2501,9 +2501,10 @@ def enhance_user_resume(
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Could not load resume file: {exc}") from exc
     if stored and stored.get("text"):
+        file_text = str(stored.get("text") or "")
         existing = str(profile.get("resume_document") or "")
-        if len(str(stored.get("text") or "")) >= len(existing):
-            profile = {**profile, "resume_document": stored.get("text")}
+        if resume_text_rank(file_text) >= resume_text_rank(existing):
+            profile = {**profile, "resume_document": file_text}
     job = _job_for_enhance(body.job_id)
     try:
         built = enhance_profile_for_job(profile, job)

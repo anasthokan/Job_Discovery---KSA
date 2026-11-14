@@ -7,7 +7,7 @@ import re
 from typing import Any
 
 from jobscraper.jd_to_cv import JobToCvError, build_cv_from_job, render_cv_text
-from jobscraper.ollama_resume import OllamaError, ollama_enabled, rewrite_resume
+from jobscraper.ollama_resume import OllamaError, ollama_enabled, rewrite_summary
 from jobscraper.resume_parser import ResumeParseError, parse_resume_text
 
 log = logging.getLogger("job-discovery")
@@ -55,7 +55,7 @@ _ROLE_RE = re.compile(
 
 def enhance_profile_for_job(profile: dict[str, Any], job: dict[str, Any] | None = None) -> dict[str, Any]:
     """Keep every original resume section, then aim that same content at the job."""
-    base = compose_resume_document(profile)
+    base = _with_real_name(compose_resume_document(profile), profile)
     document, mode = _aim_document_at_job(base, job or {})
     if len(document.strip()) < 40:
         raise JobToCvError("This user has no resume or profile content to download.")
@@ -221,32 +221,109 @@ _TAILOR_STOP = {
 }
 
 
+def resume_text_rank(text: str) -> tuple[int, int, int]:
+    """Richer resumes sort first: more section headings, then named sections, then length."""
+    return (_heading_count(text), 1 if _has_named_sections(text) else 0, len(text or ""))
+
+
 def _aim_document_at_job(document: str, job: dict[str, Any]) -> tuple[str, str]:
-    """Prefer a local Ollama rewrite from the job title and description."""
-    rewritten = _tailor_with_ollama(document, job)
-    if rewritten:
-        return rewritten, "ollama"
+    """Keep the original resume and replace only the summary with a job-targeted paragraph."""
+    summary = _summary_from_ollama(document, job)
+    if summary:
+        return _replace_summary_section(document, summary), "ollama"
     return tailor_document_for_job(document, job), "profile"
 
 
-def _tailor_with_ollama(document: str, job: dict[str, Any]) -> str:
+def _summary_from_ollama(document: str, job: dict[str, Any]) -> str:
     if not ollama_enabled() or len((document or "").strip()) < 40 or not job:
         return ""
     if not (str(job.get("title") or "").strip() or str(job.get("description") or "").strip()):
         return ""
     try:
-        raw = rewrite_resume(document, job)
+        summary = rewrite_summary(document, job)
     except OllamaError as exc:
         log.warning("Ollama resume enhance skipped: %s", exc)
         return ""
     except Exception as exc:
         log.warning("Ollama resume enhance failed: %s", exc)
         return ""
-    accepted = _accept_ollama_resume(document, raw, job)
-    if not accepted:
-        log.warning("Ollama resume enhance was rejected; using keyword alignment")
+    if not _summary_is_grounded(summary, document, job):
+        log.warning("Ollama summary was rejected; keeping the original resume sections")
         return ""
-    return accepted
+    return summary
+
+
+_SUMMARY_HEADINGS = {"PROFESSIONAL SUMMARY", "SUMMARY", "CAREER OBJECTIVE", "OBJECTIVE"}
+_NAME_BLOCK = {
+    "plan", "credits", "monthly", "free", "pro", "profile", "resume", "cv",
+    "team", "lead", "leader", "manager", "head", "senior", "junior", "director",
+    "engineer", "product", "specialist", "officer", "consultant", "analyst",
+    "intern", "developer", "architect", "riyadh", "jeddah", "dammam", "khobar",
+}
+
+
+def _with_real_name(document: str, profile: dict[str, Any]) -> str:
+    """Put the person's name and headline back when a job title was used as the name."""
+    lines = [line for line in (document or "").splitlines()]
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    if not lines:
+        return document
+    name = (
+        _usable_person_name(_join_name(profile.get("first_name"), profile.get("last_name")) or "")
+        or _name_from_text(document)
+    )
+    if name and not _usable_person_name(lines[0]):
+        if _source_contact_line(lines[0]) or _HEADING_LINE_RE.match(lines[0].strip()):
+            lines.insert(0, name)
+        else:
+            lines[0] = name
+    headline = _usable_headline(str(profile.get("headline") or ""))
+    opening = "\n".join(lines[:8]).lower()
+    if headline and headline.lower() not in opening:
+        lines.insert(1, headline)
+    return "\n".join(lines).strip() + "\n"
+
+
+def _replace_summary_section(document: str, summary: str) -> str:
+    paragraph = re.sub(r"\s+", " ", summary).strip()
+    pieces = _split_resume_sections(document)
+    if not any(heading.upper() in _SUMMARY_HEADINGS for heading, _body in pieces):
+        header, body = _header_and_body(document)
+        lines = [line for line in header if line.strip()]
+        lines.extend(["", "PROFESSIONAL SUMMARY", paragraph, ""])
+        lines.extend(body)
+        return "\n".join(lines).strip() + "\n"
+    output: list[str] = []
+    for heading, body in pieces:
+        if heading.upper() in _SUMMARY_HEADINGS:
+            output.extend([heading, paragraph, ""])
+            continue
+        if heading:
+            output.append(heading)
+        output.extend(body)
+    return "\n".join(output).strip() + "\n"
+
+
+def _summary_is_grounded(summary: str, document: str, job: dict[str, Any]) -> bool:
+    text = re.sub(r"\s+", " ", summary or "").strip()
+    if not (250 <= len(text) <= 1100):
+        return False
+    if _HEADING_LINE_RE.search(text) or text.startswith(("-", "•")):
+        return False
+    original = document.lower()
+    title = str(job.get("title") or "").strip().lower()
+    company = str(job.get("company") or "").strip().lower()
+    title_words = set(re.findall(r"[a-z0-9]+", title))
+    for skill in job.get("skills") or []:
+        key = re.sub(r"\s+", " ", str(skill or "")).strip().lower()
+        if len(key) < 3 or key in {title, company} or key in original:
+            continue
+        if title_words and all(word in title_words for word in re.findall(r"[a-z0-9]+", key)):
+            continue
+        if key in text.lower():
+            return False
+    return True
 
 
 _COMMENTARY_RE = re.compile(
@@ -742,8 +819,7 @@ def _usable_person_name(value: str) -> str:
     words = text.split()
     if not (2 <= len(words) <= 4):
         return ""
-    blocked = {"plan", "credits", "monthly", "free", "pro", "profile", "resume", "cv"}
-    if any(word.lower().strip(".") in blocked for word in words):
+    if any(word.lower().strip(".") in _NAME_BLOCK for word in words):
         return ""
     if not all(re.fullmatch(r"[A-Za-z][A-Za-z.'\-]*", word) for word in words):
         return ""
