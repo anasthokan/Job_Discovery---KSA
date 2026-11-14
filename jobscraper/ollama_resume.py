@@ -35,17 +35,15 @@ _SKIP_MODEL = ("embed", "vision", "llava", "bert")
 _STATUS_CACHE: dict = {"at": 0.0, "value": None}
 _MODEL_CACHE: dict = {"at": 0.0, "name": ""}
 
-_SYSTEM = """You write the professional summary for one existing resume.
-Use only facts already written in the resume.
+_SYSTEM = """You tailor one existing resume to a job. Use only facts already written in the resume.
 
-Rules:
-- Return one paragraph of 5 or 6 sentences. No heading, no bullets, no markdown.
-- Write in the resume's voice: third person, not "I".
-- Open with the person's real seniority, years, and domain from the resume.
-- Aim the paragraph at the target job title, using only overlap the resume already shows.
-- Keep real numbers, employers, and products that support that overlap.
-- Do not add employers, dates, degrees, certifications, tools, or achievements that are not in the resume.
-- Do not say the person already works at the target company.
+Return exactly this shape:
+
+SUMMARY:
+One paragraph of 5 or 6 sentences. Third person, no bullets. Open with the person's real seniority and domain. Aim it at the target job title. You may name that job title. Do not add employers, degrees, certifications, or tools that are not in the resume.
+
+BULLETS:
+Rewrite every experience bullet so the wording fits the job. Keep the same facts, numbers, employers, and order. One bullet per line, each starting with "- ". Do not add or remove bullets.
 """
 
 
@@ -73,8 +71,8 @@ def ollama_status() -> dict:
     return status
 
 
-def rewrite_summary(resume: str, job: dict) -> str:
-    """Ask Ollama for a job-targeted summary paragraph. The rest of the resume stays untouched."""
+def rewrite_for_job(resume: str, job: dict) -> tuple[str, list[str]]:
+    """Ask Ollama for a targeted summary and rewritten experience bullets."""
     if not ollama_enabled():
         raise OllamaError("Ollama resume enhance is turned off")
     text = (resume or "").strip()
@@ -92,15 +90,15 @@ def rewrite_summary(resume: str, job: dict) -> str:
             {"role": "system", "content": _SYSTEM},
             {"role": "user", "content": _user_prompt(text[:12000], job, title, description)},
         ],
-        "options": {"temperature": 0.3, "num_ctx": 8192, "num_predict": 500},
+        "options": {"temperature": 0.3, "num_ctx": 8192, "num_predict": 1400},
     }
     parsed = _request("/api/chat", payload, _timeout())
     message = parsed.get("message") or {}
-    content = _one_paragraph(_strip_think(str(message.get("content") or "")))
-    if len(content) < 80:
-        raise OllamaError("Ollama returned an empty summary")
-    log.info("Ollama wrote a summary with model %s for %s", model, title or "untitled job")
-    return content
+    summary, bullets = _parse_tailoring(_strip_think(str(message.get("content") or "")))
+    if len(summary) < 80 and not bullets:
+        raise OllamaError("Ollama returned an empty resume tailoring")
+    log.info("Ollama tailored resume with model %s for %s", model, title or "untitled job")
+    return summary, bullets
 
 
 def _status_now() -> dict:
@@ -253,6 +251,22 @@ def _skill_names(value) -> list[str]:
         seen.add(key)
         names.append(text)
     return names
+
+
+def _parse_tailoring(text: str) -> tuple[str, list[str]]:
+    cleaned = _strip_think(text)
+    cleaned = re.sub(r"^```[a-zA-Z0-9]*\n|\n```$", "", cleaned).strip()
+    summary_match = re.search(r"(?is)\bSUMMARY:\s*(.*?)(?:\n\s*BULLETS:|\Z)", cleaned)
+    bullet_match = re.search(r"(?is)\bBULLETS:\s*(.*)\Z", cleaned)
+    summary_raw = summary_match.group(1) if summary_match else cleaned
+    summary = _one_paragraph(summary_raw)
+    bullets: list[str] = []
+    if bullet_match:
+        for line in bullet_match.group(1).splitlines():
+            item = re.sub(r"^[\-\u2022•]\s*", "", line).strip()
+            if item and not re.match(r"(?i)^summary\b", item):
+                bullets.append(item)
+    return summary, bullets
 
 
 def _one_paragraph(text: str) -> str:

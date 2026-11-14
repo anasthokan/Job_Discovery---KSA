@@ -7,7 +7,7 @@ import re
 from typing import Any
 
 from jobscraper.jd_to_cv import JobToCvError, build_cv_from_job, render_cv_text
-from jobscraper.ollama_resume import OllamaError, ollama_enabled, rewrite_summary
+from jobscraper.ollama_resume import OllamaError, ollama_enabled, rewrite_for_job
 from jobscraper.resume_parser import ResumeParseError, parse_resume_text
 
 log = logging.getLogger("job-discovery")
@@ -227,30 +227,34 @@ def resume_text_rank(text: str) -> tuple[int, int, int]:
 
 
 def _aim_document_at_job(document: str, job: dict[str, Any]) -> tuple[str, str]:
-    """Keep the original resume and replace only the summary with a job-targeted paragraph."""
-    summary = _summary_from_ollama(document, job)
+    """Keep the resume structure. Ollama rewrites the summary and the experience bullets."""
+    base = _readable_dates(_plain_company_lines(document))
+    summary, bullets = _tailoring_from_ollama(base, job)
+    if not summary and not bullets:
+        return tailor_document_for_job(base, job), "profile"
     if summary:
-        return _replace_summary_section(document, summary), "ollama"
-    return tailor_document_for_job(document, job), "profile"
+        base = _replace_summary_section(base, summary)
+    if bullets:
+        base = _replace_experience_bullets(base, bullets)
+    return base, "ollama"
 
 
-def _summary_from_ollama(document: str, job: dict[str, Any]) -> str:
+def _tailoring_from_ollama(document: str, job: dict[str, Any]) -> tuple[str, list[str]]:
     if not ollama_enabled() or len((document or "").strip()) < 40 or not job:
-        return ""
+        return "", []
     if not (str(job.get("title") or "").strip() or str(job.get("description") or "").strip()):
-        return ""
+        return "", []
     try:
-        summary = rewrite_summary(document, job)
+        summary, bullets = rewrite_for_job(document, job)
     except OllamaError as exc:
         log.warning("Ollama resume enhance skipped: %s", exc)
-        return ""
+        return "", []
     except Exception as exc:
         log.warning("Ollama resume enhance failed: %s", exc)
-        return ""
-    if not _summary_is_grounded(summary, document, job):
-        log.warning("Ollama summary was rejected; keeping the original resume sections")
-        return ""
-    return summary
+        return "", []
+    summary = _clean_summary(summary, document, job)
+    bullets = _clean_bullets(bullets, document, job)
+    return summary, bullets
 
 
 _SUMMARY_HEADINGS = {"PROFESSIONAL SUMMARY", "SUMMARY", "CAREER OBJECTIVE", "OBJECTIVE"}
@@ -305,25 +309,122 @@ def _replace_summary_section(document: str, summary: str) -> str:
     return "\n".join(output).strip() + "\n"
 
 
-def _summary_is_grounded(summary: str, document: str, job: dict[str, Any]) -> bool:
+_MONTHS = (
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+)
+
+
+def _clean_summary(summary: str, document: str, job: dict[str, Any]) -> str:
+    """Keep the Ollama paragraph. Drop only a sentence that names a skill the resume does not have."""
     text = re.sub(r"\s+", " ", summary or "").strip()
-    if not (250 <= len(text) <= 1100):
-        return False
-    if _HEADING_LINE_RE.search(text) or text.startswith(("-", "•")):
-        return False
+    if len(text) < 80:
+        return ""
+    kept = [part.strip() for part in re.split(r"(?<=[.!?])\s+", text) if part.strip()]
+    safe = [part for part in kept if not _mentions_new_skill(part, document, job)]
+    paragraph = " ".join(safe or kept)
+    if len(paragraph) < 80:
+        return ""
+    return paragraph[:1100]
+
+
+def _clean_bullets(bullets: list[str], document: str, job: dict[str, Any]) -> list[str]:
+    cleaned = []
+    for bullet in bullets:
+        text = re.sub(r"\s+", " ", bullet).strip(" -•")
+        if len(text) < 20 or _mentions_new_skill(text, document, job):
+            return []
+        cleaned.append(text)
+    return cleaned
+
+
+def _mentions_new_skill(text: str, document: str, job: dict[str, Any]) -> bool:
     original = document.lower()
     title = str(job.get("title") or "").strip().lower()
     company = str(job.get("company") or "").strip().lower()
     title_words = set(re.findall(r"[a-z0-9]+", title))
+    sample = text.lower()
     for skill in job.get("skills") or []:
         key = re.sub(r"\s+", " ", str(skill or "")).strip().lower()
         if len(key) < 3 or key in {title, company} or key in original:
             continue
-        if title_words and all(word in title_words for word in re.findall(r"[a-z0-9]+", key)):
+        words = re.findall(r"[a-z0-9]+", key)
+        if title_words and words and all(word in title_words for word in words):
             continue
-        if key in text.lower():
-            return False
-    return True
+        if key in sample:
+            return True
+    return False
+
+
+def _replace_experience_bullets(document: str, bullets: list[str]) -> str:
+    """Swap experience bullet wording only when Ollama returned the same count."""
+    pieces = _split_resume_sections(document)
+    slots = []
+    for heading, body in pieces:
+        if heading.upper() not in _EXPERIENCE_HEADINGS:
+            continue
+        for index, line in enumerate(body):
+            if re.match(r"^\s*[-•]\s+\S", line) and not _is_company_sentence(line):
+                slots.append((heading, index))
+    if not slots or len(slots) != len(bullets):
+        log.warning("Ollama bullet count %s did not match resume bullets %s", len(bullets), len(slots))
+        return document
+    bodies = {id(body): body for _heading, body in pieces}
+    cursor = 0
+    for heading, body in pieces:
+        if heading.upper() not in _EXPERIENCE_HEADINGS:
+            continue
+        for index, line in enumerate(body):
+            if re.match(r"^\s*[-•]\s+\S", line) and not _is_company_sentence(line):
+                body[index] = "- " + bullets[cursor]
+                cursor += 1
+        bodies[id(body)] = body
+    output: list[str] = []
+    for heading, body in pieces:
+        if heading:
+            output.append(heading)
+        output.extend(body)
+    return "\n".join(output).strip() + "\n"
+
+
+def _plain_company_lines(document: str) -> str:
+    """A company description is not an achievement bullet."""
+    lines = []
+    for line in (document or "").splitlines():
+        if _is_company_sentence(line):
+            lines.append(re.sub(r"^[\-•]\s*", "", line).strip())
+        else:
+            lines.append(line)
+    return "\n".join(lines)
+
+
+def _is_company_sentence(line: str) -> bool:
+    text = re.sub(r"^[\-•]\s*", "", line or "").strip()
+    return bool(re.match(r"^[A-Z][\w&.'-]{1,40}(?:\s+[A-Z][\w&.'-]+){0,5}\s+is\b", text))
+
+
+def _readable_dates(document: str) -> str:
+    """Turn 2024-07-01 glued to a company into Jul 2024."""
+    text = re.sub(r"([A-Za-z])((?:19|20)\d{2}-\d{2})", r"\1 | \2", document or "")
+
+    def month_year(value: str) -> str:
+        match = re.fullmatch(r"((?:19|20)\d{2})-(\d{2})(?:-\d{2})?", value)
+        if not match:
+            return value
+        month = int(match.group(2))
+        if not 1 <= month <= 12:
+            return match.group(1)
+        return f"{_MONTHS[month - 1]} {match.group(1)}"
+
+    def range_text(match: re.Match[str]) -> str:
+        return f"{month_year(match.group(1))} – {month_year(match.group(2))}"
+
+    text = re.sub(
+        r"\b((?:19|20)\d{2}-\d{2}(?:-\d{2})?)\s*[-–—]\s*((?:19|20)\d{2}-\d{2}(?:-\d{2})?)",
+        range_text,
+        text,
+    )
+    return re.sub(r"\b(?:19|20)\d{2}-\d{2}-\d{2}\b", lambda match: month_year(match.group(0)), text)
 
 
 _COMMENTARY_RE = re.compile(

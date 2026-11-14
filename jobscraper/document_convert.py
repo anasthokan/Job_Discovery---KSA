@@ -634,7 +634,7 @@ def _role_pieces(line: str, blue: tuple[int, int, int], gray: tuple[int, int, in
     else:
         pieces = [(text, "B", blue)]
     if date:
-        pieces.append(("  " + date, "", gray))
+        pieces.append(("   |   " + date, "", gray))
     return pieces
 
 
