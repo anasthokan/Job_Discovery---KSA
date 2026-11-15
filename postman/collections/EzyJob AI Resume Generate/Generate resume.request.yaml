@@ -1,0 +1,55 @@
+$kind: http-request
+name: Generate resume
+method: POST
+url: '{{base_url}}/api/resume/generate'
+order: 2000
+headers:
+  - key: Content-Type
+    value: application/json
+description: |-
+  Writes a resume toward target_title. Acme Corp and the supplied skills must
+  come back unchanged. Needs a reachable Ollama model; otherwise the status is 503.
+  This call can take up to two minutes.
+body:
+  type: json
+  content: |-
+    {
+      "target_title": "Senior Backend Engineer",
+      "full_name": "Jane Doe",
+      "email": "jane@example.com",
+      "location": "Riyadh",
+      "skills": ["Python", "FastAPI", "PostgreSQL"],
+      "experience": [
+        {
+          "title": "Software Engineer",
+          "company": "Acme Corp",
+          "start_date": "Jan 2022",
+          "end_date": "Present",
+          "bullets": ["Built APIs used by 2 million users"]
+        }
+      ],
+      "education": [
+        {
+          "degree": "B.S.",
+          "field": "Computer Science",
+          "institution": "King Saud University",
+          "end_year": "2018"
+        }
+      ]
+    }
+scripts:
+  - type: afterResponse
+    language: text/javascript
+    code: |-
+      pm.test("generation keeps the supplied employer and skills", function () {
+        pm.response.to.have.status(200);
+        const body = pm.response.json();
+        pm.expect(body.ok).to.eql(true);
+        pm.expect(body.mode).to.eql("generated");
+        pm.expect(body.cv.profile.full_name).to.eql("Jane Doe");
+        pm.expect(body.cv.experience[0].company).to.eql("Acme Corp");
+        pm.expect(body.cv.experience[0].title).to.eql("Software Engineer");
+        pm.expect(body.cv.skills.slice().sort()).to.eql(["FastAPI", "PostgreSQL", "Python"]);
+        pm.expect(body.cv_text).to.include("Acme Corp");
+      });
+examples: './.resources/Generate resume.resources/examples'

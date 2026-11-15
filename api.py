@@ -83,7 +83,8 @@ from jobscraper.score_config import score_config
 from jobscraper.linkedin_profile import LinkedInProfileError, autofill_from_linkedin
 from jobscraper.profile_autofill import autofill_from_parsed
 from jobscraper.ollama_resume import ollama_status
-from jobscraper.resume_enhance import enhance_profile_for_job, resume_text_rank
+from jobscraper.resume_enhance import enhance_profile_for_job, resume_from_profile, resume_text_rank
+from jobscraper.resume_generate import ResumeGenerateError, generate_resume
 from jobscraper.resume_parser import ResumeParseError, parse_resume_bytes, parse_resume_text
 from jobscraper.db import (
     balance_scrape_counts,
@@ -399,8 +400,8 @@ async def lifespan(_app):
 
 app = FastAPI(
     title="Job Discovery",
-    description="Job listings API, skill-based job recommendations, resume/CV parse, profile autofill from a resume, ATS resume score, job-description-to-CV, resume enhance download, PDF/DOCX conversion, and MySQL job storage.",
-    version="1.7.0",
+    description="Job listings API, skill-based job recommendations, resume/CV parse, profile autofill from a resume, ATS resume score, job-description-to-CV, AI resume generation, resume enhance download, PDF/DOCX conversion, and MySQL job storage.",
+    version="1.8.0",
     lifespan=lifespan,
     redirect_slashes=False,
 )
@@ -499,6 +500,34 @@ class ResumeInput(BaseModel):
 class ResumeEnhanceRequest(BaseModel):
     user_id: str = Field(..., min_length=1, description="App user id: numeric users.id or public_id")
     job_id: str = Field(..., min_length=1, description="Job id, public_id, or source id from /api/jobs")
+
+
+class ResumeGenerateRequest(BaseModel):
+    """Facts to write from. Empty fields are ignored and do not erase a loaded profile."""
+
+    target_title: str = Field("", description="Role the resume should be written toward")
+    full_name: str = ""
+    email: str = ""
+    phone: str = ""
+    location: str = ""
+    linkedin: str = ""
+    github: str = ""
+    website: str = ""
+    summary: str = Field("", description="Optional existing summary. The model may rewrite it.")
+    skills: list[str] = Field(default_factory=list)
+    experience: list[ResumeExperience] = Field(default_factory=list)
+    education: list[ResumeEducation] = Field(default_factory=list)
+    projects: list[ResumeProject] = Field(default_factory=list)
+    certifications: list[str] = Field(default_factory=list)
+    languages: list[str] = Field(default_factory=list)
+    resume_text: str | None = Field(None, description="Optional raw resume text. Parsed, then rewritten.")
+    resume: ResumeInput | None = Field(None, description="Optional parsed resume JSON from /api/resume/parse")
+    user_id: str | None = Field(None, description="Optional saved user. Explicit fields override that profile.")
+    job_description: str = ""
+    job_title: str | None = None
+    company: str | None = None
+    job_location: str | None = None
+    job_id: str | None = Field(None, description="Optional scraped job id from /api/jobs")
 
 
 class CvFromJobRequest(BaseModel):
@@ -1542,6 +1571,7 @@ def health():
         "ats_score": True,
         "cv_from_job": True,
         "resume_enhance": True,
+        "resume_generate": True,
         "ollama": ollama_status(),
         "pdf_docx_convert": True,
         "resume_formats": ["pdf", "docx", "txt"],
@@ -2416,6 +2446,20 @@ def resume_contract():
                 "query": {"format": "pdf"},
                 "returns": "application/pdf or a Word .docx file download",
             },
+            "generate": {
+                "method": "POST",
+                "path": "/api/resume/generate",
+                "content_type": "application/json",
+                "body": {
+                    "target_title": "Senior Backend Engineer",
+                    "full_name": "Jane Doe",
+                    "skills": ["Python", "FastAPI"],
+                    "experience": [{"title": "Software Engineer", "company": "Acme Corp", "bullets": []}],
+                },
+                "query": {"format": "json"},
+                "returns": "Resume JSON, or a pdf/docx file when format is pdf or docx",
+                "note": "Writes with Ollama from the facts you send. Does not invent employers, dates, or skills.",
+            },
         },
         "docs": "/docs",
     }
@@ -2532,6 +2576,137 @@ def enhance_user_resume(
         _enhanced_filename(job, fmt),
         media,
         {"X-Resume-Enhance-Mode": mode},
+    )
+
+
+def _merge_cv(base: dict, extra: dict) -> dict:
+    """Copy non-empty profile fields and non-empty lists from extra onto base."""
+    profile = dict(base.get("profile") or {})
+    for key, value in (extra.get("profile") or {}).items():
+        if value not in (None, "", []):
+            profile[key] = value
+    merged = {**base, "profile": profile}
+    for key in ("skills", "experience", "education", "projects", "certifications", "languages"):
+        values = extra.get(key) or []
+        if values:
+            merged[key] = values
+    return merged
+
+
+def _blank_cv() -> dict:
+    return {
+        "profile": {},
+        "skills": [],
+        "experience": [],
+        "education": [],
+        "projects": [],
+        "certifications": [],
+        "languages": [],
+    }
+
+
+def _cv_from_parsed(parsed: dict) -> dict:
+    return {
+        "profile": dict(parsed.get("profile") or {}),
+        "skills": list(parsed.get("skills") or []),
+        "experience": list(parsed.get("experience") or []),
+        "education": list(parsed.get("education") or []),
+        "projects": list(parsed.get("projects") or []),
+        "certifications": list(parsed.get("certifications") or []),
+        "languages": list(parsed.get("languages") or []),
+    }
+
+
+def _facts_for_generate(body: ResumeGenerateRequest) -> tuple[dict, dict | None]:
+    facts = _blank_cv()
+    if body.user_id and body.user_id.strip():
+        _cid, profile = _require_candidate(body.user_id.strip())
+        facts = _merge_cv(facts, resume_from_profile(profile))
+    if body.resume_text and body.resume_text.strip():
+        try:
+            parsed = parse_resume_text(body.resume_text)
+        except ResumeParseError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        facts = _merge_cv(facts, _cv_from_parsed(parsed))
+    if body.resume:
+        facts = _merge_cv(facts, body.resume.model_dump())
+    explicit_profile = {
+        "full_name": body.full_name.strip(),
+        "email": body.email.strip(),
+        "phone": body.phone.strip(),
+        "location": body.location.strip(),
+        "linkedin": body.linkedin.strip(),
+        "github": body.github.strip(),
+        "website": body.website.strip(),
+        "summary": body.summary.strip(),
+    }
+    facts = _merge_cv(
+        facts,
+        {
+            "profile": explicit_profile,
+            "skills": body.skills,
+            "experience": [item.model_dump() for item in body.experience],
+            "education": [item.model_dump() for item in body.education],
+            "projects": [item.model_dump() for item in body.projects],
+            "certifications": body.certifications,
+            "languages": body.languages,
+        },
+    )
+    job = None
+    if body.job_id and body.job_id.strip():
+        job = dict(_job_for_enhance(body.job_id.strip()))
+    if body.job_description.strip() or (body.job_title or "").strip() or (body.company or "").strip():
+        job = {
+            **(job or {}),
+            "title": (body.job_title or "").strip() or (job or {}).get("title"),
+            "company": (body.company or "").strip() or (job or {}).get("company"),
+            "location": (body.job_location or "").strip() or (job or {}).get("location"),
+            "description": body.job_description.strip() or str((job or {}).get("description") or ""),
+        }
+    return facts, job
+
+
+@app.post(
+    "/api/resume/generate",
+    summary="Generate a resume with Ollama from supplied facts",
+)
+def generate_ai_resume(
+    body: ResumeGenerateRequest,
+    file_format: str = Query("json", alias="format", description="json, pdf, or docx"),
+):
+    """Writes a resume from the caller's facts. Does not invent employers, dates, or skills.
+
+    Ollama rewrites the summary and experience bullets toward target_title or the job.
+    format=pdf or format=docx returns a file download. The default is JSON.
+    """
+    fmt = (file_format or "json").strip().lower()
+    if fmt not in {"json", "pdf", "docx"}:
+        raise HTTPException(status_code=400, detail="format must be json, pdf, or docx.")
+    facts, job = _facts_for_generate(body)
+    try:
+        built = generate_resume(facts, job=job, target_title=body.target_title)
+    except ResumeGenerateError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    if fmt == "json":
+        return built
+    cv_text = built.get("cv_text") or ""
+    try:
+        if fmt == "docx":
+            content = cv_text_to_docx(cv_text)
+            media = DOCX_TYPE
+        else:
+            content = cv_text_to_pdf(cv_text)
+            media = PDF_TYPE
+    except ConvertError as exc:
+        raise HTTPException(status_code=getattr(exc, "status_code", 400), detail=str(exc)) from exc
+    return _file_download(
+        content,
+        f"resume.{fmt}",
+        media,
+        {
+            "X-Resume-Generate-Mode": str(built.get("mode") or "generated"),
+            "X-Resume-Model": str(built.get("model") or "").replace("\n", " ")[:80],
+        },
     )
 
 

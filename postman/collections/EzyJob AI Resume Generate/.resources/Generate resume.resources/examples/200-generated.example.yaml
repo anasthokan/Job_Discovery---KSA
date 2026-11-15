@@ -1,0 +1,73 @@
+$kind: http-example
+name: 200 generated
+order: 1000
+request:
+  url: '{{base_url}}/api/resume/generate'
+  method: POST
+response:
+  statusCode: 200
+  statusText: OK
+  headers:
+    - key: Content-Type
+      value: application/json
+  body:
+    type: json
+    content: |-
+      {
+        "ok": true,
+        "mode": "generated",
+        "model": "qwen2.5:7b",
+        "target_title": "Senior Backend Engineer",
+        "summary_source": "model",
+        "rewritten": true,
+        "note": "Employers, dates, skills, education, and certifications come from the request. The model rewrote the summary and experience bullets.",
+        "job": {
+          "title": "Senior Backend Engineer",
+          "company": null,
+          "location": null,
+          "required_skills": []
+        },
+        "match": {
+          "score": null,
+          "matched_skills": [],
+          "missing_skills": [],
+          "extra_skills": []
+        },
+        "cv": {
+          "profile": {
+            "full_name": "Jane Doe",
+            "email": "jane@example.com",
+            "phone": null,
+            "phones": [],
+            "location": "Riyadh",
+            "linkedin": null,
+            "github": null,
+            "website": null,
+            "summary": "Jane Doe is a Senior Backend Engineer who builds APIs with Python and FastAPI."
+          },
+          "skills": ["Python", "FastAPI", "PostgreSQL"],
+          "experience": [
+            {
+              "title": "Software Engineer",
+              "company": "Acme Corp",
+              "location": null,
+              "start_date": "Jan 2022",
+              "end_date": "Present",
+              "is_current": true,
+              "bullets": ["Built APIs used by 2 million users with Python and FastAPI."]
+            }
+          ],
+          "education": [
+            {
+              "degree": "B.S.",
+              "field": "Computer Science",
+              "institution": "King Saud University",
+              "end_year": "2018"
+            }
+          ],
+          "projects": [],
+          "certifications": [],
+          "languages": []
+        },
+        "cv_text": "Jane Doe\nRiyadh | jane@example.com\n\nSUMMARY\nJane Doe is a Senior Backend Engineer who builds APIs with Python and FastAPI.\n"
+      }

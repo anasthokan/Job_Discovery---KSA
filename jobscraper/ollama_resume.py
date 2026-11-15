@@ -84,6 +84,29 @@ def ollama_status() -> dict:
     return status
 
 
+def active_model() -> str:
+    """Model name Ollama will use, or an empty string when none can be chosen."""
+    try:
+        return _model_name()
+    except OllamaError:
+        return ""
+
+
+def complete(
+    system: str,
+    user: str,
+    *,
+    temperature: float = 0.2,
+    num_predict: int = 900,
+    timeout: float | None = None,
+) -> str:
+    """One non-streaming Ollama chat completion."""
+    if not ollama_enabled():
+        raise OllamaError("Ollama resume generation is turned off")
+    limit = timeout if timeout is not None else min(_timeout(), 120)
+    return _chat(system, user, temperature, num_predict, limit)
+
+
 def rewrite_for_job(resume: str, job: dict) -> tuple[str, list[str]]:
     """Ask Ollama for a short job summary. Bullet rewrite is optional and must not block the summary."""
     if not ollama_enabled():

@@ -1,0 +1,18 @@
+$kind: http-request
+name: Resume contract
+method: GET
+url: '{{base_url}}/api/resume'
+order: 1000
+description: |-
+  Contract for parse, enhance, and AI generate. The generate entry is
+  endpoints.generate.
+scripts:
+  - type: afterResponse
+    language: text/javascript
+    code: |-
+      pm.test("contract lists AI resume generation", function () {
+        const body = pm.response.json();
+        pm.response.to.have.status(200);
+        pm.expect(body.endpoints.generate.path).to.eql("/api/resume/generate");
+        pm.expect(body.endpoints.generate.method).to.eql("POST");
+      });

@@ -14,6 +14,8 @@ ATS resume score API: `ATS_API.md` (`POST /api/ats/score-file`).
 
 Job-description-to-CV API: `CV_API.md` (`POST /api/cv/from-job`).
 
+AI resume generation API: `AI_RESUME_API.md` (`POST /api/resume/generate`).
+
 PDF ↔ DOCX convert API: `CONVERT_API.md`.
 
 Sample files in this repo: `samples/sample-resume.txt` and `samples/sample-resume.docx`.

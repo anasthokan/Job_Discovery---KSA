@@ -1,0 +1,18 @@
+$kind: http-example
+name: 400 missing facts
+order: 2000
+request:
+  url: '{{base_url}}/api/resume/generate'
+  method: POST
+response:
+  statusCode: 400
+  statusText: Bad Request
+  headers:
+    - key: Content-Type
+      value: application/json
+  body:
+    type: json
+    content: |-
+      {
+        "detail": "Send skills, work history, education, or a summary. This API writes from those facts and does not invent a career."
+      }
