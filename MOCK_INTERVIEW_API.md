@@ -193,6 +193,6 @@ After the last answer, `status` is `complete`, `question` is `null`, and `report
 | 400 | No job title, company, description, or `job_id`. `focus` is not `mixed`, `behavioral`, or `technical`. The answer is shorter than a sentence. The session is missing or the interview is already complete. |
 | 404 | `user_id` or `job_id` was sent and is not on file. |
 | 422 | `question_count` is outside 3 to 8, or `session` or `answer` was left out. |
-| 503 | Ollama is turned off, has no model, or cannot be reached. The session is unchanged, so the same answer can be sent again. |
+| 503 | Ollama is turned off, has no model, or cannot be reached. The session is unchanged, so the same answer can be sent again. A slow model is not a 503: start still returns questions (`question_source` is `template`) and an answer is still scored (`feedback.source` is `rubric`). |
 
 `detail` is a string. Example: `{ "detail": "Send a job title, company, job description, or job_id so the interview has a role." }`

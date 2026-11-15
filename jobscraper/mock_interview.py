@@ -111,10 +111,14 @@ def start_interview(
     prompt = _QUESTION_RULES.format(count=count, focus=chosen) + "\n\nFACTS:\n" + _prompt_facts(
         cv, title, company, location, description
     )
+    slow_note = ""
     try:
-        raw, model_name = _write(prompt, writer, num_predict=800)
+        raw, model_name = _write(prompt, writer, num_predict=320)
     except OllamaError as exc:
-        raise MockInterviewError(str(exc), 503) from exc
+        if _service_down(exc):
+            raise MockInterviewError(str(exc), 503) from exc
+        raw, model_name = "", "ollama"
+        slow_note = "The model did not finish in time, so these questions come from the role and the facts you sent. "
 
     generated = _extract_json(raw)
     questions = _questions_from_model(generated, count)
@@ -142,7 +146,8 @@ def start_interview(
         feedback=None,
         answered=None,
         note=(
-            "Send this session back with each answer. "
+            slow_note
+            + "Send this session back with each answer. "
             "Questions use the role and the facts you sent. "
             "A suggested answer does not add employers or numbers that were not in those facts or in the answer."
         ),
@@ -183,9 +188,11 @@ def submit_answer(
         ensure_ascii=False,
     )
     try:
-        raw, model_name = _write(prompt, writer, num_predict=500)
+        raw, model_name = _write(prompt, writer, num_predict=280)
     except OllamaError as exc:
-        raise MockInterviewError(str(exc), 503) from exc
+        if _service_down(exc):
+            raise MockInterviewError(str(exc), 503) from exc
+        raw, model_name = "", "ollama"
 
     feedback = _feedback_from_model(raw, facts, text, question.get("prompt") or "", state.get("company") or "")
     turns.append(
@@ -321,6 +328,11 @@ def _load_session(session: Any) -> dict[str, Any]:
     if len(turns) > len(questions):
         raise MockInterviewError("Send the session from the previous mock interview response.", 400)
     return state
+
+
+def _service_down(exc: OllamaError) -> bool:
+    text = str(exc).lower()
+    return any(part in text for part in ("not reachable", "turned off", "no models", "http "))
 
 
 def _write(prompt: str, writer: Writer | None, *, num_predict: int) -> tuple[str, str]:

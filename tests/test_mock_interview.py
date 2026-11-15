@@ -119,6 +119,26 @@ class MockInterviewTests(unittest.TestCase):
             start_interview(FACTS, job=JOB, writer=_down)
         self.assertEqual(caught.exception.status_code, 503)
 
+    def test_timeout_still_starts_with_template_questions(self):
+        def _slow(_prompt):
+            raise OllamaError("Ollama timed out")
+
+        built = start_interview(FACTS, job=JOB, question_count=5, writer=_slow)
+        self.assertEqual(built["question_source"], "template")
+        self.assertEqual(built["status"], "in_progress")
+        self.assertIn("did not finish in time", built["note"])
+        self.assertTrue(built["question"]["prompt"])
+
+    def test_timeout_on_answer_uses_rubric(self):
+        started = start_interview(FACTS, job=JOB, question_count=3, writer=lambda _prompt: _questions(3))
+
+        def _slow(_prompt):
+            raise OllamaError("Ollama timed out")
+
+        scored = submit_answer(started["session"], ANSWER, writer=_slow)
+        self.assertEqual(scored["feedback"]["source"], "rubric")
+        self.assertEqual(scored["question"]["number"], 2)
+
     def test_answer_advances_and_keeps_suggested_answer(self):
         started = start_interview(FACTS, job=JOB, question_count=3, writer=lambda _prompt: _questions(3))
         scored = submit_answer(started["session"], ANSWER, writer=lambda _prompt: _evaluation())
