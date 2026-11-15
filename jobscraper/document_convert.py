@@ -619,6 +619,7 @@ def _is_company_blurb(line: str) -> bool:
 
 
 def _role_pieces(line: str, blue: tuple[int, int, int], gray: tuple[int, int, int]) -> list[tuple[str, str, tuple[int, int, int]]]:
+    del gray
     text = line.strip()
     date = ""
     match = re.search(
@@ -630,12 +631,12 @@ def _role_pieces(line: str, blue: tuple[int, int, int], gray: tuple[int, int, in
         text = text[: match.start()].strip(" |-")
     if "|" in text:
         left, right = [part.strip() for part in text.split("|", 1)]
-        pieces = [(f"{left}  |  {right}", "B", blue)]
+        body = f"{left}  |  {right}"
     else:
-        pieces = [(text, "B", blue)]
+        body = text
     if date:
-        pieces.append(("   |   " + date, "", gray))
-    return pieces
+        body = f"{body}  |  {date}"
+    return [(body, "B", blue)]
 
 
 def _label_pieces(line: str, label_color: tuple[int, int, int], ink: tuple[int, int, int], bold_rest: bool = False) -> list[tuple[str, str, tuple[int, int, int]]]:

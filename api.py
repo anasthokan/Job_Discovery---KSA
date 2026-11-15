@@ -1383,15 +1383,14 @@ def _swap_extension(filename: str, extension: str) -> str:
 
 
 def _download_filename(filename: str, media_type: str) -> str:
-    """Short ASCII name that always keeps the real extension. Postman drops .pdf on the long filename* form."""
+    """Always a short name ending in the real extension. Long names get cut before .pdf."""
     if media_type == PDF_TYPE:
-        extension = ".pdf"
-    elif media_type == DOCX_TYPE:
-        extension = ".docx"
-    else:
-        suffix = Path(filename or "").suffix.lower()
-        extension = suffix if re.fullmatch(r"\.[a-z0-9]{1,5}", suffix or "") else ""
-    stem = re.sub(r"[^A-Za-z0-9_-]+", "_", Path(filename or "resume").stem).strip("_")[:40] or "resume"
+        return "resume.pdf"
+    if media_type == DOCX_TYPE:
+        return "resume.docx"
+    suffix = Path(filename or "").suffix.lower()
+    extension = suffix if re.fullmatch(r"\.[a-z0-9]{1,5}", suffix or "") else ""
+    stem = re.sub(r"[^A-Za-z0-9_-]+", "_", Path(filename or "resume").stem).strip("_")[:24] or "resume"
     return f"{stem}{extension}"
 
 
@@ -2486,8 +2485,7 @@ def _job_for_enhance(job_id: str) -> dict:
 
 
 def _enhanced_filename(job: dict, extension: str) -> str:
-    role = re.sub(r"[^A-Za-z0-9]+", "_", str(job.get("title") or "resume")).strip("_")[:40] or "resume"
-    return f"{role}_enhanced.{extension}"
+    return f"resume.{extension}"
 
 
 @app.post(

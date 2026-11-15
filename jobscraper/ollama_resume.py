@@ -85,26 +85,27 @@ def ollama_status() -> dict:
 
 
 def rewrite_for_job(resume: str, job: dict) -> tuple[str, list[str]]:
-    """Ask Ollama for a job summary first, then optional rewritten bullets."""
+    """Ask Ollama for a short job summary. Bullet rewrite is optional and must not block the summary."""
     if not ollama_enabled():
         raise OllamaError("Ollama resume enhance is turned off")
     text = (resume or "").strip()
     if len(text) < 40:
         raise OllamaError("Resume is too short to enhance")
     title = str(job.get("title") or "").strip()
-    description = _clip_description(str(job.get("description") or ""))
+    description = _clip_description(str(job.get("description") or ""), limit=1800)
     if not title and not description:
         raise OllamaError("Job has no title or description")
 
-    summary = _chat(
+    raw = _chat(
         _SUMMARY_SYSTEM,
-        _summary_prompt(text[:9000], job, title, description),
-        temperature=0.35,
-        num_predict=450,
+        _summary_prompt(text[:1600], job, title, description),
+        temperature=0.2,
+        num_predict=220,
+        timeout=min(_timeout(), 90),
     )
-    summary = _one_paragraph(summary)
-    if len(summary) < 80:
-        raise OllamaError("Ollama returned an empty summary")
+    summary = _one_paragraph(raw)
+    if len(summary) < 60:
+        raise OllamaError(f"Ollama summary was too short: {summary[:80]!r}")
 
     bullets: list[str] = []
     bullet_src = _experience_bullets(text)
@@ -112,9 +113,10 @@ def rewrite_for_job(resume: str, job: dict) -> tuple[str, list[str]]:
         try:
             raw_bullets = _chat(
                 _BULLET_SYSTEM,
-                _bullet_prompt(bullet_src, job, title, description),
-                temperature=0.25,
-                num_predict=1200,
+                _bullet_prompt(bullet_src[:12], job, title, description),
+                temperature=0.2,
+                num_predict=900,
+                timeout=min(_timeout(), 80),
             )
             bullets = _parse_bullets(raw_bullets)
         except OllamaError as exc:
@@ -186,7 +188,7 @@ def _experience_bullets(resume: str) -> list[str]:
     return found
 
 
-def _chat(system: str, user: str, temperature: float, num_predict: int) -> str:
+def _chat(system: str, user: str, temperature: float, num_predict: int, timeout: float = 70) -> str:
     model = _model_name()
     payload = {
         "model": model,
@@ -195,13 +197,14 @@ def _chat(system: str, user: str, temperature: float, num_predict: int) -> str:
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
+        "keep_alive": "30m",
         "options": {
             "temperature": temperature,
-            "num_ctx": 8192,
+            "num_ctx": 2048,
             "num_predict": num_predict,
         },
     }
-    parsed = _request("/api/chat", payload, _timeout())
+    parsed = _request("/api/chat", payload, timeout)
     message = parsed.get("message") or {}
     content = _strip_think(str(message.get("content") or ""))
     if len(content.strip()) < 20:
@@ -313,10 +316,11 @@ def _plain_text(text: str) -> str:
 def _parse_bullets(text: str) -> list[str]:
     bullets: list[str] = []
     for line in (text or "").splitlines():
-        item = re.sub(r"^[\-\u2022•]\s*", "", line).strip()
-        if len(item) < 20:
+        stripped = line.strip()
+        if not re.match(r"^[\-\u2022•]\s+\S", stripped):
             continue
-        if re.match(r"(?i)^(summary|bullets?|here is|here's)\b", item):
+        item = re.sub(r"^[\-\u2022•]\s*", "", stripped).strip()
+        if len(item) < 20:
             continue
         bullets.append(item)
     return bullets

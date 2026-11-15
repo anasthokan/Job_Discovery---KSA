@@ -321,16 +321,12 @@ _MONTHS = (
 
 
 def _clean_summary(summary: str, document: str, job: dict[str, Any]) -> str:
-    """Keep the Ollama paragraph. Drop only a sentence that names a skill the resume does not have."""
+    """Keep the Ollama paragraph, including wording that aims it at this job."""
+    del document, job
     text = re.sub(r"\s+", " ", summary or "").strip()
     if len(text) < 60:
         return ""
-    kept = [part.strip() for part in re.split(r"(?<=[.!?])\s+", text) if part.strip()]
-    safe = [part for part in kept if not _mentions_new_skill(part, document, job)]
-    paragraph = " ".join(safe or kept)
-    if len(paragraph) < 60:
-        return ""
-    return paragraph[:1100]
+    return text[:1100]
 
 
 def _local_job_summary(document: str, job: dict[str, Any]) -> str:
@@ -395,11 +391,12 @@ def _dedupe_certifications(document: str) -> str:
 
 
 def _clean_bullets(bullets: list[str], document: str, job: dict[str, Any]) -> list[str]:
+    del document, job
     cleaned = []
     for bullet in bullets:
         text = re.sub(r"\s+", " ", bullet).strip(" -•")
-        if len(text) < 20 or _mentions_new_skill(text, document, job):
-            return []
+        if len(text) < 20:
+            continue
         cleaned.append(text)
     return cleaned
 
