@@ -35,15 +35,28 @@ _SKIP_MODEL = ("embed", "vision", "llava", "bert")
 _STATUS_CACHE: dict = {"at": 0.0, "value": None}
 _MODEL_CACHE: dict = {"at": 0.0, "name": ""}
 
-_SYSTEM = """You tailor one existing resume to a job. Use only facts already written in the resume.
+_SUMMARY_SYSTEM = """You write a professional summary for an existing resume aimed at one job.
+Use only facts already written in the resume.
 
-Return exactly this shape:
+Rules:
+- Return only the summary paragraph. No heading, no bullets, no markdown, no labels.
+- 4 to 6 sentences. Third person, not "I".
+- Open with the person's seniority, years, and domain from the resume.
+- Name the target job title once.
+- Keep real employers, products, and numbers already in the resume.
+- Do not invent tools, certifications, degrees, or employers.
+- Do not say the person already works at the hiring company.
+"""
 
-SUMMARY:
-One paragraph of 5 or 6 sentences. Third person, no bullets. Open with the person's real seniority and domain. Aim it at the target job title. You may name that job title. Do not add employers, degrees, certifications, or tools that are not in the resume.
+_BULLET_SYSTEM = """You rewrite resume experience bullets for one job.
+Use only facts already written in each bullet.
 
-BULLETS:
-Rewrite every experience bullet so the wording fits the job. Keep the same facts, numbers, employers, and order. One bullet per line, each starting with "- ". Do not add or remove bullets.
+Rules:
+- Return the same number of bullets, in the same order.
+- One bullet per line. Each line starts with "- ".
+- Keep the same facts, numbers, employers, and products.
+- Only change wording so the bullet fits the target job.
+- Do not add or remove bullets. No headings. No commentary.
 """
 
 
@@ -72,7 +85,7 @@ def ollama_status() -> dict:
 
 
 def rewrite_for_job(resume: str, job: dict) -> tuple[str, list[str]]:
-    """Ask Ollama for a targeted summary and rewritten experience bullets."""
+    """Ask Ollama for a job summary first, then optional rewritten bullets."""
     if not ollama_enabled():
         raise OllamaError("Ollama resume enhance is turned off")
     text = (resume or "").strip()
@@ -82,22 +95,32 @@ def rewrite_for_job(resume: str, job: dict) -> tuple[str, list[str]]:
     description = _clip_description(str(job.get("description") or ""))
     if not title and not description:
         raise OllamaError("Job has no title or description")
-    model = _model_name()
-    payload = {
-        "model": model,
-        "stream": False,
-        "messages": [
-            {"role": "system", "content": _SYSTEM},
-            {"role": "user", "content": _user_prompt(text[:12000], job, title, description)},
-        ],
-        "options": {"temperature": 0.3, "num_ctx": 8192, "num_predict": 1400},
-    }
-    parsed = _request("/api/chat", payload, _timeout())
-    message = parsed.get("message") or {}
-    summary, bullets = _parse_tailoring(_strip_think(str(message.get("content") or "")))
-    if len(summary) < 80 and not bullets:
-        raise OllamaError("Ollama returned an empty resume tailoring")
-    log.info("Ollama tailored resume with model %s for %s", model, title or "untitled job")
+
+    summary = _chat(
+        _SUMMARY_SYSTEM,
+        _summary_prompt(text[:9000], job, title, description),
+        temperature=0.35,
+        num_predict=450,
+    )
+    summary = _one_paragraph(summary)
+    if len(summary) < 80:
+        raise OllamaError("Ollama returned an empty summary")
+
+    bullets: list[str] = []
+    bullet_src = _experience_bullets(text)
+    if bullet_src:
+        try:
+            raw_bullets = _chat(
+                _BULLET_SYSTEM,
+                _bullet_prompt(bullet_src, job, title, description),
+                temperature=0.25,
+                num_predict=1200,
+            )
+            bullets = _parse_bullets(raw_bullets)
+        except OllamaError as exc:
+            log.warning("Ollama bullet rewrite skipped: %s", exc)
+
+    log.info("Ollama wrote a summary with model %s for %s", _model_name(), title or "untitled job")
     return summary, bullets
 
 
@@ -115,18 +138,75 @@ def _status_now() -> dict:
     return {**base, "ok": True, "model": _choose_model(names), "models": names[:8]}
 
 
-def _user_prompt(resume: str, job: dict, title: str, description: str) -> str:
+def _summary_prompt(resume: str, job: dict, title: str, description: str) -> str:
     company = str(job.get("company") or "").strip() or "(not listed)"
-    skills = _skill_names(job.get("skills"))
-    skill_block = "\n".join(f"- {skill}" for skill in skills[:25]) or "- (none listed)"
     posting = description or "(no description stored)"
     return (
-        f"JOB TITLE:\n{title or '(not listed)'}\n\n"
+        f"TARGET JOB TITLE:\n{title or '(not listed)'}\n\n"
         f"COMPANY:\n{company}\n\n"
-        f"JOB SKILLS TO EMPHASIZE ONLY IF ALREADY IN THE RESUME:\n{skill_block}\n\n"
         f"JOB DESCRIPTION:\n{posting}\n\n"
         f"RESUME:\n{resume}"
     )
+
+
+def _bullet_prompt(bullets: list[str], job: dict, title: str, description: str) -> str:
+    company = str(job.get("company") or "").strip() or "(not listed)"
+    body = "\n".join(f"- {item}" for item in bullets)
+    return (
+        f"TARGET JOB TITLE:\n{title or '(not listed)'}\n\n"
+        f"COMPANY:\n{company}\n\n"
+        f"JOB DESCRIPTION:\n{description or '(no description stored)'}\n\n"
+        f"BULLETS TO REWRITE ({len(bullets)} lines):\n{body}"
+    )
+
+
+def _experience_bullets(resume: str) -> list[str]:
+    found: list[str] = []
+    in_experience = False
+    for line in (resume or "").splitlines():
+        stripped = line.strip()
+        if re.fullmatch(
+            r"(?i)professional experience|experience|work experience|work history|education|"
+            r"core competencies|skills|certifications|key achievements|projects|languages",
+            stripped,
+        ):
+            in_experience = stripped.lower() in {
+                "professional experience",
+                "experience",
+                "work experience",
+                "work history",
+            }
+            continue
+        if not in_experience:
+            continue
+        if re.match(r"^[\-•]\s+\S", stripped):
+            item = re.sub(r"^[\-•]\s*", "", stripped).strip()
+            if item and not re.match(r"^[A-Z][\w&.'-]{1,40}(?:\s+[A-Z][\w&.'-]+){0,5}\s+is\b", item):
+                found.append(item)
+    return found
+
+
+def _chat(system: str, user: str, temperature: float, num_predict: int) -> str:
+    model = _model_name()
+    payload = {
+        "model": model,
+        "stream": False,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        "options": {
+            "temperature": temperature,
+            "num_ctx": 8192,
+            "num_predict": num_predict,
+        },
+    }
+    parsed = _request("/api/chat", payload, _timeout())
+    message = parsed.get("message") or {}
+    content = _strip_think(str(message.get("content") or ""))
+    if len(content.strip()) < 20:
+        raise OllamaError("Ollama returned an empty response")
+    return content
 
 
 def _model_name() -> str:
@@ -204,18 +284,18 @@ def _request(path: str, payload: dict | None, timeout: float) -> dict:
 
 def _timeout() -> float:
     try:
-        value = float(_env("OLLAMA_TIMEOUT", "90") or "90")
+        value = float(_env("OLLAMA_TIMEOUT", "120") or "120")
     except ValueError:
-        value = 90
-    return max(10.0, min(value, 180.0))
+        value = 120
+    return max(20.0, min(value, 240.0))
 
 
-def _clip_description(text: str, limit: int = 4000) -> str:
+def _clip_description(text: str, limit: int = 3500) -> str:
     plain = _plain_text(text)
     if len(plain) <= limit:
         return plain
-    head = plain[:2600].rsplit(" ", 1)[0]
-    tail = plain[-1200:].split(" ", 1)[-1]
+    head = plain[:2300].rsplit(" ", 1)[0]
+    tail = plain[-1000:].split(" ", 1)[-1]
     return f"{head}\n...\n{tail}"
 
 
@@ -230,49 +310,26 @@ def _plain_text(text: str) -> str:
     return cleaned.strip()
 
 
-def _skill_names(value) -> list[str]:
-    if isinstance(value, str):
-        items = re.split(r"[,;\n|]", value)
-    elif isinstance(value, (list, tuple)):
-        items = list(value)
-    else:
-        items = []
-    names = []
-    seen = set()
-    for item in items:
-        if isinstance(item, dict):
-            text = str(item.get("name") or item.get("skill") or "")
-        else:
-            text = str(item or "")
-        text = re.sub(r"\s+", " ", text).strip()
-        key = text.lower()
-        if len(text) < 2 or key in seen:
-            continue
-        seen.add(key)
-        names.append(text)
-    return names
-
-
-def _parse_tailoring(text: str) -> tuple[str, list[str]]:
-    cleaned = _strip_think(text)
-    cleaned = re.sub(r"^```[a-zA-Z0-9]*\n|\n```$", "", cleaned).strip()
-    summary_match = re.search(r"(?is)\bSUMMARY:\s*(.*?)(?:\n\s*BULLETS:|\Z)", cleaned)
-    bullet_match = re.search(r"(?is)\bBULLETS:\s*(.*)\Z", cleaned)
-    summary_raw = summary_match.group(1) if summary_match else cleaned
-    summary = _one_paragraph(summary_raw)
+def _parse_bullets(text: str) -> list[str]:
     bullets: list[str] = []
-    if bullet_match:
-        for line in bullet_match.group(1).splitlines():
-            item = re.sub(r"^[\-\u2022•]\s*", "", line).strip()
-            if item and not re.match(r"(?i)^summary\b", item):
-                bullets.append(item)
-    return summary, bullets
+    for line in (text or "").splitlines():
+        item = re.sub(r"^[\-\u2022•]\s*", "", line).strip()
+        if len(item) < 20:
+            continue
+        if re.match(r"(?i)^(summary|bullets?|here is|here's)\b", item):
+            continue
+        bullets.append(item)
+    return bullets
 
 
 def _one_paragraph(text: str) -> str:
     cleaned = _strip_think(text)
     cleaned = re.sub(r"^```[a-zA-Z0-9]*\n|\n```$", "", cleaned).strip()
-    cleaned = re.sub(r"(?i)^(professional summary|summary|here is|here's)\s*:?\s*", "", cleaned).strip()
+    cleaned = re.sub(
+        r"(?i)^(professional summary|summary|here is|here's|bullets?)\s*:?\s*",
+        "",
+        cleaned,
+    ).strip()
     lines = [re.sub(r"^[\-•]\s*", "", line).strip() for line in cleaned.splitlines() if line.strip()]
     return re.sub(r"\s+", " ", " ".join(lines)).strip()
 

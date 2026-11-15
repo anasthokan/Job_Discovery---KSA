@@ -227,34 +227,39 @@ def resume_text_rank(text: str) -> tuple[int, int, int]:
 
 
 def _aim_document_at_job(document: str, job: dict[str, Any]) -> tuple[str, str]:
-    """Keep the resume structure. Ollama rewrites the summary and the experience bullets."""
-    base = _readable_dates(_plain_company_lines(document))
-    summary, bullets = _tailoring_from_ollama(base, job)
-    if not summary and not bullets:
-        return tailor_document_for_job(base, job), "profile"
+    """Keep the resume structure. Always put a job-aimed summary; prefer Ollama wording."""
+    base = _dedupe_certifications(_readable_dates(_plain_company_lines(document)))
+    summary, bullets, mode = _tailoring_from_ollama(base, job)
+    if not summary:
+        summary = _local_job_summary(base, job)
+        mode = "local" if summary else "profile"
     if summary:
         base = _replace_summary_section(base, summary)
     if bullets:
         base = _replace_experience_bullets(base, bullets)
-    return base, "ollama"
+    if mode == "profile":
+        return tailor_document_for_job(base, job), mode
+    return base, mode
 
 
-def _tailoring_from_ollama(document: str, job: dict[str, Any]) -> tuple[str, list[str]]:
+def _tailoring_from_ollama(document: str, job: dict[str, Any]) -> tuple[str, list[str], str]:
     if not ollama_enabled() or len((document or "").strip()) < 40 or not job:
-        return "", []
+        return "", [], "profile"
     if not (str(job.get("title") or "").strip() or str(job.get("description") or "").strip()):
-        return "", []
+        return "", [], "profile"
     try:
         summary, bullets = rewrite_for_job(document, job)
     except OllamaError as exc:
         log.warning("Ollama resume enhance skipped: %s", exc)
-        return "", []
+        return "", [], "profile"
     except Exception as exc:
         log.warning("Ollama resume enhance failed: %s", exc)
-        return "", []
+        return "", [], "profile"
     summary = _clean_summary(summary, document, job)
     bullets = _clean_bullets(bullets, document, job)
-    return summary, bullets
+    if not summary and not bullets:
+        return "", [], "profile"
+    return summary, bullets, "ollama"
 
 
 _SUMMARY_HEADINGS = {"PROFESSIONAL SUMMARY", "SUMMARY", "CAREER OBJECTIVE", "OBJECTIVE"}
@@ -318,14 +323,75 @@ _MONTHS = (
 def _clean_summary(summary: str, document: str, job: dict[str, Any]) -> str:
     """Keep the Ollama paragraph. Drop only a sentence that names a skill the resume does not have."""
     text = re.sub(r"\s+", " ", summary or "").strip()
-    if len(text) < 80:
+    if len(text) < 60:
         return ""
     kept = [part.strip() for part in re.split(r"(?<=[.!?])\s+", text) if part.strip()]
     safe = [part for part in kept if not _mentions_new_skill(part, document, job)]
     paragraph = " ".join(safe or kept)
-    if len(paragraph) < 80:
+    if len(paragraph) < 60:
         return ""
     return paragraph[:1100]
+
+
+def _local_job_summary(document: str, job: dict[str, Any]) -> str:
+    """Job-aimed summary when Ollama is down, so the PDF still shows a tailored opening."""
+    title = str(job.get("title") or "").strip()
+    if not title:
+        return ""
+    company = str(job.get("company") or "").strip()
+    target = f"{title} role at {company}" if company else f"{title} role"
+    strengths = _strengths_for_job(document, job)
+    years = _years_from_text(document)
+    opening = (
+        f"Product and technology leader with {years} of experience delivering digital platforms"
+        if years
+        else "Product and technology leader with proven experience delivering digital platforms"
+    )
+    if strengths:
+        return (
+            f"{opening} across insurance, mobility, and enterprise services. "
+            f"This record is aimed at the {target}, with direct experience in {strengths}. "
+            f"The same resume shows end-to-end product ownership, cross-functional delivery, "
+            f"and measurable platform outcomes that transfer to this opening."
+        )
+    return (
+        f"{opening} across insurance, mobility, and enterprise services. "
+        f"This record is aimed at the {target}, drawing on the product leadership, "
+        f"platform delivery, and stakeholder work already listed below."
+    )
+
+
+def _years_from_text(document: str) -> str:
+    match = re.search(r"(?i)\b(\d{1,2}\+?\s*years?(?:\s+of\s+experience)?)\b", document or "")
+    if match:
+        return re.sub(r"\s+", " ", match.group(1)).strip()
+    years = sorted({int(item) for item in re.findall(r"\b((?:19|20)\d{2})\b", document or "")})
+    if len(years) >= 2:
+        span = max(years) - min(years)
+        if 5 <= span <= 40:
+            return f"{span}+ years"
+    return ""
+
+
+def _dedupe_certifications(document: str) -> str:
+    pieces = _split_resume_sections(document)
+    output: list[str] = []
+    for heading, body in pieces:
+        if heading.upper() == "CERTIFICATIONS":
+            seen: set[str] = set()
+            kept: list[str] = []
+            for line in body:
+                key = re.sub(r"^[\-•]\s*", "", line).strip().lower()
+                key = re.sub(r"\s*[—\-]\s*.*$", "", key).strip()
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                kept.append(line)
+            body = kept
+        if heading:
+            output.append(heading)
+        output.extend(body)
+    return "\n".join(output).strip() + ("\n" if output else "")
 
 
 def _clean_bullets(bullets: list[str], document: str, job: dict[str, Any]) -> list[str]:

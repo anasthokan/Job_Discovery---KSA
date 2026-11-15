@@ -1395,15 +1395,23 @@ def _download_filename(filename: str, media_type: str) -> str:
     return f"{stem}{extension}"
 
 
-def _file_download(content: bytes, filename: str, media_type: str) -> Response:
+def _file_download(
+    content: bytes,
+    filename: str,
+    media_type: str,
+    extra_headers: dict[str, str] | None = None,
+) -> Response:
     safe = _download_filename(filename, media_type)
+    headers = {
+        "Content-Disposition": f'attachment; filename="{safe}"',
+        "X-Content-Type-Options": "nosniff",
+    }
+    if extra_headers:
+        headers.update(extra_headers)
     return Response(
         content=content,
         media_type=media_type,
-        headers={
-            "Content-Disposition": f'attachment; filename="{safe}"',
-            "X-Content-Type-Options": "nosniff",
-        },
+        headers=headers,
     )
 
 
@@ -2509,6 +2517,7 @@ def enhance_user_resume(
     try:
         built = enhance_profile_for_job(profile, job)
         cv_text = built.get("cv_text") or ""
+        mode = str(built.get("mode") or "profile")
         if fmt == "docx":
             content = cv_text_to_docx(cv_text)
             media = DOCX_TYPE
@@ -2520,7 +2529,12 @@ def enhance_user_resume(
         raise HTTPException(status_code=status, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Resume enhance failed: {exc}") from exc
-    return _file_download(content, _enhanced_filename(job, fmt), media)
+    return _file_download(
+        content,
+        _enhanced_filename(job, fmt),
+        media,
+        {"X-Resume-Enhance-Mode": mode},
+    )
 
 
 class ProfileJob(BaseModel):
