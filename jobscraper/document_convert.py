@@ -32,6 +32,7 @@ SECTION_HEADINGS = {
     "technical skills",
     "core skills",
     "projects",
+    "key achievements",
     "summary",
     "profile",
     "professional summary",

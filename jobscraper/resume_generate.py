@@ -10,7 +10,7 @@ import json
 import re
 from typing import Any, Callable
 
-from jobscraper.jd_to_cv import parse_job_description, render_cv_text
+from jobscraper.jd_to_cv import parse_job_description
 from jobscraper.ollama_resume import OllamaError, active_model, complete
 
 _SYSTEM = """You write resume wording from facts the user already supplied.
@@ -20,11 +20,13 @@ Rules:
 - Use only employers, titles, dates, skills, schools, and numbers present in FACTS.
 - Do not add employers, degrees, certifications, tools, or metrics.
 - Do not say the person works at the hiring company unless that company is already in FACTS.
-- summary: 4 to 6 sentences. Third person. No "I". Name the target job title once.
-- experience: same roles, same order, same company and title strings. Rewrite bullets only.
-- Each role gets 3 to 5 bullets. If a role has no bullets, write them only from that title and the listed skills, with no numbers.
+- summary: 5 to 6 sentences. Third person. No "I". Name the target job title once.
+- key_achievements: 4 to 6 bullets. Each bullet restates a supplied experience bullet or applies a supplied skill. No new numbers.
+- experience: same roles, same order, same company and title strings. 4 to 6 bullets each, covering the supplied skills that fit the role. No new numbers.
+- projects: include 2 or 3 only when FRESHER is true or FACTS already lists projects. Keep a supplied project name. If FRESHER is true and no project was supplied, name each project after a supplied skill. No clients and no metrics.
 - skills: reorder the given skills so the most relevant come first. Do not add skills.
-- Keys: summary (string), skills (array of strings), experience (array of {company, title, bullets}).
+- Do not return education or certifications.
+- Keys: summary, skills, key_achievements, experience (array of {company, title, bullets}), projects (array of {name, description}).
 """
 
 _NUMBER_RE = re.compile(r"(?:\$\s*)?\d[\d,]*(?:\.\d+)?%?")
@@ -83,15 +85,37 @@ def generate_resume(
         company,
         allowed_numbers,
     )
+    original_roles = [dict(role) for role in (cv.get("experience") or [])]
     experience, bullets_changed = _experience_from_model(
         cv.get("experience") or [],
         generated.get("experience") or [],
         hiring_company=company,
     )
     skills = _order_skills(list(cv.get("skills") or []), generated.get("skills") or [])
+    experience = _pad_experience(experience, skills, title)
+    fresher = _is_fresher(original_roles)
+    achievements = _achievements_from_model(
+        generated.get("key_achievements"),
+        cv.get("achievements") or [],
+        allowed_numbers,
+        company,
+    )
+    if len(achievements) < 4:
+        achievements = _fill_achievements(achievements, original_roles, skills, title)
+    projects = _projects_from_model(
+        cv.get("projects") or [],
+        generated.get("projects"),
+        skills,
+        title,
+        fresher=fresher,
+        allowed_numbers=allowed_numbers,
+        hiring_company=company,
+    )
     cv["profile"]["summary"] = summary
     cv["experience"] = experience
     cv["skills"] = skills
+    cv["achievements"] = achievements
+    cv["projects"] = projects
 
     job_view = _job_view(title, company, location, description)
     return {
@@ -101,14 +125,16 @@ def generate_resume(
         "target_title": title,
         "summary_source": summary_source,
         "rewritten": summary_source == "model" or bullets_changed,
+        "fresher": fresher,
         "note": (
             "Employers, dates, skills, education, and certifications come from the request. "
-            "The model rewrote the summary and experience bullets."
+            "Key achievements and professional experience are written from those facts. "
+            "Projects are included for freshers."
         ),
         "job": job_view,
         "match": _match(skills, description, job_view.get("required_skills") or []),
         "cv": cv,
-        "cv_text": render_cv_text(cv),
+        "cv_text": render_resume_text(cv),
     }
 
 
@@ -119,7 +145,7 @@ def _write(prompt: str, writer: Writer | None) -> tuple[str, str]:
         "Return only the JSON object described in the user message.",
         prompt,
         temperature=0.2,
-        num_predict=1600,
+        num_predict=2200,
         timeout=120,
     )
     return text, active_model() or "ollama"
@@ -143,8 +169,9 @@ def _copy_facts(facts: dict[str, Any]) -> dict[str, Any]:
         "experience": [_clean_role(item) for item in (facts.get("experience") or []) if isinstance(item, dict)],
         "education": [dict(item) for item in (facts.get("education") or []) if isinstance(item, dict)],
         "projects": [dict(item) for item in (facts.get("projects") or []) if isinstance(item, dict)],
-        "certifications": _clean_list(facts.get("certifications") or []),
+        "certifications": _cert_names(facts.get("certifications") or []),
         "languages": _clean_list(facts.get("languages") or []),
+        "achievements": _as_bullets(facts.get("achievements") or []),
     }
 
 
@@ -195,6 +222,8 @@ def _prompt_facts(cv: dict[str, Any], title: str, company: str, description: str
             if isinstance(item, dict)
         ],
         "languages": cv.get("languages") or [],
+        "key_achievements": list(cv.get("achievements") or [])[:6],
+        "fresher": _is_fresher(cv.get("experience") or []),
     }
     return json.dumps(payload, ensure_ascii=False)
 
@@ -262,6 +291,240 @@ def _experience_from_model(
             changed = True
         merged.append(kept)
     return merged, changed
+
+
+def _pad_experience(roles: list[dict[str, Any]], skills: list[str], target: str) -> list[dict[str, Any]]:
+    """Give each job enough bullets to fill a professional experience section."""
+    padded = []
+    for role in roles:
+        kept = dict(role)
+        bullets = list(kept.get("bullets") or [])
+        title = kept.get("title") or target or "this role"
+        company = kept.get("company") or ""
+        place = f" at {company}" if company else ""
+        additions = []
+        if skills:
+            additions.append(f"Applied {', '.join(skills[:4])} in the {title} role{place}.")
+        if len(skills) > 4:
+            additions.append(f"Used {', '.join(skills[4:8])} to support the same {title} work{place}.")
+        additions.append(f"Handled day-to-day {title} responsibilities{place}, from implementation through handover.")
+        seen = {item.lower() for item in bullets}
+        for item in additions:
+            if len(bullets) >= 5:
+                break
+            if item.lower() in seen:
+                continue
+            bullets.append(item)
+            seen.add(item.lower())
+        kept["bullets"] = bullets[:6]
+        padded.append(kept)
+    return padded
+
+
+def _is_fresher(experience: list[dict[str, Any]]) -> bool:
+    if not experience:
+        return True
+    intern = re.compile(r"(?i)\b(intern|trainee|fresher|student)\b")
+    if all(intern.search(str(role.get("title") or "")) for role in experience):
+        return True
+    span = _year_span(experience)
+    return span is not None and span < 1
+
+
+def _achievements_from_model(
+    generated: Any,
+    supplied: list[str],
+    allowed_numbers: set[str],
+    hiring_company: str,
+) -> list[str]:
+    source = _as_bullets(generated) or list(supplied)
+    kept = []
+    hiring = hiring_company.strip().lower()
+    for bullet in source:
+        if _has_new_number(bullet, allowed_numbers):
+            continue
+        if hiring and hiring not in " ".join(supplied).lower() and hiring in bullet.lower():
+            continue
+        kept.append(bullet)
+    return _dedupe(kept)[:6]
+
+
+def _fill_achievements(
+    current: list[str],
+    roles: list[dict[str, Any]],
+    skills: list[str],
+    target: str,
+) -> list[str]:
+    found = list(current)
+    for role in roles:
+        title = role.get("title") or target or "the role"
+        company = role.get("company") or ""
+        where = f" at {company}" if company else ""
+        for bullet in role.get("bullets") or []:
+            found.append(f"{str(bullet).rstrip('.')} while working as {title}{where}.")
+    if skills:
+        found.append(f"Demonstrated hands-on use of {', '.join(skills[:6])}.")
+    if target and skills:
+        found.append(f"Aligned {', '.join(skills[:3])} work with {target} responsibilities.")
+    return _dedupe(found)[:6]
+
+
+def _projects_from_model(
+    original: list[dict[str, Any]],
+    generated: Any,
+    skills: list[str],
+    target: str,
+    *,
+    fresher: bool,
+    allowed_numbers: set[str],
+    hiring_company: str,
+) -> list[dict[str, Any]]:
+    if not fresher and not original:
+        return []
+    incoming = generated if isinstance(generated, list) else []
+    if original:
+        merged = []
+        for index, project in enumerate(original):
+            kept = {
+                "name": _or_none(project.get("name")) or "Project",
+                "description": _or_none(project.get("description")),
+            }
+            row = incoming[index] if index < len(incoming) and isinstance(incoming[index], dict) else {}
+            description = _one_paragraph(str(row.get("description") or ""))
+            if (
+                len(description) >= 20
+                and not _has_new_number(description, allowed_numbers)
+                and not (hiring_company and hiring_company.lower() not in str(kept.get("description") or "").lower() and hiring_company.lower() in description.lower())
+            ):
+                kept["description"] = description[:300]
+            merged.append(kept)
+        return merged
+    accepted = []
+    hiring = hiring_company.strip().lower()
+    for row in incoming:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name") or "").strip()
+        description = _one_paragraph(str(row.get("description") or ""))
+        if len(name) < 3 or len(description) < 20:
+            continue
+        if _has_new_number(f"{name} {description}", allowed_numbers):
+            continue
+        if hiring and hiring in f"{name} {description}".lower():
+            continue
+        accepted.append({"name": name[:80], "description": description[:300]})
+    if accepted:
+        return accepted[:3]
+    return _fallback_projects(skills, target)
+
+
+def _fallback_projects(skills: list[str], target: str) -> list[dict[str, Any]]:
+    if not skills:
+        return []
+    groups = [skills[:2]]
+    if len(skills) > 2:
+        groups.append(skills[2:4] or skills[:1])
+    projects = []
+    for group in groups:
+        if not group:
+            continue
+        projects.append(
+            {
+                "name": f"{group[0]} Project",
+                "description": (
+                    f"Personal project applying {', '.join(group)} toward {target or 'software'} work, "
+                    "covering design, implementation, and a short demo."
+                ),
+            }
+        )
+    return projects[:3]
+
+
+def render_resume_text(cv: dict[str, Any]) -> str:
+    """Resume text with the sections the PDF download shows."""
+    profile = cv.get("profile") or {}
+    contact = [value for value in (profile.get("location"), profile.get("email"), profile.get("phone")) if value]
+    links = [value for value in (profile.get("linkedin"), profile.get("github"), profile.get("website")) if value]
+    parts = ["\n".join(bit for bit in [profile.get("full_name") or "[Your Name]", " | ".join(contact), " | ".join(links)] if bit)]
+    if profile.get("summary"):
+        parts.append("SUMMARY\n" + profile["summary"])
+    if cv.get("skills"):
+        parts.append("SKILLS\n" + ", ".join(cv["skills"]))
+    if cv.get("achievements"):
+        parts.append("KEY ACHIEVEMENTS\n" + "\n".join(f"- {item}" for item in cv["achievements"]))
+    if cv.get("experience"):
+        blocks = ["PROFESSIONAL EXPERIENCE"]
+        for job in cv["experience"]:
+            meta = " | ".join(value for value in (job.get("title"), job.get("company"), job.get("location")) if value)
+            dates = " - ".join(value for value in (job.get("start_date"), job.get("end_date")) if value)
+            if meta:
+                blocks.append(meta)
+            if dates:
+                blocks.append(dates)
+            for bullet in job.get("bullets") or []:
+                blocks.append(f"- {bullet}")
+            blocks.append("")
+        parts.append("\n".join(blocks).strip())
+    if cv.get("projects"):
+        blocks = ["PROJECTS"]
+        for project in cv["projects"]:
+            blocks.append(project.get("name") or "Project")
+            if project.get("description"):
+                blocks.append(f"- {project['description']}")
+        parts.append("\n".join(blocks))
+    if cv.get("certifications"):
+        parts.append("CERTIFICATIONS\n" + "\n".join(f"- {item}" for item in cv["certifications"]))
+    education = _education_lines(cv.get("education") or [])
+    if education:
+        parts.append("EDUCATION\n" + "\n".join(education))
+    if cv.get("languages"):
+        parts.append("LANGUAGES\n" + ", ".join(cv["languages"]))
+    return "\n\n".join(parts).strip() + "\n"
+
+
+def _education_lines(items: list[dict[str, Any]]) -> list[str]:
+    lines = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        degree = " ".join(value for value in (item.get("degree"), item.get("field")) if value).strip()
+        years = " - ".join(value for value in (item.get("start_year"), item.get("end_year")) if value)
+        line = " | ".join(value for value in (degree or None, item.get("institution"), years or None) if value)
+        gpa = str(item.get("gpa") or "").strip()
+        if gpa:
+            line = f"{line} | GPA {gpa}" if line else f"GPA {gpa}"
+        if line:
+            lines.append(line)
+    return lines
+
+
+def _cert_names(values: Any) -> list[str]:
+    names = []
+    for item in values or []:
+        if isinstance(item, dict):
+            text = " — ".join(
+                part
+                for part in (str(item.get("name") or item.get("title") or "").strip(), str(item.get("issuer") or "").strip())
+                if part
+            )
+        else:
+            text = str(item or "").strip()
+        if text:
+            names.append(text)
+    return _clean_list(names)
+
+
+def _dedupe(values: list[str]) -> list[str]:
+    found = []
+    seen: set[str] = set()
+    for item in values:
+        text = re.sub(r"\s+", " ", str(item or "").strip())
+        key = text.lower()
+        if len(text) < 12 or key in seen:
+            continue
+        seen.add(key)
+        found.append(text)
+    return found
 
 
 def _order_skills(original: list[str], suggested: Any) -> list[str]:

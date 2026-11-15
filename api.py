@@ -515,6 +515,7 @@ class ResumeGenerateRequest(BaseModel):
     website: str = ""
     summary: str = Field("", description="Optional existing summary. The model may rewrite it.")
     skills: list[str] = Field(default_factory=list)
+    key_achievements: list[str] = Field(default_factory=list, description="Optional achievement bullets")
     experience: list[ResumeExperience] = Field(default_factory=list)
     education: list[ResumeEducation] = Field(default_factory=list)
     projects: list[ResumeProject] = Field(default_factory=list)
@@ -2586,7 +2587,7 @@ def _merge_cv(base: dict, extra: dict) -> dict:
         if value not in (None, "", []):
             profile[key] = value
     merged = {**base, "profile": profile}
-    for key in ("skills", "experience", "education", "projects", "certifications", "languages"):
+    for key in ("skills", "experience", "education", "projects", "certifications", "languages", "achievements"):
         values = extra.get(key) or []
         if values:
             merged[key] = values
@@ -2602,6 +2603,7 @@ def _blank_cv() -> dict:
         "projects": [],
         "certifications": [],
         "languages": [],
+        "achievements": [],
     }
 
 
@@ -2645,6 +2647,7 @@ def _facts_for_generate(body: ResumeGenerateRequest) -> tuple[dict, dict | None]
         {
             "profile": explicit_profile,
             "skills": body.skills,
+            "achievements": body.key_achievements,
             "experience": [item.model_dump() for item in body.experience],
             "education": [item.model_dump() for item in body.education],
             "projects": [item.model_dump() for item in body.projects],

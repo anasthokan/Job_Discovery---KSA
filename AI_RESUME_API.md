@@ -18,7 +18,14 @@ Saved-user file rewrite: `POST /api/resume/enhance` in `RESUME_API.md`.
 
 `POST /api/resume/generate` asks the local Ollama model to write a resume from facts you send.
 
-The model rewrites the professional summary and the experience bullets so they read toward `target_title` or a job description. It does **not** invent employers, job titles, dates, skills, degrees, certifications, or numbers that were not in the request.
+The model writes a fuller resume toward `target_title` or a job description. The PDF includes:
+
+- **KEY ACHIEVEMENTS**
+- **PROFESSIONAL EXPERIENCE**
+- **PROJECTS** when the person is a fresher, or when projects were sent
+- **CERTIFICATIONS** and **EDUCATION** when those facts were sent
+
+It does **not** invent employers, job titles, dates, skills, degrees, certifications, or numbers that were not in the request. Send `education`, `certifications`, and `projects` when you want those sections filled with real facts. A fresher with only skills still gets a Projects section written from those skills.
 
 You can send the facts directly, paste `resume_text`, send parsed `resume` JSON from `/api/resume/parse`, or pass `user_id` for a saved profile. When more than one is sent, explicit fields win. Empty fields do not erase a loaded profile.
 
