@@ -1,0 +1,17 @@
+$kind: collection
+name: EzyJob AI Cover Letter
+description: |-
+  Generate a cover letter with the local Ollama model from facts the caller sends.
+  No auth.
+
+  Set base_url to the API host. Local default is http://127.0.0.1:9002.
+  The greeting uses hiring_manager when that name is sent. Otherwise it is
+  Dear Hiring Manager. The model writes three first-person paragraphs.
+  It must not add employers or numbers that were not in the request.
+  format=pdf is the default and downloads cover-letter.pdf. format=docx
+  downloads Word. format=json returns the letter JSON.
+  A 503 means Ollama is off or unreachable. Check GET /api/health field ollama.ok.
+variables:
+  - key: base_url
+    value: 'http://127.0.0.1:9002'
+    description: API host. Change this for the deployed server.

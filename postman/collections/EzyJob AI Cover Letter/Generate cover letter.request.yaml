@@ -1,0 +1,54 @@
+$kind: http-request
+name: Generate cover letter
+method: POST
+url: '{{base_url}}/api/cover-letter/generate?format=json'
+order: 2000
+queryParams:
+  - key: format
+    value: json
+    description: json returns the letter body. pdf and docx download a file.
+headers:
+  - key: Content-Type
+    value: application/json
+description: |-
+  Writes a letter for the Senior Backend Engineer role at Northwind.
+  Acme Corp must stay the employer in the letter. Needs a reachable Ollama
+  model; otherwise the status is 503. This call can take about 90 seconds.
+body:
+  type: json
+  content: |-
+    {
+      "target_title": "Senior Backend Engineer",
+      "company": "Northwind",
+      "hiring_manager": "Sara Ali",
+      "full_name": "Jane Doe",
+      "email": "jane@example.com",
+      "location": "Riyadh",
+      "skills": ["Python", "FastAPI", "PostgreSQL"],
+      "experience": [
+        {
+          "title": "Software Engineer",
+          "company": "Acme Corp",
+          "start_date": "Jan 2022",
+          "end_date": "Present",
+          "bullets": ["Built APIs used by 2 million users"]
+        }
+      ]
+    }
+scripts:
+  - type: afterResponse
+    language: text/javascript
+    code: |-
+      pm.test("letter keeps the supplied name, greeting, and employer", function () {
+        pm.response.to.have.status(200);
+        const body = pm.response.json();
+        pm.expect(body.ok).to.eql(true);
+        pm.expect(body.mode).to.eql("generated");
+        pm.expect(body.letter.greeting).to.eql("Dear Sara Ali,");
+        pm.expect(body.letter.signature).to.eql("Jane Doe");
+        pm.expect(body.letter.paragraphs).to.have.lengthOf(3);
+        pm.expect(body.letter_text).to.include("Acme Corp");
+        pm.expect(body.letter_text).to.include("Northwind");
+        pm.expect(body.job.company).to.eql("Northwind");
+      });
+examples: './.resources/Generate cover letter.resources/examples'

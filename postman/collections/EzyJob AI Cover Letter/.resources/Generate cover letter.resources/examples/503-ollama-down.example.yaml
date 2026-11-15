@@ -1,0 +1,18 @@
+$kind: http-example
+name: 503 ollama down
+order: 3000
+request:
+  url: '{{base_url}}/api/cover-letter/generate'
+  method: POST
+response:
+  statusCode: 503
+  statusText: Service Unavailable
+  headers:
+    - key: Content-Type
+      value: application/json
+  body:
+    type: json
+    content: |-
+      {
+        "detail": "Ollama is not reachable at http://127.0.0.1:11434: [WinError 10061] No connection could be made because the target machine actively refused it"
+      }

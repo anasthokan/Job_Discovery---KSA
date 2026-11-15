@@ -84,6 +84,7 @@ from jobscraper.linkedin_profile import LinkedInProfileError, autofill_from_link
 from jobscraper.profile_autofill import autofill_from_parsed
 from jobscraper.ollama_resume import ollama_status
 from jobscraper.resume_enhance import enhance_profile_for_job, resume_from_profile, resume_text_rank
+from jobscraper.cover_letter import CoverLetterError, generate_cover_letter
 from jobscraper.resume_generate import ResumeGenerateError, generate_resume
 from jobscraper.resume_parser import ResumeParseError, parse_resume_bytes, parse_resume_text
 from jobscraper.db import (
@@ -400,8 +401,8 @@ async def lifespan(_app):
 
 app = FastAPI(
     title="Job Discovery",
-    description="Job listings API, skill-based job recommendations, resume/CV parse, profile autofill from a resume, ATS resume score, job-description-to-CV, AI resume generation, resume enhance download, PDF/DOCX conversion, and MySQL job storage.",
-    version="1.8.0",
+    description="Job listings API, skill-based job recommendations, resume/CV parse, profile autofill from a resume, ATS resume score, job-description-to-CV, AI resume generation, AI cover letter generation, resume enhance download, PDF/DOCX conversion, and MySQL job storage.",
+    version="1.9.0",
     lifespan=lifespan,
     redirect_slashes=False,
 )
@@ -522,6 +523,36 @@ class ResumeGenerateRequest(BaseModel):
     certifications: list[str] = Field(default_factory=list)
     languages: list[str] = Field(default_factory=list)
     resume_text: str | None = Field(None, description="Optional raw resume text. Parsed, then rewritten.")
+    resume: ResumeInput | None = Field(None, description="Optional parsed resume JSON from /api/resume/parse")
+    user_id: str | None = Field(None, description="Optional saved user. Explicit fields override that profile.")
+    job_description: str = ""
+    job_title: str | None = None
+    company: str | None = None
+    job_location: str | None = None
+    job_id: str | None = Field(None, description="Optional scraped job id from /api/jobs")
+
+
+class CoverLetterRequest(BaseModel):
+    """Facts for a cover letter. Empty fields are ignored and do not erase a loaded profile."""
+
+    target_title: str = Field("", description="Role the letter should address")
+    hiring_manager: str = Field("", description="Optional name for the greeting. Otherwise Dear Hiring Manager.")
+    full_name: str = ""
+    email: str = ""
+    phone: str = ""
+    location: str = ""
+    linkedin: str = ""
+    github: str = ""
+    website: str = ""
+    summary: str = Field("", description="Optional existing summary. Used as a fact, not copied verbatim.")
+    skills: list[str] = Field(default_factory=list)
+    key_achievements: list[str] = Field(default_factory=list)
+    experience: list[ResumeExperience] = Field(default_factory=list)
+    education: list[ResumeEducation] = Field(default_factory=list)
+    projects: list[ResumeProject] = Field(default_factory=list)
+    certifications: list[str] = Field(default_factory=list)
+    languages: list[str] = Field(default_factory=list)
+    resume_text: str | None = Field(None, description="Optional raw resume text. Parsed, then used as facts.")
     resume: ResumeInput | None = Field(None, description="Optional parsed resume JSON from /api/resume/parse")
     user_id: str | None = Field(None, description="Optional saved user. Explicit fields override that profile.")
     job_description: str = ""
@@ -1412,12 +1443,13 @@ def _swap_extension(filename: str, extension: str) -> str:
     return f"{stem}{extension}"
 
 
-def _download_filename(filename: str, media_type: str) -> str:
+def _download_filename(filename: str, media_type: str, *, keep_name: bool = False) -> str:
     """Always a short name ending in the real extension. Long names get cut before .pdf."""
-    if media_type == PDF_TYPE:
-        return "resume.pdf"
-    if media_type == DOCX_TYPE:
-        return "resume.docx"
+    if not keep_name:
+        if media_type == PDF_TYPE:
+            return "resume.pdf"
+        if media_type == DOCX_TYPE:
+            return "resume.docx"
     suffix = Path(filename or "").suffix.lower()
     extension = suffix if re.fullmatch(r"\.[a-z0-9]{1,5}", suffix or "") else ""
     stem = re.sub(r"[^A-Za-z0-9_-]+", "_", Path(filename or "resume").stem).strip("_")[:24] or "resume"
@@ -1429,8 +1461,10 @@ def _file_download(
     filename: str,
     media_type: str,
     extra_headers: dict[str, str] | None = None,
+    *,
+    keep_name: bool = False,
 ) -> Response:
-    safe = _download_filename(filename, media_type)
+    safe = _download_filename(filename, media_type, keep_name=keep_name)
     headers = {
         "Content-Disposition": f'attachment; filename="{safe}"',
         "X-Content-Type-Options": "nosniff",
@@ -1573,6 +1607,7 @@ def health():
         "cv_from_job": True,
         "resume_enhance": True,
         "resume_generate": True,
+        "cover_letter": True,
         "ollama": ollama_status(),
         "pdf_docx_convert": True,
         "resume_formats": ["pdf", "docx", "txt"],
@@ -2619,7 +2654,7 @@ def _cv_from_parsed(parsed: dict) -> dict:
     }
 
 
-def _facts_for_generate(body: ResumeGenerateRequest) -> tuple[dict, dict | None]:
+def _facts_for_generate(body: ResumeGenerateRequest | CoverLetterRequest) -> tuple[dict, dict | None]:
     facts = _blank_cv()
     if body.user_id and body.user_id.strip():
         _cid, profile = _require_candidate(body.user_id.strip())
@@ -2710,6 +2745,84 @@ def generate_ai_resume(
             "X-Resume-Generate-Mode": str(built.get("mode") or "generated"),
             "X-Resume-Model": str(built.get("model") or "").replace("\n", " ")[:80],
         },
+    )
+
+
+@app.get("/api/cover-letter")
+def cover_letter_contract():
+    return {
+        "ok": True,
+        "service": "cover-letter",
+        "endpoints": {
+            "generate": {
+                "method": "POST",
+                "path": "/api/cover-letter/generate",
+                "content_type": "application/json",
+                "body": {
+                    "target_title": "Senior Backend Engineer",
+                    "company": "Northwind",
+                    "full_name": "Jane Doe",
+                    "skills": ["Python", "FastAPI"],
+                    "experience": [{"title": "Software Engineer", "company": "Acme Corp", "bullets": []}],
+                },
+                "query": {"format": "pdf"},
+                "returns": "application/pdf download named cover-letter.pdf. format=json returns JSON. format=docx returns Word.",
+                "note": "Writes with Ollama from the facts you send. Does not invent employers or numbers. Needs a job title, company, description, or job_id.",
+            },
+        },
+        "docs": "/docs",
+    }
+
+
+@app.post(
+    "/api/cover-letter/generate",
+    summary="Generate a cover letter with Ollama from supplied facts",
+)
+def generate_ai_cover_letter(
+    body: CoverLetterRequest,
+    file_format: str = Query("pdf", alias="format", description="pdf, docx, or json"),
+):
+    """Writes a first-person cover letter and downloads it as a PDF.
+
+    Ollama writes the paragraphs toward target_title or the job. The greeting
+    uses hiring_manager when that name is sent. format=docx downloads Word.
+    format=json returns the letter JSON instead of a file.
+    """
+    fmt = (file_format or "pdf").strip().lower()
+    if fmt not in {"json", "pdf", "docx"}:
+        raise HTTPException(status_code=400, detail="format must be json, pdf, or docx.")
+    facts, job = _facts_for_generate(body)
+    try:
+        built = generate_cover_letter(
+            facts,
+            job=job,
+            target_title=body.target_title,
+            hiring_manager=body.hiring_manager,
+        )
+    except CoverLetterError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    if fmt == "json":
+        return built
+    letter_text = built.get("letter_text") or ""
+    try:
+        if fmt == "docx":
+            content = cv_text_to_docx(letter_text)
+            media = DOCX_TYPE
+        else:
+            content = cv_text_to_pdf(letter_text)
+            media = PDF_TYPE
+    except ConvertError as exc:
+        raise HTTPException(status_code=getattr(exc, "status_code", 400), detail=str(exc)) from exc
+    return _file_download(
+        content,
+        f"cover-letter.{fmt}",
+        media,
+        {
+            "X-Cover-Letter-Mode": str(built.get("mode") or "generated"),
+            "X-Cover-Letter-Model": str(built.get("model") or "").replace("\n", " ")[:80],
+            "X-Cover-Letter-Source": str(built.get("letter_source") or "").replace("\n", " ")[:20],
+        },
+        keep_name=True,
     )
 
 

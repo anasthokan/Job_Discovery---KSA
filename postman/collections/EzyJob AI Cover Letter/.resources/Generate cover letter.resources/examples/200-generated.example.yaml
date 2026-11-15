@@ -1,0 +1,40 @@
+$kind: http-example
+name: 200 generated
+order: 1000
+request:
+  url: '{{base_url}}/api/cover-letter/generate'
+  method: POST
+response:
+  statusCode: 200
+  statusText: OK
+  headers:
+    - key: Content-Type
+      value: application/json
+  body:
+    type: json
+    content: |-
+      {
+        "ok": true,
+        "mode": "generated",
+        "model": "qwen2.5:7b",
+        "letter_source": "model",
+        "target_title": "Senior Backend Engineer",
+        "hiring_manager": "Sara Ali",
+        "note": "The greeting uses the hiring manager you sent, or Dear Hiring Manager. Employers and numbers that were not in the request are left out. The wording is first person.",
+        "job": {
+          "title": "Senior Backend Engineer",
+          "company": "Northwind",
+          "location": null
+        },
+        "letter": {
+          "greeting": "Dear Sara Ali,",
+          "paragraphs": [
+            "I am writing to apply for the Senior Backend Engineer role at Northwind. I am based in Riyadh and work with Python, FastAPI, and PostgreSQL.",
+            "As a Software Engineer at Acme Corp, I built APIs used by 2 million users.",
+            "I would welcome the chance to discuss how this experience fits the Senior Backend Engineer opening at Northwind."
+          ],
+          "closing": "Sincerely,",
+          "signature": "Jane Doe"
+        },
+        "letter_text": "Jane Doe\nRiyadh | jane@example.com\n\nDear Sara Ali,\n\nI am writing to apply for the Senior Backend Engineer role at Northwind.\n"
+      }

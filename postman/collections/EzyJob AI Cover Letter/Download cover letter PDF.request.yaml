@@ -1,0 +1,47 @@
+$kind: http-request
+name: Download cover letter PDF
+method: POST
+url: '{{base_url}}/api/cover-letter/generate?format=pdf'
+order: 3000
+queryParams:
+  - key: format
+    value: pdf
+    description: Default. The response is a cover-letter.pdf download.
+headers:
+  - key: Content-Type
+    value: application/json
+description: |-
+  Same body as Generate cover letter. The response is a PDF file named
+  cover-letter.pdf. In Postman use Send and Download. Needs a reachable
+  Ollama model.
+body:
+  type: json
+  content: |-
+    {
+      "target_title": "Senior Backend Engineer",
+      "company": "Northwind",
+      "hiring_manager": "Sara Ali",
+      "full_name": "Jane Doe",
+      "email": "jane@example.com",
+      "location": "Riyadh",
+      "skills": ["Python", "FastAPI", "PostgreSQL"],
+      "experience": [
+        {
+          "title": "Software Engineer",
+          "company": "Acme Corp",
+          "start_date": "Jan 2022",
+          "end_date": "Present",
+          "bullets": ["Built APIs used by 2 million users"]
+        }
+      ]
+    }
+scripts:
+  - type: afterResponse
+    language: text/javascript
+    code: |-
+      pm.test("cover letter downloads as a PDF", function () {
+        pm.response.to.have.status(200);
+        pm.expect(pm.response.headers.get("Content-Type")).to.include("application/pdf");
+        pm.expect(pm.response.headers.get("Content-Disposition")).to.include("cover-letter.pdf");
+        pm.expect(pm.response.headers.get("X-Cover-Letter-Source")).to.be.oneOf(["model", "facts"]);
+      });

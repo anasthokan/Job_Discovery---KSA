@@ -10,6 +10,8 @@ Interactive try-out: [http://74.208.184.175:517/docs](http://74.208.184.175:517/
 
 Related parse API: `RESUME_API.md`.
 
+Cover letter API: `COVER_LETTER_API.md` (`POST /api/cover-letter/generate`).
+
 Job-description-to-CV API (no model, template or reorder only): `CV_API.md`.
 
 Saved-user file rewrite: `POST /api/resume/enhance` in `RESUME_API.md`.

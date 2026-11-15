@@ -1,0 +1,18 @@
+$kind: http-example
+name: 400 missing job
+order: 2500
+request:
+  url: '{{base_url}}/api/cover-letter/generate'
+  method: POST
+response:
+  statusCode: 400
+  statusText: Bad Request
+  headers:
+    - key: Content-Type
+      value: application/json
+  body:
+    type: json
+    content: |-
+      {
+        "detail": "Send a job title, company, job description, or job_id so the letter has a role to address."
+      }

@@ -1,0 +1,16 @@
+$kind: http-request
+name: Cover letter contract
+method: GET
+url: '{{base_url}}/api/cover-letter'
+order: 1000
+description: Contract for AI cover letter generation. The generate entry is endpoints.generate.
+scripts:
+  - type: afterResponse
+    language: text/javascript
+    code: |-
+      pm.test("contract lists cover letter generation", function () {
+        const body = pm.response.json();
+        pm.response.to.have.status(200);
+        pm.expect(body.endpoints.generate.path).to.eql("/api/cover-letter/generate");
+        pm.expect(body.endpoints.generate.method).to.eql("POST");
+      });
