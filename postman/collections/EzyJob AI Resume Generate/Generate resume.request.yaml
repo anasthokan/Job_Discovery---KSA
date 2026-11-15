@@ -1,8 +1,12 @@
 $kind: http-request
 name: Generate resume
 method: POST
-url: '{{base_url}}/api/resume/generate'
+url: '{{base_url}}/api/resume/generate?format=json'
 order: 2000
+queryParams:
+  - key: format
+    value: json
+    description: json returns the resume body. pdf and docx download a file.
 headers:
   - key: Content-Type
     value: application/json

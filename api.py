@@ -2456,8 +2456,8 @@ def resume_contract():
                     "skills": ["Python", "FastAPI"],
                     "experience": [{"title": "Software Engineer", "company": "Acme Corp", "bullets": []}],
                 },
-                "query": {"format": "json"},
-                "returns": "Resume JSON, or a pdf/docx file when format is pdf or docx",
+                "query": {"format": "pdf"},
+                "returns": "application/pdf download named resume.pdf. format=json returns JSON. format=docx returns Word.",
                 "note": "Writes with Ollama from the facts you send. Does not invent employers, dates, or skills.",
             },
         },
@@ -2672,14 +2672,14 @@ def _facts_for_generate(body: ResumeGenerateRequest) -> tuple[dict, dict | None]
 )
 def generate_ai_resume(
     body: ResumeGenerateRequest,
-    file_format: str = Query("json", alias="format", description="json, pdf, or docx"),
+    file_format: str = Query("pdf", alias="format", description="pdf, docx, or json"),
 ):
-    """Writes a resume from the caller's facts. Does not invent employers, dates, or skills.
+    """Writes a resume from the caller's facts and downloads it as a PDF.
 
     Ollama rewrites the summary and experience bullets toward target_title or the job.
-    format=pdf or format=docx returns a file download. The default is JSON.
+    format=docx downloads Word. format=json returns the resume JSON instead of a file.
     """
-    fmt = (file_format or "json").strip().lower()
+    fmt = (file_format or "pdf").strip().lower()
     if fmt not in {"json", "pdf", "docx"}:
         raise HTTPException(status_code=400, detail="format must be json, pdf, or docx.")
     facts, job = _facts_for_generate(body)

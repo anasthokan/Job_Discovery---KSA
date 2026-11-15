@@ -36,16 +36,29 @@ Query `format`:
 
 | Value | Response |
 | --- | --- |
-| `json` (default) | JSON body described below |
-| `pdf` | PDF file download |
+| `pdf` (default) | PDF file download named `resume.pdf` |
 | `docx` | Word file download |
+| `json` | JSON body described below |
 
 File responses set `X-Resume-Generate-Mode: generated` and `X-Resume-Model` to the Ollama model name.
+
+## PDF download
+
+The default response is a PDF file named `resume.pdf`.
+
+```bash
+curl -X POST "{BASE_URL}/api/resume/generate" ^
+  -H "Content-Type: application/json" ^
+  -o resume.pdf ^
+  -d "{\"target_title\": \"Senior Backend Engineer\", \"full_name\": \"Jane Doe\", \"email\": \"jane@example.com\", \"location\": \"Riyadh\", \"skills\": [\"Python\", \"FastAPI\", \"PostgreSQL\"], \"experience\": [{\"title\": \"Software Engineer\", \"company\": \"Acme Corp\", \"start_date\": \"Jan 2022\", \"end_date\": \"Present\", \"bullets\": [\"Built APIs used by 2 million users\"]}]}"
+```
+
+`?format=pdf` is the same call. `?format=docx` downloads Word. `?format=json` returns the JSON below.
 
 ## JSON
 
 ```bash
-curl -X POST "{BASE_URL}/api/resume/generate" ^
+curl -X POST "{BASE_URL}/api/resume/generate?format=json" ^
   -H "Content-Type: application/json" ^
   -d "{\"target_title\": \"Senior Backend Engineer\", \"full_name\": \"Jane Doe\", \"email\": \"jane@example.com\", \"location\": \"Riyadh\", \"skills\": [\"Python\", \"FastAPI\", \"PostgreSQL\"], \"experience\": [{\"title\": \"Software Engineer\", \"company\": \"Acme Corp\", \"start_date\": \"Jan 2022\", \"end_date\": \"Present\", \"bullets\": [\"Built APIs used by 2 million users\"]}]}"
 ```
@@ -53,7 +66,7 @@ curl -X POST "{BASE_URL}/api/resume/generate" ^
 JavaScript:
 
 ```js
-const res = await fetch(`${BASE_URL}/api/resume/generate`, {
+const res = await fetch(`${BASE_URL}/api/resume/generate?format=json`, {
   method: "POST",
   headers: { "Content-Type": "application/json" },
   body: JSON.stringify({

@@ -7,7 +7,8 @@ description: |-
   Set base_url to the API host. Local default is http://127.0.0.1:9002.
   The model may rewrite the summary and experience bullets. It must not add
   employers, dates, skills, or numbers that were not in the request.
-  format=json is the default. format=pdf or format=docx downloads a file.
+  format=pdf is the default and downloads resume.pdf. format=docx downloads
+  Word. format=json returns the resume JSON.
   A 503 means Ollama is off or unreachable. Check GET /api/health field ollama.ok.
 variables:
   - key: base_url

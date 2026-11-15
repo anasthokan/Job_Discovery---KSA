@@ -1,0 +1,43 @@
+$kind: http-request
+name: Download resume PDF
+method: POST
+url: '{{base_url}}/api/resume/generate?format=pdf'
+order: 3000
+queryParams:
+  - key: format
+    value: pdf
+    description: Default. The response is a resume.pdf download.
+headers:
+  - key: Content-Type
+    value: application/json
+description: |-
+  Same body as Generate resume. The response is a PDF file named resume.pdf.
+  In Postman use Send and Download. Needs a reachable Ollama model.
+body:
+  type: json
+  content: |-
+    {
+      "target_title": "Senior Backend Engineer",
+      "full_name": "Jane Doe",
+      "email": "jane@example.com",
+      "location": "Riyadh",
+      "skills": ["Python", "FastAPI", "PostgreSQL"],
+      "experience": [
+        {
+          "title": "Software Engineer",
+          "company": "Acme Corp",
+          "start_date": "Jan 2022",
+          "end_date": "Present",
+          "bullets": ["Built APIs used by 2 million users"]
+        }
+      ]
+    }
+scripts:
+  - type: afterResponse
+    language: text/javascript
+    code: |-
+      pm.test("resume downloads as a PDF", function () {
+        pm.response.to.have.status(200);
+        pm.expect(pm.response.headers.get("Content-Type")).to.include("application/pdf");
+        pm.expect(pm.response.headers.get("Content-Disposition")).to.include("resume.pdf");
+      });
