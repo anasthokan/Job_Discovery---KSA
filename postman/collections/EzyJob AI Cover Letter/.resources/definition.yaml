@@ -11,6 +11,8 @@ description: |-
   format=pdf is the default and downloads cover-letter.pdf. format=docx
   downloads Word. format=json returns the letter JSON.
   A 503 means Ollama is off or unreachable. Check GET /api/health field ollama.ok.
+  The call returns within about 75 seconds. Keep the Postman request
+  timeout at 0. Use ?format=json to read the letter in the response pane.
 variables:
   - key: base_url
     value: 'http://127.0.0.1:9002'

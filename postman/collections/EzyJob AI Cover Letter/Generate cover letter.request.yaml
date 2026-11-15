@@ -13,7 +13,7 @@ headers:
 description: |-
   Writes a letter for the Senior Backend Engineer role at Northwind.
   Acme Corp must stay the employer in the letter. Needs a reachable Ollama
-  model; otherwise the status is 503. This call can take about 90 seconds.
+  model; otherwise the status is 503. The call returns within about 75 seconds.
 body:
   type: json
   content: |-

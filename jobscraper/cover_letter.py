@@ -157,8 +157,8 @@ def _write(prompt: str, writer: Writer | None) -> tuple[str, str]:
         "Return only the JSON object described in the user message.",
         prompt,
         temperature=0.3,
-        num_predict=900,
-        timeout=90,
+        num_predict=420,
+        timeout=75,
     )
     return text, active_model() or "ollama"
 

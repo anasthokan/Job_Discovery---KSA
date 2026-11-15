@@ -147,7 +147,7 @@ HTTP `200`:
 
 `detail` is a string. Example: `{ "detail": "Send a job title, company, job description, or job_id so the letter has a role to address." }`
 
-Check `GET /api/health` and read `ollama.ok` before calling this endpoint. Generation waits on the model and can take up to about 90 seconds.
+Check `GET /api/health` and read `ollama.ok` before calling this endpoint. Generation returns within about 75 seconds, so a proxy in front of the API does not drop the open connection. Keep the Postman request timeout at `0`. Add `?format=json` when you want to read the letter in the response pane.
 
 ## CORS
 
