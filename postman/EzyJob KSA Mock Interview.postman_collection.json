@@ -1,0 +1,104 @@
+{
+  "info": {
+    "name": "EzyJob KSA Mock Interview",
+    "description": "AI mock interview.\n\nStart returns the first question and a session. Answer scores the reply and asks the next question. The last answer returns the report.\n\nNo auth. The server does not store the session. Run Start, then Answer. The test script saves session for the next call.\n\nSet base_url to local http://127.0.0.1:9001 or production http://74.208.184.175:517.\n\nEach call can take up to 75 seconds. In Postman, set the request timeout to 0.\n\nRestart the API after pulling this change, then call Health and confirm mock_interview is true and ollama.ok is true.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://127.0.0.1:9001"
+    },
+    {
+      "key": "session",
+      "value": "{}"
+    }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{base_url}}/api/health",
+        "description": "Expect mock_interview true. Read ollama.ok before starting an interview."
+      },
+      "response": []
+    },
+    {
+      "name": "Contract",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{base_url}}/api/mock-interview",
+        "description": "Paths and a sample body."
+      },
+      "response": []
+    },
+    {
+      "name": "Start interview",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const data = pm.response.json();",
+              "pm.test('interview started', function () {",
+              "  pm.expect(data.ok).to.eql(true);",
+              "  pm.expect(data.question.prompt).to.be.a('string');",
+              "  pm.collectionVariables.set('session', JSON.stringify(data.session));",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"target_title\": \"Senior Backend Engineer\",\n  \"company\": \"Northwind\",\n  \"full_name\": \"Jane Doe\",\n  \"location\": \"Riyadh\",\n  \"skills\": [\"Python\", \"FastAPI\", \"PostgreSQL\"],\n  \"experience\": [\n    {\n      \"title\": \"Software Engineer\",\n      \"company\": \"Acme Corp\",\n      \"bullets\": [\"Built APIs used by 2 million users\"]\n    }\n  ],\n  \"question_count\": 5,\n  \"focus\": \"mixed\"\n}",
+          "options": { "raw": { "language": "json" } }
+        },
+        "url": "{{base_url}}/api/mock-interview/start",
+        "description": "Returns question 1 and session. The test script stores session for Answer."
+      },
+      "response": []
+    },
+    {
+      "name": "Submit answer",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const data = pm.response.json();",
+              "pm.test('answer scored', function () {",
+              "  pm.expect(data.feedback.score).to.be.a('number');",
+              "  if (data.session) pm.collectionVariables.set('session', JSON.stringify(data.session));",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"answer\": \"At Acme Corp I built FastAPI services used by 2 million users and kept them reliable.\",\n  \"session\": {{session}}\n}",
+          "options": { "raw": { "language": "json" } }
+        },
+        "url": "{{base_url}}/api/mock-interview/answer",
+        "description": "Run Start first. Send the same request again to continue. status complete means the report is ready."
+      },
+      "response": []
+    }
+  ]
+}

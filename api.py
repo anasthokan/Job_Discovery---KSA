@@ -85,6 +85,7 @@ from jobscraper.profile_autofill import autofill_from_parsed
 from jobscraper.ollama_resume import ollama_status
 from jobscraper.resume_enhance import enhance_profile_for_job, resume_from_profile, resume_text_rank
 from jobscraper.cover_letter import CoverLetterError, generate_cover_letter
+from jobscraper.mock_interview import MockInterviewError, start_interview, submit_answer
 from jobscraper.resume_generate import ResumeGenerateError, generate_resume
 from jobscraper.resume_parser import ResumeParseError, parse_resume_bytes, parse_resume_text
 from jobscraper.db import (
@@ -560,6 +561,44 @@ class CoverLetterRequest(BaseModel):
     company: str | None = None
     job_location: str | None = None
     job_id: str | None = Field(None, description="Optional scraped job id from /api/jobs")
+
+
+class MockInterviewStartRequest(BaseModel):
+    """Facts for a mock interview. Empty fields are ignored and do not erase a loaded profile."""
+
+    target_title: str = Field("", description="Role the interview is for")
+    full_name: str = ""
+    email: str = ""
+    phone: str = ""
+    location: str = ""
+    linkedin: str = ""
+    github: str = ""
+    website: str = ""
+    summary: str = Field("", description="Optional existing summary. Used as background, not read aloud.")
+    skills: list[str] = Field(default_factory=list)
+    key_achievements: list[str] = Field(default_factory=list)
+    experience: list[ResumeExperience] = Field(default_factory=list)
+    education: list[ResumeEducation] = Field(default_factory=list)
+    projects: list[ResumeProject] = Field(default_factory=list)
+    certifications: list[str] = Field(default_factory=list)
+    languages: list[str] = Field(default_factory=list)
+    resume_text: str | None = Field(None, description="Optional raw resume text. Parsed, then used as facts.")
+    resume: ResumeInput | None = Field(None, description="Optional parsed resume JSON from /api/resume/parse")
+    user_id: str | None = Field(None, description="Optional saved user. Explicit fields override that profile.")
+    job_description: str = ""
+    job_title: str | None = None
+    company: str | None = None
+    job_location: str | None = None
+    job_id: str | None = Field(None, description="Optional scraped job id from /api/jobs")
+    question_count: int = Field(5, ge=3, le=8, description="How many questions to ask, from 3 to 8.")
+    focus: str = Field("mixed", description="mixed, behavioral, or technical")
+
+
+class MockInterviewAnswerRequest(BaseModel):
+    """The session from the previous response, plus the candidate's spoken or typed answer."""
+
+    session: dict = Field(..., description="session object from /api/mock-interview/start or the previous answer")
+    answer: str = Field(..., description="What the candidate said. At least one sentence.")
 
 
 class CvFromJobRequest(BaseModel):
@@ -1608,6 +1647,7 @@ def health():
         "resume_enhance": True,
         "resume_generate": True,
         "cover_letter": True,
+        "mock_interview": True,
         "ollama": ollama_status(),
         "pdf_docx_convert": True,
         "resume_formats": ["pdf", "docx", "txt"],
@@ -2654,7 +2694,7 @@ def _cv_from_parsed(parsed: dict) -> dict:
     }
 
 
-def _facts_for_generate(body: ResumeGenerateRequest | CoverLetterRequest) -> tuple[dict, dict | None]:
+def _facts_for_generate(body: ResumeGenerateRequest | CoverLetterRequest | MockInterviewStartRequest) -> tuple[dict, dict | None]:
     facts = _blank_cv()
     if body.user_id and body.user_id.strip():
         _cid, profile = _require_candidate(body.user_id.strip())
@@ -2824,6 +2864,79 @@ def generate_ai_cover_letter(
         },
         keep_name=True,
     )
+
+
+@app.get("/api/mock-interview")
+def mock_interview_contract():
+    return {
+        "ok": True,
+        "service": "mock-interview",
+        "endpoints": {
+            "start": {
+                "method": "POST",
+                "path": "/api/mock-interview/start",
+                "content_type": "application/json",
+                "body": {
+                    "target_title": "Senior Backend Engineer",
+                    "company": "Northwind",
+                    "full_name": "Jane Doe",
+                    "skills": ["Python", "FastAPI"],
+                    "question_count": 5,
+                    "focus": "mixed",
+                },
+                "note": "Writes questions with Ollama for this role. Returns the first question and a session to send back.",
+            },
+            "answer": {
+                "method": "POST",
+                "path": "/api/mock-interview/answer",
+                "content_type": "application/json",
+                "body": {
+                    "session": {"v": 1},
+                    "answer": "At Acme Corp I built APIs used by other teams.",
+                },
+                "note": "Scores the answer and returns the next question. The last answer returns the report.",
+            },
+        },
+        "docs": "/docs",
+    }
+
+
+@app.post(
+    "/api/mock-interview/start",
+    summary="Start an AI mock interview for a role",
+)
+def start_mock_interview(body: MockInterviewStartRequest):
+    """Asks Ollama for interview questions based on the role and the candidate's facts.
+
+    The response includes the first question and a session. Send that session
+    back to /api/mock-interview/answer with each reply. The server does not store it.
+    """
+    focus = (body.focus or "mixed").strip().lower()
+    if focus not in {"mixed", "behavioral", "technical"}:
+        raise HTTPException(status_code=400, detail="focus must be mixed, behavioral, or technical.")
+    facts, job = _facts_for_generate(body)
+    try:
+        return start_interview(
+            facts,
+            job=job,
+            target_title=body.target_title,
+            question_count=body.question_count,
+            focus=focus,
+        )
+    except MockInterviewError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post(
+    "/api/mock-interview/answer",
+    summary="Score a mock interview answer and return the next question",
+)
+def answer_mock_interview(body: MockInterviewAnswerRequest):
+    """Scores one answer. Returns the next question, or the closing report after the last one."""
+    try:
+        return submit_answer(body.session, body.answer)
+    except MockInterviewError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
 class ProfileJob(BaseModel):
