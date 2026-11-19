@@ -52,7 +52,9 @@ from jobscraper.events import (
     events_status,
     filter_events,
     get_event,
+    interval_hours as event_interval_hours,
     load_events,
+    scheduled_event_sync,
     scrape_events,
 )
 from jobscraper.gulfdevjobs import gulfdevjobs_status, sync_gulf_jobs
@@ -376,8 +378,20 @@ def _start_scheduler() -> BackgroundScheduler | None:
             misfire_grace_time=600,
             next_run_time=datetime.now(tz),
         )
+    if _truthy("EVENT_SCRAPE_ENABLED", "true"):
+        scheduler.add_job(
+            scheduled_event_sync,
+            "interval",
+            hours=event_interval_hours(),
+            id="tech-events",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=3600,
+            next_run_time=datetime.now(tz),
+        )
     scheduler.start()
-    log.info("Scrape schedule: %s:00 %s", hours, tz_name)
+    log.info("Scrape schedule: %s:00 %s; events every %s hours", hours, tz_name, event_interval_hours())
     return scheduler
 
 

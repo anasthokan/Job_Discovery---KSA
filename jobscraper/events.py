@@ -12,6 +12,7 @@ from __future__ import annotations
 import html
 import json
 import logging
+import os
 import re
 import threading
 import time
@@ -265,9 +266,13 @@ class EventsError(Exception):
 
 def events_status() -> dict:
     stored = _read_store()
+    database = _database_status(len(stored.get("events") or []))
     return {
         "cached": len(stored.get("events") or []),
         "updated_at": stored.get("updated_at"),
+        "schedule_hours": interval_hours(),
+        "reminder": "WhatsApp one day before, when the user's city and domain match",
+        "database": database,
         "sources": [
             {
                 "id": row["id"],
@@ -279,6 +284,70 @@ def events_status() -> dict:
             for row in SOURCES
         ],
     }
+
+
+def interval_hours() -> int:
+    """How often the Kingdom event calendar is scraped. Default is 6 hours."""
+    raw = (os.getenv("EVENT_SCRAPE_HOURS") or "6").strip()
+    try:
+        hours = int(raw)
+    except ValueError:
+        hours = 6
+    return max(1, min(hours, 24))
+
+
+def scheduled_event_sync() -> dict:
+    """Scrape every Saudi city, drop finished events, then remind users about tomorrow."""
+    log.info("Scheduled event scrape starting")
+    removed = delete_finished_events()
+    try:
+        report = scrape_events("", "")
+    except EventsError as exc:
+        log.warning("Scheduled event scrape failed: %s", exc)
+        report = {"stored": 0, "error": str(exc), "sources": []}
+    report["removed"] = removed
+    alerts = {"sent": 0}
+    try:
+        from jobscraper.event_alerts import notify_day_before
+
+        alerts = notify_day_before()
+    except Exception:
+        log.exception("Event WhatsApp reminders failed")
+    log.info(
+        "Scheduled event scrape stored=%s mysql=%s reminders=%s",
+        report.get("stored"),
+        (report.get("database") or {}).get("mysql_rows"),
+        alerts.get("sent"),
+    )
+    return {"scrape": report, "alerts": alerts}
+
+
+def _database_status(json_rows: int) -> dict:
+    status = {
+        "json_file": "data/events.json",
+        "json_rows": json_rows,
+        "mysql_table": "tech_events",
+        "mysql_configured": False,
+        "mysql_rows": None,
+        "saved_in_mysql": False,
+    }
+    try:
+        from jobscraper.db import get_conn, mysql_configured
+
+        status["mysql_configured"] = mysql_configured()
+        if not status["mysql_configured"]:
+            return status
+        conn = get_conn()
+        if conn is None:
+            return status
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) AS n FROM tech_events")
+            row = cur.fetchone() or {}
+        status["mysql_rows"] = int(row.get("n") or 0)
+        status["saved_in_mysql"] = status["mysql_rows"] > 0
+    except Exception as exc:
+        status["mysql_error"] = str(exc)[:200]
+    return status
 
 
 def event_filters() -> dict:
@@ -340,10 +409,51 @@ def event_filters() -> dict:
 
 
 def load_events() -> list[dict]:
+    delete_finished_events()
     stored = list(_read_store().get("events") or [])
+    today = _riyadh_today()
     if stored:
-        return stored
-    return _load_mysql() or []
+        return [event for event in stored if not event_is_finished(event, today)]
+    return [event for event in (_load_mysql() or []) if not event_is_finished(event, today)]
+
+
+def event_is_finished(event: dict, today: date) -> bool:
+    """An event is done the day after its last day in Riyadh."""
+    last = str(event.get("end_date") or event.get("start_date") or "")[:10]
+    if len(last) < 10:
+        return False
+    try:
+        finished_on = date.fromisoformat(last)
+    except ValueError:
+        return False
+    return finished_on < today
+
+
+def delete_finished_events(today: date | None = None, store_path: Path | None = None) -> int:
+    """Remove events whose last day is already over."""
+    today = today or _riyadh_today()
+    removed = 0
+    with _LOCK:
+        payload = _read_store(store_path)
+        kept = []
+        for event in payload.get("events") or []:
+            if event_is_finished(event, today):
+                removed += 1
+                continue
+            kept.append(event)
+        if removed:
+            _write_store({"updated_at": payload.get("updated_at"), "events": kept}, store_path)
+    mysql_removed = 0
+    if store_path is None:
+        mysql_removed = _delete_finished_mysql(today)
+    gone = max(removed, mysql_removed)
+    if gone:
+        log.info("Deleted %s finished event(s) before %s", gone, today.isoformat())
+    return gone
+
+
+def _riyadh_today() -> date:
+    return datetime.now(ZoneInfo("Asia/Riyadh")).date()
 
 
 def get_event(event_id: str) -> dict | None:
@@ -395,7 +505,7 @@ def scrape_events(
 ) -> dict:
     """Read the sources for this location and domain, save them, and return matches."""
     fetcher = fetch or _fetch
-    today = today or datetime.now(timezone.utc).date()
+    today = today or _riyadh_today()
     wanted = _sources_for(location, domain)
     if not wanted:
         return {
@@ -425,15 +535,19 @@ def scrape_events(
     with _LOCK:
         existing = _read_store(store_path).get("events") or []
         merged = _merge(existing, fresh, scopes)
+        merged = [event for event in merged if not event_is_finished(event, today)]
         scraped_at = datetime.now(timezone.utc).isoformat()
         _write_store({"updated_at": scraped_at, "events": merged}, store_path)
-    _save_mysql(merged, scopes, scraped_at)
+    if store_path is None:
+        _save_mysql(merged, scopes, scraped_at)
+        _delete_finished_mysql(today)
     matched = filter_events(merged, location, domain)
     return {
         "events": matched,
         "stored": len(merged),
         "scraped_at": scraped_at,
         "sources": reports,
+        "database": _database_status(len(merged)),
     }
 
 
@@ -1377,57 +1491,86 @@ def _save_mysql(events: list[dict], scopes: list[dict], scraped_at: str) -> None
                         f"DELETE FROM tech_events WHERE source_id=%s AND city IN ({marks})",
                         (scope["source_id"], *cities),
                     )
+            saved = 0
             for event in events:
                 if not any(event.get("source_id") == scope["source_id"] for scope in scopes):
                     continue
-                cur.execute(
-                    """
-                    INSERT INTO tech_events (
-                      public_id, source_id, slug, title, city, region, venue, location, summary,
-                      category, domains, cost, date_label, when_label, start_date, end_date,
-                      start_time, end_time, url, website, source, scraped_at
-                    ) VALUES (
-                      %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                      %s, %s, %s, %s, %s, %s, %s,
-                      %s, %s, %s, %s, %s, %s
+                try:
+                    cur.execute(
+                        """
+                        INSERT INTO tech_events (
+                          public_id, source_id, slug, title, city, region, venue, location, summary,
+                          category, domains, cost, date_label, when_label, start_date, end_date,
+                          start_time, end_time, url, website, source, scraped_at
+                        ) VALUES (
+                          %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                          %s, %s, %s, %s, %s, %s, %s,
+                          %s, %s, %s, %s, %s, %s
+                        )
+                        ON DUPLICATE KEY UPDATE
+                          title=VALUES(title), city=VALUES(city), region=VALUES(region),
+                          venue=VALUES(venue), location=VALUES(location), summary=VALUES(summary),
+                          category=VALUES(category), domains=VALUES(domains), cost=VALUES(cost),
+                          date_label=VALUES(date_label), when_label=VALUES(when_label),
+                          start_date=VALUES(start_date), end_date=VALUES(end_date),
+                          start_time=VALUES(start_time), end_time=VALUES(end_time),
+                          url=VALUES(url), website=VALUES(website), source=VALUES(source),
+                          scraped_at=VALUES(scraped_at)
+                        """,
+                        (
+                            str(event["id"])[:160],
+                            event["source_id"],
+                            str(event["slug"])[:255],
+                            str(event["title"])[:512],
+                            str(event["city"])[:120],
+                            str(event["region"])[:120],
+                            str(event["venue"])[:512],
+                            str(event["location"])[:512],
+                            event["summary"],
+                            str(event["category"])[:64],
+                            json.dumps(event["domains"]),
+                            str(event["cost"])[:16],
+                            str(event["date_label"])[:80],
+                            str(event["when_label"])[:80],
+                            event["start_date"] or None,
+                            event["end_date"] or None,
+                            str(event["start_time"])[:8],
+                            str(event["end_time"])[:8],
+                            str(event["url"])[:1000],
+                            str(event["website"])[:1000],
+                            str(event["source"])[:120],
+                            scraped_at.replace("T", " ").replace("+00:00", ""),
+                        ),
                     )
-                    ON DUPLICATE KEY UPDATE
-                      title=VALUES(title), city=VALUES(city), region=VALUES(region),
-                      venue=VALUES(venue), location=VALUES(location), summary=VALUES(summary),
-                      category=VALUES(category), domains=VALUES(domains), cost=VALUES(cost),
-                      date_label=VALUES(date_label), when_label=VALUES(when_label),
-                      start_date=VALUES(start_date), end_date=VALUES(end_date),
-                      start_time=VALUES(start_time), end_time=VALUES(end_time),
-                      url=VALUES(url), website=VALUES(website), source=VALUES(source),
-                      scraped_at=VALUES(scraped_at)
-                    """,
-                    (
-                        event["id"],
-                        event["source_id"],
-                        event["slug"],
-                        event["title"],
-                        event["city"],
-                        event["region"],
-                        event["venue"],
-                        event["location"],
-                        event["summary"],
-                        event["category"],
-                        json.dumps(event["domains"]),
-                        event["cost"],
-                        event["date_label"],
-                        event["when_label"],
-                        event["start_date"] or None,
-                        event["end_date"] or None,
-                        event["start_time"],
-                        event["end_time"],
-                        event["url"],
-                        event["website"],
-                        event["source"],
-                        scraped_at.replace("T", " ").replace("+00:00", ""),
-                    ),
-                )
+                    saved += 1
+                except Exception:
+                    log.warning("Could not save event %s", event.get("id"), exc_info=True)
+            return saved
     except Exception:
         log.warning("Could not save tech_events", exc_info=True)
+        return 0
+
+
+def _delete_finished_mysql(today: date) -> int:
+    try:
+        from jobscraper.db import get_conn, mysql_configured
+    except Exception:
+        return 0
+    if not mysql_configured():
+        return 0
+    conn = get_conn()
+    if conn is None:
+        return 0
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM tech_events WHERE COALESCE(end_date, start_date) < %s",
+                (today.isoformat(),),
+            )
+            return int(cur.rowcount or 0)
+    except Exception:
+        log.warning("Could not delete finished events", exc_info=True)
+        return 0
 
 
 def _meta_text(article: str, pattern: str) -> str:

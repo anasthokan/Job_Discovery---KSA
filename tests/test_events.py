@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from datetime import date
@@ -14,6 +15,8 @@ from jobscraper.events import (
     location_matches,
     parse_date_label,
     parse_listing_html,
+    delete_finished_events,
+    event_is_finished,
     scrape_events,
 )
 
@@ -246,6 +249,38 @@ class ScrapeTests(unittest.TestCase):
         report = scrape_events("Dubai", "AI", fetch=fetch, polite=False, today=TODAY)
         self.assertEqual(report["events"], [])
         self.assertIn("location", report["note"].lower())
+
+
+class FinishedEventTests(unittest.TestCase):
+    def test_yesterday_is_finished_and_today_stays(self):
+        today = date(2026, 11, 19)
+        done = {"start_date": "2026-11-18", "end_date": "2026-11-18"}
+        still_on = {"start_date": "2026-11-19", "end_date": "2026-11-19"}
+        spanning = {"start_date": "2026-11-18", "end_date": "2026-11-21"}
+        self.assertTrue(event_is_finished(done, today))
+        self.assertFalse(event_is_finished(still_on, today))
+        self.assertFalse(event_is_finished(spanning, today))
+
+    def test_finished_events_are_removed_from_the_saved_calendar(self):
+        today = date(2026, 11, 19)
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "events.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "updated_at": "2026-11-18T00:00:00+00:00",
+                        "events": [
+                            {"id": "past", "title": "Done", "start_date": "2026-11-18", "end_date": "2026-11-18"},
+                            {"id": "live", "title": "Today", "start_date": "2026-11-19", "end_date": "2026-11-19"},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            removed = delete_finished_events(today, path)
+            saved = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(removed, 1)
+        self.assertEqual([event["id"] for event in saved["events"]], ["live"])
 
 
 if __name__ == "__main__":

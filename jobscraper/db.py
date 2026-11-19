@@ -653,6 +653,7 @@ def init_db() -> bool:
             cur.execute(CREATE_RUNS_SQL)
             cur.execute(CREATE_COMPANIES_SQL)
             cur.execute(CREATE_CANDIDATES_SQL)
+            from jobscraper.event_alerts import CREATE_EVENT_ALERTS_SQL
             from jobscraper.events import CREATE_EVENTS_SQL
             from jobscraper.sources import CREATE_SOURCES_SQL
             from jobscraper.whatsapp_alerts import CREATE_ALERTS_SQL
@@ -660,6 +661,7 @@ def init_db() -> bool:
             cur.execute(CREATE_SOURCES_SQL)
             cur.execute(CREATE_ALERTS_SQL)
             cur.execute(CREATE_EVENTS_SQL)
+            cur.execute(CREATE_EVENT_ALERTS_SQL)
             _ensure_job_columns(cur)
             _ensure_run_columns(cur)
         log.info("MySQL ready (%s/%s)", cfg["host"], cfg["database"])

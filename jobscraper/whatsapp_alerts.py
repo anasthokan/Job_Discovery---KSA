@@ -1118,6 +1118,11 @@ def _cached_recipients() -> list[dict]:
     return list(rows)
 
 
+def alert_recipients() -> list[dict]:
+    """Users who can receive a personal WhatsApp alert."""
+    return _cached_recipients()
+
+
 def _sent_ids(cur, phone: str, source_ids: list[str], *, require_message: bool = False) -> set[str]:
     found: set[str] = set()
     posted = " AND IFNULL(message, '') NOT IN ('', 'skipped')" if require_message else ""
