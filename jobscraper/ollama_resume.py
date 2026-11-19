@@ -99,12 +99,13 @@ def complete(
     temperature: float = 0.2,
     num_predict: int = 900,
     timeout: float | None = None,
+    think: bool | None = None,
 ) -> str:
     """One non-streaming Ollama chat completion."""
     if not ollama_enabled():
         raise OllamaError("Ollama resume generation is turned off")
     limit = timeout if timeout is not None else min(_timeout(), 120)
-    return _chat(system, user, temperature, num_predict, limit)
+    return _chat(system, user, temperature, num_predict, limit, think=think)
 
 
 def rewrite_for_job(resume: str, job: dict) -> tuple[str, list[str]]:
@@ -211,7 +212,14 @@ def _experience_bullets(resume: str) -> list[str]:
     return found
 
 
-def _chat(system: str, user: str, temperature: float, num_predict: int, timeout: float = 70) -> str:
+def _chat(
+    system: str,
+    user: str,
+    temperature: float,
+    num_predict: int,
+    timeout: float = 70,
+    think: bool | None = None,
+) -> str:
     model = _model_name()
     payload = {
         "model": model,
@@ -227,7 +235,15 @@ def _chat(system: str, user: str, temperature: float, num_predict: int, timeout:
             "num_predict": num_predict,
         },
     }
-    parsed = _request("/api/chat", payload, timeout)
+    if think is not None:
+        payload["think"] = think
+    try:
+        parsed = _request("/api/chat", payload, timeout)
+    except OllamaError as exc:
+        if think is None or "http 400" not in str(exc).lower():
+            raise
+        payload.pop("think", None)
+        parsed = _request("/api/chat", payload, timeout)
     message = parsed.get("message") or {}
     content = _strip_think(str(message.get("content") or ""))
     if len(content.strip()) < 20:

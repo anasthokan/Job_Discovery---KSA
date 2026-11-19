@@ -113,7 +113,7 @@ def start_interview(
     )
     slow_note = ""
     try:
-        raw, model_name = _write(prompt, writer, num_predict=320)
+        raw, model_name = _write(prompt, writer, num_predict=240)
     except OllamaError as exc:
         if _service_down(exc):
             raise MockInterviewError(str(exc), 503) from exc
@@ -188,7 +188,7 @@ def submit_answer(
         ensure_ascii=False,
     )
     try:
-        raw, model_name = _write(prompt, writer, num_predict=280)
+        raw, model_name = _write(prompt, writer, num_predict=220)
     except OllamaError as exc:
         if _service_down(exc):
             raise MockInterviewError(str(exc), 503) from exc
@@ -343,7 +343,8 @@ def _write(prompt: str, writer: Writer | None, *, num_predict: int) -> tuple[str
         prompt,
         temperature=0.3,
         num_predict=num_predict,
-        timeout=75,
+        timeout=180,
+        think=False,
     )
     return text, active_model() or "ollama"
 

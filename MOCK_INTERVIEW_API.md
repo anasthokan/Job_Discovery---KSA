@@ -45,7 +45,7 @@ Each answer is scored on its own. The closing report averages those scores. `que
 | `behavioral` | Workplace examples |
 | `technical` | Skills and how the work was done |
 
-Check `GET /api/health` and read `ollama.ok` before calling these endpoints. Each call returns within about 75 seconds, so a proxy in front of the API does not drop the open connection. Keep the Postman request timeout at `0`.
+Check `GET /api/health` and read `ollama.ok` before calling these endpoints. The first call can take about 3 minutes while the model loads. Later calls are shorter because the model stays loaded. Keep the Postman request timeout at `0`.
 
 ## Start
 
