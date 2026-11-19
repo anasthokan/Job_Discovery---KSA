@@ -2,9 +2,10 @@
 
 Riyadh Tech Week publishes the Saudi tech calendar for every city at
 https://riyadhtechweek.com/events. The Riyadh guide adds fuller descriptions.
-Sabtiah (https://sabtiah.cycls.com/) is Riyadh's weekly AI circle. A scrape
-reads the whole Kingdom calendar, then keeps the events that fit the user's
-city and domain.
+Sabtiah (https://sabtiah.cycls.com/) is Riyadh's weekly AI circle. Mirsad
+(https://www.mirsad.cc/) lists Riyadh meetups gathered from Luma, Liqa, and
+Eventbrite. A scrape reads these calendars, then keeps the events that fit
+the user's city and domain.
 """
 
 from __future__ import annotations
@@ -30,8 +31,11 @@ _ROOT = Path(__file__).resolve().parent.parent
 STORE_FILE = _ROOT / "data" / "events.json"
 RTW_BASE = "https://riyadhtechweek.com"
 SABTIAH_URL = "https://sabtiah.cycls.com/"
+MIRSAD_URL = "https://www.mirsad.cc/"
 RTW_SOURCE = "riyadhtechweek"
 SABTIAH_SOURCE = "sabtiah"
+MIRSAD_SOURCE = "mirsad"
+_SOURCE_RANK = {RTW_SOURCE: 0, SABTIAH_SOURCE: 1, MIRSAD_SOURCE: 2}
 _PAGE_SIZE = 24
 _MAX_PAGES = 8
 _LOCK = threading.Lock()
@@ -92,6 +96,13 @@ SOURCES = (
         "url": SABTIAH_URL,
         "location": "Riyadh",
         "domains": ["AI"],
+    },
+    {
+        "id": MIRSAD_SOURCE,
+        "name": "Mirsad",
+        "url": MIRSAD_URL,
+        "location": "Riyadh",
+        "domains": ["AI", "Cloud & SaaS", "Startups"],
     },
 )
 
@@ -521,12 +532,15 @@ def scrape_events(
     for source_id in wanted:
         if source_id == RTW_SOURCE:
             events, report, scope = _scrape_rtw(location, fetcher, polite, today)
-        else:
+        elif source_id == SABTIAH_SOURCE:
             events, report, scope = _scrape_sabtiah(fetcher, polite, today)
+        else:
+            events, report, scope = _scrape_mirsad(fetcher, polite, today)
         reports.append(report)
         if report["ok"]:
             fresh.extend(events)
             scopes.append(scope)
+    fresh = _collapse_same_link(fresh)
     if not any(report["ok"] for report in reports):
         detail = "; ".join(
             f"{report['name']}: {report['error']}" for report in reports if report["error"]
@@ -726,6 +740,190 @@ def _scrape_sabtiah(fetch, polite: bool, today: date):
         "note": note,
     }
     return deduped, report, {"source_id": SABTIAH_SOURCE, "cities": None}
+
+
+def _scrape_mirsad(fetch, polite: bool, today: date):
+    del polite
+    error = None
+    events: list[dict] = []
+    try:
+        page_html = fetch(MIRSAD_URL)
+    except Exception as exc:
+        error = _error_text(exc)
+        page_html = ""
+    if page_html:
+        events = _parse_mirsad(page_html, MIRSAD_URL, today)
+    report = {
+        "id": MIRSAD_SOURCE,
+        "name": "Mirsad",
+        "url": MIRSAD_URL,
+        "fetched": len(events),
+        "pages": 1 if page_html else 0,
+        "ok": error is None,
+        "error": error,
+        "note": None if events or error else "Mirsad's public page did not list a dated event.",
+    }
+    return events, report, {"source_id": MIRSAD_SOURCE, "cities": None}
+
+
+_MIRSAD_TAGS = {
+    "ai": "AI",
+    "data": "Data",
+    "cloud": "Cloud & SaaS",
+    "startups": "Startups",
+    "fintech": "Fintech",
+    "cybersecurity": "Cybersecurity",
+    "security": "Cybersecurity",
+    "proptech": "PropTech",
+    "healthtech": "HealthTech",
+}
+
+
+def _parse_mirsad(page_html: str, page_url: str, today: date) -> list[dict]:
+    events = []
+    for card in re.findall(r'<article class="event-card"[^>]*>.*?</article>', page_html or "", re.S):
+        event = _parse_mirsad_card(card, page_url, today)
+        if event:
+            events.append(event)
+    return _dedupe(events)
+
+
+def _parse_mirsad_card(card: str, page_url: str, today: date) -> dict | None:
+    title_match = re.search(r"<h2[^>]*>(.*?)</h2>", card, re.S)
+    title = _clean(title_match.group(1)) if title_match else ""
+    link_match = re.search(r'class="event-link" href="([^"]+)"', card)
+    href = html.unescape(link_match.group(1)).strip() if link_match else ""
+    id_match = re.search(r'data-event-id="([^"]+)"', card)
+    slug = _clean(id_match.group(1)) if id_match else _slug_from_url(href)
+    if not title or not slug or not href:
+        return None
+    when = ""
+    label_match = re.search(r'class="event-datebox"[^>]*aria-label="([^"]+)"', card)
+    if label_match:
+        when = html.unescape(label_match.group(1))
+    date_label = _mirsad_date_label(when)
+    if not date_label:
+        return None
+    start_time, end_time = _parse_12h_clock(when)
+    details = [_clean(part) for part in re.findall(r'<div class="event-details">.*?</div>', card, re.S)]
+    place = ""
+    if details:
+        spans = re.findall(r"<span>(.*?)</span>", details[0], re.S)
+        cleaned = [_clean(span) for span in spans if _clean(span)]
+        if len(cleaned) >= 2:
+            place = cleaned[-1]
+        elif cleaned and cleaned[0] != _clean(when):
+            place = cleaned[0]
+    kicker_match = re.search(r'class="event-kicker">\s*<span[^>]*>(.*?)</span>', card, re.S)
+    kicker = _clean(kicker_match.group(1)) if kicker_match else ""
+    city = _city_in_text(place) or "Riyadh"
+    venue = place
+    if place and ("," in place or "،" in place) and kicker:
+        venue = kicker
+    elif not place:
+        venue = kicker or "Riyadh"
+    summary_match = re.search(r'class="event-description"[^>]*>(.*?)</p>', card, re.S)
+    summary = _clean(summary_match.group(1)) if summary_match else ""
+    tags = [_clean(tag) for tag in re.findall(r'<button class="tag"[^>]*>(.*?)</button>', card, re.S)]
+    domains = []
+    for tag in tags:
+        pretty = _MIRSAD_TAGS.get(tag.lower())
+        if pretty and pretty not in domains:
+            domains.append(pretty)
+    price_match = re.search(r'data-price="([^"]+)"', card)
+    cost = (price_match.group(1) if price_match else "unknown").strip().lower()
+    if cost not in _COSTS:
+        cost = "unknown"
+    return _event(
+        source_id=MIRSAD_SOURCE,
+        source="Mirsad",
+        slug=slug,
+        title=title,
+        href=href,
+        page_url=page_url,
+        venue=venue,
+        city=city,
+        summary=summary,
+        category="Meetup",
+        domains=domains,
+        cost=cost,
+        date_label=date_label,
+        when_label="",
+        start_time=start_time,
+        end_time=end_time,
+        website=href,
+        today=today,
+    )
+
+
+def _mirsad_date_label(value: str) -> str:
+    match = re.search(r"([A-Za-z]+)\s+(\d{1,2}),\s*(20\d{2})", value or "")
+    if not match or match.group(1).lower() not in _MONTHS:
+        return ""
+    return f"{int(match.group(2))} {match.group(1)} {match.group(3)}"
+
+
+def _parse_12h_clock(value: str) -> tuple[str, str]:
+    text = _normalize_dash(value or "")
+    ranged = re.search(
+        r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*-\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)",
+        text,
+        re.I,
+    )
+    if ranged:
+        end_mer = ranged.group(6)
+        start_mer = ranged.group(3) or end_mer
+        return (
+            _to_24h(ranged.group(1), ranged.group(2), start_mer),
+            _to_24h(ranged.group(4), ranged.group(5), end_mer),
+        )
+    single = re.search(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)", text, re.I)
+    if single:
+        return _to_24h(single.group(1), single.group(2), single.group(3)), ""
+    return _parse_clock(text)
+
+
+def _to_24h(hour: str, minute: str | None, meridiem: str | None) -> str:
+    value = int(hour)
+    mins = int(minute or 0)
+    mark = (meridiem or "").lower()
+    if mark == "pm" and value < 12:
+        value += 12
+    if mark == "am" and value == 12:
+        value = 0
+    return f"{value:02d}:{mins:02d}"
+
+
+def _city_in_text(text: str) -> str:
+    raw = text or ""
+    if "الرياض" in raw:
+        return "Riyadh"
+    lower = raw.lower()
+    for key, name in sorted(CITY_HINTS.items(), key=lambda item: len(item[0]), reverse=True):
+        if len(key) < 4:
+            continue
+        if re.search(rf"(?<![a-z]){re.escape(key)}(?![a-z])", lower):
+            return name
+    return ""
+
+
+def _collapse_same_link(events: list[dict]) -> list[dict]:
+    """Keep one card when two sources point at the same registration page."""
+    kept: list[dict] = []
+    index: dict[str, int] = {}
+    for event in events:
+        key = (event.get("website") or event.get("url") or "").strip().rstrip("/").lower()
+        if not key or key not in index:
+            if key:
+                index[key] = len(kept)
+            kept.append(event)
+            continue
+        current = kept[index[key]]
+        incoming_rank = _SOURCE_RANK.get(str(event.get("source_id")), 9)
+        current_rank = _SOURCE_RANK.get(str(current.get("source_id")), 9)
+        if incoming_rank < current_rank:
+            kept[index[key]] = event
+    return kept
 
 
 def _walk_pages(first_url: str, fetch, polite: bool, today: date, parser) -> tuple[list[dict], int, str | None]:
@@ -1151,6 +1349,8 @@ def _sources_for(location: str, domain: str) -> list[str]:
         sources.append(RTW_SOURCE)
     if _wants_sabtiah(location, domain):
         sources.append(SABTIAH_SOURCE)
+    if _wants_mirsad(location):
+        sources.append(MIRSAD_SOURCE)
     return sources
 
 
@@ -1159,6 +1359,14 @@ def _in_saudi_scope(location: str) -> bool:
     if text.lower() in _BROAD_LOCATIONS:
         return True
     return bool(_place_token(text) or _region_query(text))
+
+
+def _wants_mirsad(location: str) -> bool:
+    """Mirsad lists Riyadh meetups, including ones gathered from Luma and Eventbrite."""
+    text = (location or "").strip()
+    if text and text.lower() not in _BROAD_LOCATIONS and _place_token(text) != "riyadh":
+        return False
+    return True
 
 
 def _wants_sabtiah(location: str, domain: str) -> bool:

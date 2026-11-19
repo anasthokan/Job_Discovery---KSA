@@ -1,0 +1,152 @@
+{
+  "info": {
+    "name": "EzyJob KSA Tech Events",
+    "description": "Saudi tech events by city and domain.\n\nNo auth.\n\nProduction: https://agentsksa.atozeesolutions.com\nLocal: http://127.0.0.1:9002\n\nFrontend flow:\n1. GET /api/events/filters for city and domain dropdowns\n2. GET /api/events?location=&domain= to list saved events (fast)\n3. POST /api/events/scrape only when an admin or refresh button needs a live scrape (10–30s)\n4. GET /api/events/{event_id} for the detail screen\n\nSources: Riyadh Tech Week (all KSA cities), Sabtiah (Riyadh AI circle), Mirsad (Riyadh meetups from Luma, Liqa, and Eventbrite).\n\nScrape timeout: set Postman request timeout to 60000 ms or off.\nCalendar refreshes every 6 hours on the server. Finished events are removed automatically.\nMatching users get a personal WhatsApp one day before the event (backend only).",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "https://agentsksa.atozeesolutions.com",
+      "type": "string"
+    },
+    {
+      "key": "event_id",
+      "value": "riyadhtechweek__sabtiah-riyadh-ai-circle-2026-11-21",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{base_url}}/api/health",
+        "description": "Expect events: true. events_feed shows cached count, schedule_hours, and MySQL status."
+      },
+      "response": []
+    },
+    {
+      "name": "Event filters (cities and domains)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{base_url}}/api/events/filters",
+        "description": "Use locations and domains for dropdowns. Also returns categories, costs, and sources."
+      },
+      "response": []
+    },
+    {
+      "name": "List events (GET, saved calendar)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/events?location=Riyadh&domain=AI&limit=24&page=1",
+          "host": ["{{base_url}}"],
+          "path": ["api", "events"],
+          "query": [
+            { "key": "location", "value": "Riyadh", "description": "City or region. Empty or All = all KSA cities." },
+            { "key": "domain", "value": "AI", "description": "Tech domain. Empty or All = all tech events." },
+            { "key": "category", "value": "", "description": "Meetup, Conference, Hackathon, Summit, Expo, Webinar", "disabled": true },
+            { "key": "cost", "value": "", "description": "free or paid", "disabled": true },
+            { "key": "q", "value": "", "description": "Search title, venue, or summary", "disabled": true },
+            { "key": "limit", "value": "24", "description": "1 to 100. Default 24." },
+            { "key": "page", "value": "1" },
+            { "key": "refresh", "value": "false", "description": "true scrapes live before filtering. Prefer the scrape endpoint for that.", "disabled": true }
+          ]
+        },
+        "description": "Reads the saved calendar (JSON cache, then MySQL). Fast. Use this for the events list UI."
+      },
+      "response": []
+    },
+    {
+      "name": "List events (POST, saved calendar)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"location\": \"Riyadh\",\n  \"domain\": \"AI\",\n  \"category\": \"\",\n  \"cost\": \"\",\n  \"q\": \"\",\n  \"limit\": 24,\n  \"page\": 1,\n  \"refresh\": false\n}",
+          "options": { "raw": { "language": "json" } }
+        },
+        "url": "{{base_url}}/api/events",
+        "description": "Same as GET. Use when the app sends a JSON body."
+      },
+      "response": []
+    },
+    {
+      "name": "Scrape events (POST, live refresh)",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/events/scrape?location=Riyadh&domain=AI&limit=24&page=1",
+          "host": ["{{base_url}}"],
+          "path": ["api", "events", "scrape"],
+          "query": [
+            { "key": "location", "value": "Riyadh", "description": "Filter after scrape. Empty scrapes all cities then returns all." },
+            { "key": "domain", "value": "AI" },
+            { "key": "limit", "value": "24" },
+            { "key": "page", "value": "1" }
+          ]
+        },
+        "description": "Scrapes Riyadh Tech Week and Sabtiah, saves to the calendar, then returns matches. Takes about 10–30 seconds. Response includes stored, scraped_at, and sources."
+      },
+      "response": []
+    },
+    {
+      "name": "All KSA cities (GET)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/events?location=&domain=&limit=24&page=1",
+          "host": ["{{base_url}}"],
+          "path": ["api", "events"],
+          "query": [
+            { "key": "location", "value": "", "description": "Empty = all Saudi cities." },
+            { "key": "domain", "value": "", "description": "Empty = all tech domains." },
+            { "key": "limit", "value": "24" },
+            { "key": "page", "value": "1" }
+          ]
+        },
+        "description": "Kingdom-wide list from the saved calendar."
+      },
+      "response": []
+    },
+    {
+      "name": "Jeddah Fintech (GET)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/events?location=Jeddah&domain=Fintech&limit=24&page=1",
+          "host": ["{{base_url}}"],
+          "path": ["api", "events"],
+          "query": [
+            { "key": "location", "value": "Jeddah" },
+            { "key": "domain", "value": "Fintech" },
+            { "key": "limit", "value": "24" },
+            { "key": "page", "value": "1" }
+          ]
+        },
+        "description": "Example city + domain filter. total can be 0 if no matching saved events."
+      },
+      "response": []
+    },
+    {
+      "name": "One event (GET)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{base_url}}/api/events/{{event_id}}",
+        "description": "Detail screen. Copy events[].id from a list response into the event_id collection variable. 404 if missing."
+      },
+      "response": []
+    }
+  ]
+}

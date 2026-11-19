@@ -1,0 +1,127 @@
+{
+  "title": "EzyJob KSA — Tech events (for frontend)",
+  "base_url": "https://agentsksa.atozeesolutions.com",
+  "local_base_url": "http://127.0.0.1:9002",
+  "auth": "none",
+  "note": "Show Saudi tech events filtered by the user's city and domain. List from GET /api/events (saved calendar). Call POST /api/events/scrape only for an explicit refresh; it can take 10–30 seconds. Sources are Riyadh Tech Week for every KSA city, Sabtiah for the Riyadh AI circle, and Mirsad for Riyadh meetups from Luma, Liqa, and Eventbrite. The server also scrapes every 6 hours. Finished events are deleted automatically. WhatsApp day-before reminders are backend-only.",
+  "recommended_ui_flow": [
+    "On open: GET /api/events/filters → fill location and domain dropdowns",
+    "On search: GET /api/events?location=&domain=&limit=24&page=1",
+    "On card tap: GET /api/events/{id}",
+    "Optional admin/refresh: POST /api/events/scrape?location=&domain="
+  ],
+  "endpoints": {
+    "filters": {
+      "method": "GET",
+      "path": "/api/events/filters",
+      "example": "GET {{base_url}}/api/events/filters"
+    },
+    "list_get": {
+      "method": "GET",
+      "path": "/api/events",
+      "example": "GET {{base_url}}/api/events?location=Riyadh&domain=AI&limit=24&page=1",
+      "query": {
+        "location": "City or region. Empty, All, KSA, or Saudi Arabia = all cities.",
+        "domain": "Tech domain. Empty or All = every tech event.",
+        "category": "Optional. Meetup, Conference, Hackathon, Summit, Expo, Webinar, Workshop, Roundtable.",
+        "cost": "Optional. free or paid.",
+        "q": "Optional search in title, venue, or summary.",
+        "limit": "1 to 100. Default 24.",
+        "page": "Page number, starting at 1.",
+        "refresh": "true scrapes live first. Prefer /api/events/scrape for that."
+      }
+    },
+    "list_post": {
+      "method": "POST",
+      "path": "/api/events",
+      "content_type": "application/json",
+      "example_body": {
+        "location": "Riyadh",
+        "domain": "AI",
+        "category": "",
+        "cost": "",
+        "q": "",
+        "limit": 24,
+        "page": 1,
+        "refresh": false
+      }
+    },
+    "scrape": {
+      "method": "POST",
+      "path": "/api/events/scrape",
+      "example": "POST {{base_url}}/api/events/scrape?location=Riyadh&domain=AI&limit=24&page=1",
+      "timeout_ms": 60000,
+      "note": "Scrapes all KSA cities from the sources, saves them, then returns the filtered page."
+    },
+    "detail": {
+      "method": "GET",
+      "path": "/api/events/{event_id}",
+      "example": "GET {{base_url}}/api/events/riyadhtechweek__sabtiah-riyadh-ai-circle-2026-11-21"
+    },
+    "health": {
+      "method": "GET",
+      "path": "/api/health",
+      "check": "events must be true. events_feed has cached count and schedule_hours."
+    }
+  },
+  "sample_list_response": {
+    "events": [
+      {
+        "id": "riyadhtechweek__sabtiah-riyadh-ai-circle-2026-11-21",
+        "slug": "sabtiah-riyadh-ai-circle-2026-11-21",
+        "title": "Sabtiah — Riyadh's AI Circle",
+        "city": "Riyadh",
+        "region": "Riyadh",
+        "venue": "Sabtiah, Al Malqa",
+        "location": "Sabtiah, Al Malqa · Riyadh",
+        "start_date": "2026-11-21",
+        "end_date": "2026-11-21",
+        "date_label": "21 Nov 2026",
+        "when_label": "This weekend",
+        "start_time": "14:00",
+        "end_time": "16:00",
+        "category": "Meetup",
+        "domains": ["AI & Data"],
+        "cost": "unknown",
+        "summary": "Weekly in-person AI builders circle with discussion and demos; Arabic and English. Attendance and price are not stated.",
+        "url": "https://riyadhtechweek.com/events/sabtiah-riyadh-ai-circle-2026-11-21",
+        "website": "https://liqa.io/events/Y4DENJ8Z",
+        "source": "Riyadh Tech Week",
+        "source_id": "riyadhtechweek"
+      }
+    ],
+    "count": 1,
+    "total": 16,
+    "location": "Riyadh",
+    "domain": "AI",
+    "category": "",
+    "cost": "",
+    "q": "",
+    "pagination": {
+      "limit": 24,
+      "offset": 0,
+      "page": 1,
+      "pages": 1,
+      "has_more": false
+    }
+  },
+  "ui_mapping": {
+    "list": "events",
+    "title": "events[].title",
+    "city": "events[].city",
+    "when": "events[].date_label + events[].start_time",
+    "place": "events[].location or events[].venue",
+    "tags": "events[].domains",
+    "category": "events[].category",
+    "summary": "events[].summary",
+    "apply_or_rsvp_link": "events[].website (fallback events[].url)",
+    "detail_id": "events[].id",
+    "empty_state": "When total is 0, show hint if present, or ask the user to widen location/domain.",
+    "pagination": "pagination.page / pagination.pages / pagination.has_more"
+  },
+  "dropdown_hints": {
+    "locations_example": ["All", "Riyadh", "Jeddah", "Dammam", "Khobar", "Online"],
+    "domains_example": ["All", "AI", "Fintech", "Cybersecurity", "PropTech", "HealthTech", "Cloud & SaaS"]
+  },
+  "postman_collection": "postman/EzyJob KSA Tech Events.postman_collection.json"
+}

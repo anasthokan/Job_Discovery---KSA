@@ -78,6 +78,19 @@ DIRECTORY_HTML = """
 </body></html>
 """
 
+MIRSAD_HTML = """
+<article class="event-card" data-section="events">
+  <div class="event-datebox" aria-label="Nov 25, 2026, 6:00 – 9:00 PM"></div>
+  <div class="event-kicker"><span>Majarah</span></div>
+  <h2>Majarah AI Meetup</h2>
+  <div class="event-details"><span>Nov 25, 2026, 6:00 – 9:00 PM</span><span>CODE, Riyadh</span></div>
+  <p class="event-description">Community builders meetup.</p>
+  <button class="tag">AI</button>
+  <a class="event-link" href="https://www.eventbrite.com/e/majarah" data-event-id="eventbrite-riyadh-tech-rid8mq"></a>
+  <span data-price="free"></span>
+</article>
+"""
+
 SABTIAH_HTML = """
 <html><body>
 <a href="/sessions">Save your seat</a>
@@ -154,6 +167,7 @@ class ScrapeTests(unittest.TestCase):
             "https://riyadhtechweek.com/events/riyadh": GUIDE_HTML,
             "https://sabtiah.cycls.com": SABTIAH_HTML,
             "https://sabtiah.cycls.com/sessions": "<html><body><h1>Sessions</h1></body></html>",
+            "https://www.mirsad.cc/": MIRSAD_HTML,
         }
 
         def fetch(url: str) -> str:
@@ -173,10 +187,18 @@ class ScrapeTests(unittest.TestCase):
         titles = [event["title"] for event in report["events"]]
         self.assertIn("Sabtiah — Riyadh's AI Circle", titles)
         self.assertIn("Sabtiah Saturday", titles)
+        self.assertIn("Majarah AI Meetup", titles)
+        majarah = next(event for event in report["events"] if event["title"] == "Majarah AI Meetup")
+        self.assertEqual(majarah["start_time"], "18:00")
+        self.assertEqual(majarah["end_time"], "21:00")
+        self.assertEqual(majarah["city"], "Riyadh")
+        self.assertEqual(majarah["source"], "Mirsad")
+        self.assertEqual(majarah["cost"], "free")
         self.assertNotIn("Saudi Startup Majlis #4 — PropTech Edition", titles)
         sources = {row["id"]: row for row in report["sources"]}
         self.assertTrue(sources["riyadhtechweek"]["ok"])
         self.assertTrue(sources["sabtiah"]["ok"])
+        self.assertTrue(sources["mirsad"]["ok"])
         self.assertEqual(sources["riyadhtechweek"]["url"], "https://riyadhtechweek.com/events")
         self.assertIn("Jeddah", sources["riyadhtechweek"]["cities"])
         self.assertIn("Khobar", sources["riyadhtechweek"]["cities"])
@@ -239,7 +261,7 @@ class ScrapeTests(unittest.TestCase):
                 polite=False,
                 today=TODAY,
             )
-        self.assertTrue(all("sabtiah" not in url for url in seen))
+        self.assertTrue(all("sabtiah" not in url and "mirsad" not in url for url in seen))
         self.assertEqual(report["events"][0]["city"], "Jeddah")
 
     def test_unknown_country_does_not_fetch(self):
