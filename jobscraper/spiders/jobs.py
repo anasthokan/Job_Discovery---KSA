@@ -19,7 +19,19 @@ NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
 _PAGE_OFFSETS = (0, 100, 200)
 _EXTRA_CITIES = ("Riyadh", "Jeddah", "Dammam", "Khobar")
 _RESULTS_WANTED = 100
-_HOURS_OLD = 24 * 180
+# Broad fallback when days is 0 / unset. Scheduled runs pass SCRAPE_DAYS instead.
+_HOURS_OLD_BROAD = 24 * 180
+
+
+def hours_old_for_days(days: int) -> int:
+    """JobSpy hours_old for a whole-day lookback. days<=0 keeps the broad window."""
+    try:
+        window = int(days)
+    except (TypeError, ValueError):
+        window = 0
+    if window <= 0:
+        return _HOURS_OLD_BROAD
+    return max(24, window * 24)
 
 
 def take_toward_target(batch: list, saved: int, target: int) -> list:
@@ -125,7 +137,19 @@ class JobsSpider(scrapy.Spider):
 
     name = "jobs"
 
-    def __init__(self, keywords="", keywords_file="", location="All", city="", platform="All", target="0", run_id="0", *args, **kwargs):
+    def __init__(
+        self,
+        keywords="",
+        keywords_file="",
+        location="All",
+        city="",
+        platform="All",
+        target="0",
+        run_id="0",
+        days="0",
+        *args,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         raw = ""
         if keywords_file:
@@ -147,6 +171,11 @@ class JobsSpider(scrapy.Spider):
             self.run_id = int(run_id or 0) or None
         except (TypeError, ValueError):
             self.run_id = None
+        try:
+            self.days = max(0, int(days or 0))
+        except (TypeError, ValueError):
+            self.days = 0
+        self.hours_old = hours_old_for_days(self.days)
 
     def _search_queries(self) -> list[str]:
         return list(self.keywords)
@@ -242,12 +271,15 @@ class JobsSpider(scrapy.Spider):
         places = self._search_places()
         remote = self.location == "Remote"
         self.logger.info(
-            "Searching %s terms in %s places on %s boards, %s listings per page (target %s)",
+            "Searching %s terms in %s places on %s boards, %s listings per page "
+            "(target %s, days %s, hours_old %s)",
             len(queries),
             len(places),
             len(sites),
             _RESULTS_WANTED,
             self.target,
+            self.days,
+            self.hours_old,
         )
         saved = 0
         new_total = 0
@@ -283,7 +315,7 @@ class JobsSpider(scrapy.Spider):
                             is_remote=remote,
                             results_wanted=_RESULTS_WANTED,
                             max_terms=1,
-                            hours_old=_HOURS_OLD,
+                            hours_old=self.hours_old,
                             offset=page_offset,
                         )
                     except Exception:

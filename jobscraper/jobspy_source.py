@@ -133,7 +133,7 @@ def scrape(
     is_remote: bool = False,
     results_wanted: int = 100,
     max_terms: int = 4,
-    hours_old: int = 720,
+    hours_old: int = 168,
     offset: int = 0,
 ) -> list[dict]:
     """Return Saudi job dicts. Empty list if JobSpy is missing or every site fails.

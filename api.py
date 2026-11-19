@@ -46,6 +46,15 @@ from jobscraper.document_convert import (
 from jobscraper.jd_to_cv import JobToCvError, build_cv_from_job
 from jobscraper.ats_boards import ats_boards_status, interval_minutes as ats_boards_interval, sync_ats_boards
 from jobscraper.globaljobs import globaljobs_status, interval_minutes as globaljobs_interval, sync_global_jobs
+from jobscraper.events import (
+    EventsError,
+    event_filters,
+    events_status,
+    filter_events,
+    get_event,
+    load_events,
+    scrape_events,
+)
 from jobscraper.gulfdevjobs import gulfdevjobs_status, sync_gulf_jobs
 from jobscraper.headcount import headcount_status, interval_minutes as headcount_interval, scheduled as headcount_scheduled, sync_headcount
 from jobscraper.jobspy_source import board_scrape_block
@@ -174,6 +183,21 @@ def _scrape_target() -> int:
     return max(0, min(target, 20000))
 
 
+def _scrape_days(override: int | None = None) -> int:
+    """Whole-day lookback for JobSpy. Scheduled runs read SCRAPE_DAYS (default 7)."""
+    if override is not None:
+        try:
+            return max(0, int(override))
+        except (TypeError, ValueError):
+            pass
+    raw = _env("SCRAPE_DAYS", "7") or "7"
+    try:
+        days = int(raw)
+    except ValueError:
+        days = 7
+    return max(0, min(days, 180))
+
+
 def _kept_scrape_count() -> int:
     return sum(
         1
@@ -265,8 +289,9 @@ def scheduled_scrape() -> None:
                 db_total=mysql_job_count() if mysql_configured() else 0,
             )
             return
-        log.info("Scheduled scrape starting keywords=%s target=%s", keywords, target)
-        count = run_spider(keywords, state, platform, city, target) or _kept_scrape_count()
+        days = _scrape_days()
+        log.info("Scheduled scrape starting keywords=%s target=%s days=%s", keywords, target, days)
+        count = run_spider(keywords, state, platform, city, target, days=days) or _kept_scrape_count()
         db_total = mysql_job_count() if mysql_configured() else count
         _store_last_scrape(ok=True, error=None, count=count, db_total=db_total)
         log.info("Scheduled scrape finished count=%s db_total=%s", count, db_total)
@@ -1213,7 +1238,14 @@ def _recommend_payload(
                 raise HTTPException(status_code=409, detail="A scrape is already running. Try again in a moment.")
             try:
                 _arm_scrape_counts()
-                run_spider(",".join(terms), state, platform, city, _scrape_target())
+                run_spider(
+                    ",".join(terms),
+                    state,
+                    platform,
+                    city,
+                    _scrape_target(),
+                    days=_scrape_days(),
+                )
             except subprocess.TimeoutExpired as exc:
                 raise HTTPException(status_code=504, detail="Job scrape timed out.") from exc
             finally:
@@ -1331,7 +1363,14 @@ def _finish_scrape_stats(
     return saved
 
 
-def run_spider(keywords: str, location: str, platform: str, city: str = "", target: int = 0) -> int:
+def run_spider(
+    keywords: str,
+    location: str,
+    platform: str,
+    city: str = "",
+    target: int = 0,
+    days: int | None = None,
+) -> int:
     DATA_FILE.parent.mkdir(exist_ok=True)
     if DATA_FILE.exists():
         try:
@@ -1345,6 +1384,7 @@ def run_spider(keywords: str, location: str, platform: str, city: str = "", targ
     keyword_file = DATA_FILE.parent / "scrape_keywords.txt"
     keyword_file.write_text(keywords, encoding="utf-8")
     run_id = start_scrape_run(keywords, location, platform)
+    lookback_days = _scrape_days(days)
     try:
         result = sync_gulf_jobs()
         log.info("Gulf Dev Jobs sync during scrape: %s", result)
@@ -1368,6 +1408,8 @@ def run_spider(keywords: str, location: str, platform: str, city: str = "", targ
         f"target={max(0, int(target or 0))}",
         "-a",
         f"run_id={int(run_id or 0)}",
+        "-a",
+        f"days={lookback_days}",
         "-s",
         "LOG_LEVEL=INFO",
     ]
@@ -1637,6 +1679,7 @@ def health():
         "jobs_list": True,
         "jobs_recommend": True,
         "company_careers": True,
+        "events": True,
         "country": "Saudi Arabia",
         "save_fix": 4,
         "resume_parse": True,
@@ -1656,12 +1699,14 @@ def health():
             "enabled": _truthy("SCRAPE_SCHEDULE_ENABLED", "true"),
             "tz": _env("SCRAPE_TZ", "Asia/Riyadh") or "Asia/Riyadh",
             "hours": _schedule_hours(),
+            "days": _scrape_days(),
             "target": _scrape_target(),
         },
         "globaljobs": globaljobs_status(),
         "gulfdevjobs": gulfdevjobs_status(),
         "headcount": headcount_status(),
         "ats_boards": ats_boards_status(),
+        "events_feed": events_status(),
         "inactive_sources": inactive_source_ids(),
         "whatsapp_group": _whatsapp_group_status(),
     }
@@ -1881,12 +1926,151 @@ def company_careers_post(body: CompanyCareersRequest):
     return _company_careers(body.company, body.location, body.limit, body.refresh)
 
 
+class EventsRequest(BaseModel):
+    location: str = Field("", max_length=80, description="City or region, for example Riyadh or Jeddah")
+    domain: str = Field("", max_length=80, description="Tech domain, for example AI, Fintech, PropTech, or Cybersecurity")
+    category: str = Field("", max_length=40, description="Meetup, Conference, Hackathon, Summit, Expo, Webinar")
+    cost: str = Field("", max_length=16, description="free or paid")
+    q: str = Field("", max_length=120, description="Words to find in the title, venue, or summary")
+    limit: int = Field(24, ge=1, le=100)
+    page: int = Field(1, ge=1)
+    refresh: bool = Field(False, description="Scrape the Saudi tech calendar before filtering")
+
+
+def _events_response(
+    rows: list[dict],
+    *,
+    location: str,
+    domain: str,
+    category: str,
+    cost: str,
+    q: str,
+    limit: int,
+    page: int,
+    extra: dict | None = None,
+) -> dict:
+    offset = (page - 1) * limit
+    page_rows = _page(rows, limit, offset)
+    payload = {
+        "events": page_rows,
+        "count": len(page_rows),
+        "total": len(rows),
+        "location": (location or "").strip() or "Saudi Arabia",
+        "domain": (domain or "").strip() or "All",
+        "category": (category or "").strip(),
+        "cost": (cost or "").strip().lower(),
+        "q": q,
+        "pagination": _pagination(len(rows), limit, offset),
+    }
+    if not rows:
+        payload["hint"] = "POST /api/events/scrape?location=Riyadh&domain=AI to refresh the calendar."
+    if extra:
+        payload.update(extra)
+    return payload
+
+
+def _events_list(
+    location: str,
+    domain: str,
+    category: str,
+    cost: str,
+    q: str,
+    limit: int,
+    page: int,
+    refresh: bool,
+) -> dict:
+    extra = None
+    if refresh:
+        try:
+            report = scrape_events(location, domain)
+        except EventsError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        rows = filter_events(report["events"], location, domain, category, cost, q)
+        extra = {
+            "scraped_at": report.get("scraped_at"),
+            "stored": report.get("stored"),
+            "sources": report.get("sources"),
+            "note": report.get("note"),
+        }
+    else:
+        rows = filter_events(load_events(), location, domain, category, cost, q)
+    return _events_response(
+        rows,
+        location=location,
+        domain=domain,
+        category=category,
+        cost=cost,
+        q=q,
+        limit=limit,
+        page=page,
+        extra=extra,
+    )
+
+
+@app.get("/api/events/filters", summary="Cities, domains, and event sources")
+def events_filter_list():
+    """Locations and domains the event scraper understands."""
+    return event_filters()
+
+
+@app.get("/api/events", summary="Tech events for a location and domain")
+def list_events(
+    location: str = Query("", max_length=80, description="City or region, for example Riyadh, Jeddah, or Eastern Province"),
+    domain: str = Query("", max_length=80, description="Tech domain, for example AI, Fintech, PropTech, or Cybersecurity"),
+    category: str = Query("", max_length=40),
+    cost: str = Query("", max_length=16, description="free or paid"),
+    q: str = Query("", max_length=120),
+    limit: int = Query(24, ge=1, le=100),
+    page: int = Query(1, ge=1),
+    refresh: bool = Query(False, description="Scrape every Saudi city before filtering."),
+):
+    """Return saved tech events. refresh=true scrapes the sources for this location and domain first."""
+    return _events_list(location, domain, category, cost, q, limit, page, refresh)
+
+
+@app.post("/api/events", summary="Tech events for a location and domain")
+def list_events_post(body: EventsRequest):
+    """Return saved tech events. Set refresh=true to scrape first."""
+    return _events_list(
+        body.location,
+        body.domain,
+        body.category,
+        body.cost,
+        body.q,
+        body.limit,
+        body.page,
+        body.refresh,
+    )
+
+
+@app.post("/api/events/scrape", summary="Scrape tech events for a location and domain")
+def scrape_event_calendar(
+    location: str = Query("", max_length=80, description="City or region, for example Riyadh"),
+    domain: str = Query("", max_length=80, description="Tech domain, for example AI or PropTech"),
+    category: str = Query("", max_length=40),
+    cost: str = Query("", max_length=16),
+    q: str = Query("", max_length=120),
+    limit: int = Query(24, ge=1, le=100),
+    page: int = Query(1, ge=1),
+):
+    """Scrape tech events in every Saudi city, then return the ones that match this location and domain."""
+    return _events_list(location, domain, category, cost, q, limit, page, True)
+
+
+@app.get("/api/events/{event_id}", summary="One saved tech event")
+def event_detail(event_id: str):
+    event = get_event(event_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail="Event not found. Scrape the calendar first.")
+    return event
+
+
 @app.post("/api/scrape")
 def scrape_jobs(
     keywords: str = Query(""),
     state: str = Query("All"),
     platform: str = Query("All"),
-    days: int = Query(30),
+    days: int = Query(7, description="Only keep board listings posted within this many days. 0 uses a broad window."),
     city: str = Query(""),
     target: int = Query(0, ge=0, le=20000, description="How many jobs to aim for. 5000 searches many fields and takes one to two hours."),
 ):
@@ -1896,9 +2080,10 @@ def scrape_jobs(
         raise HTTPException(status_code=400, detail=blocked)
     if not _claim_scrape():
         raise HTTPException(status_code=409, detail="A scrape is already running. Try again in a moment.")
+    lookback = _scrape_days(days)
     thread = threading.Thread(
         target=_scrape_background,
-        args=(keywords, state, platform, city, target),
+        args=(keywords, state, platform, city, target, lookback),
         name="job-scrape",
         daemon=True,
     )
@@ -1917,12 +2102,20 @@ def scrape_jobs(
             "started": True,
             "running": True,
             "target": response_target,
+            "days": lookback,
             "message": message,
         },
     )
 
 
-def _scrape_background(keywords: str, state: str, platform: str, city: str, target: int = 0) -> None:
+def _scrape_background(
+    keywords: str,
+    state: str,
+    platform: str,
+    city: str,
+    target: int = 0,
+    days: int | None = None,
+) -> None:
     try:
         _arm_scrape_counts()
         from_database = not (keywords or "").strip()
@@ -1939,10 +2132,11 @@ def _scrape_background(keywords: str, state: str, platform: str, city: str, targ
         # the stored skills and certifications, not exit after an empty pass.
         if from_database and target <= 0:
             target = _scrape_target()
-        count = run_spider(keywords, state, platform, city, target) or _kept_scrape_count()
+        lookback = _scrape_days(days)
+        count = run_spider(keywords, state, platform, city, target, days=lookback) or _kept_scrape_count()
         db_total = mysql_job_count() if mysql_configured() else count
         _store_last_scrape(ok=True, error=None, count=count, db_total=db_total)
-        log.info("Scrape saved %s jobs (db_total=%s)", count, db_total)
+        log.info("Scrape saved %s jobs (db_total=%s days=%s)", count, db_total, lookback)
     except Exception as exc:
         detail = getattr(exc, "detail", None) or str(exc)
         saved = read_scrape_progress()
@@ -2027,6 +2221,7 @@ def scrape_status():
             "enabled": _truthy("SCRAPE_SCHEDULE_ENABLED", "true"),
             "tz": _env("SCRAPE_TZ", "Asia/Riyadh") or "Asia/Riyadh",
             "hours": _schedule_hours(),
+            "days": _scrape_days(),
             "keywords": _env("SCRAPE_KEYWORDS", ""),
             "target": _scrape_target(),
             "state": _env("SCRAPE_STATE", "All") or "All",
