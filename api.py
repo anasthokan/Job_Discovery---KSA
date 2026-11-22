@@ -91,6 +91,7 @@ from jobscraper.recommend import (
     search_phrase,
 )
 from jobscraper.score_config import score_config
+from jobscraper.signup_digest import digest_status, send_signup_digest
 from jobscraper.linkedin_profile import LinkedInProfileError, autofill_from_linkedin
 from jobscraper.profile_autofill import autofill_from_parsed
 from jobscraper.ollama_resume import ollama_status
@@ -308,7 +309,9 @@ def scheduled_scrape() -> None:
 
 
 def _start_scheduler() -> BackgroundScheduler | None:
-    if not _truthy("SCRAPE_SCHEDULE_ENABLED", "true"):
+    scrape_on = _truthy("SCRAPE_SCHEDULE_ENABLED", "true")
+    report = digest_status()
+    if not scrape_on and not report["enabled"]:
         log.info("Scrape schedule disabled")
         return None
     tz_name = _env("SCRAPE_TZ", "Asia/Riyadh") or "Asia/Riyadh"
@@ -320,6 +323,24 @@ def _start_scheduler() -> BackgroundScheduler | None:
         tz = ZoneInfo("UTC")
     hours = _schedule_hours()
     scheduler = BackgroundScheduler(timezone=tz)
+    if report["enabled"]:
+        scheduler.add_job(
+            send_signup_digest,
+            "cron",
+            hour=int(report["at"].split(":")[0]),
+            minute=int(report["at"].split(":")[1]),
+            timezone=ZoneInfo(report["tz"]),
+            id="signup-digest",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=3600,
+        )
+        log.info("Signup digest: %s %s on WhatsApp", report["at"], report["tz"])
+    if not scrape_on:
+        scheduler.start()
+        log.info("Scrape schedule disabled")
+        return scheduler
     for hour in hours:
         scheduler.add_job(
             scheduled_scrape,
@@ -1716,6 +1737,7 @@ def health():
             "days": _scrape_days(),
             "target": _scrape_target(),
         },
+        "signup_digest": digest_status(),
         "globaljobs": globaljobs_status(),
         "gulfdevjobs": gulfdevjobs_status(),
         "headcount": headcount_status(),
@@ -2241,6 +2263,7 @@ def scrape_status():
             "state": _env("SCRAPE_STATE", "All") or "All",
             "platform": _env("SCRAPE_PLATFORM", "All") or "All",
         },
+        "signup_digest": digest_status(),
         "globaljobs": globaljobs_status(),
         "gulfdevjobs": gulfdevjobs_status(),
         "headcount": headcount_status(),
